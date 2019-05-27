@@ -40,7 +40,7 @@ class StatsClient:
         tags = (tags or {}).copy()
         try:
             yield
-        except:  # pylint: disable=broad-except,bare-except
+        except:  # noqa pylint: disable=broad-except,bare-except
             tags["success"] = "0"
             self.timing(metric, time.monotonic() - start_time, tags)
             raise
