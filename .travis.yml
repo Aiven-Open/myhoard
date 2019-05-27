@@ -1,0 +1,30 @@
+dist: xenial
+sudo: true
+language: python
+
+python:
+  - "3.6"
+  - "3.7"
+
+addons:
+  apt:
+    packages:
+      - libsnappy-dev
+
+install:
+  - pip install flake8 pylint pytest pytest-cov yapf
+  - pip install -r requirements.txt
+
+before_script:
+  - wget https://dev.mysql.com/get/mysql-apt-config_0.8.13-1_all.deb
+  - wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
+  - sudo dpkg -i mysql-apt-config_0.8.13-1_all.deb
+  - sudo dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
+  - sudo percona-release enable-only tools
+  - sudo apt-get update -q
+  - sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew mysql-server
+  - sudo apt-get install percona-xtrabackup-80
+
+script:
+  - make test
+
