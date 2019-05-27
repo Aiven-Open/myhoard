@@ -1,0 +1,16 @@
+*.pyc
+*.pyo
+*~
+.cache
+.coverage
+.idea/
+.project
+.pydevproject
+.pytest_cache/
+__pycache__/
+build/
+dist/
+myhoard/version.py
+myhoard.egg-info/
+myhoard-rpm-src.tar
+rpm/

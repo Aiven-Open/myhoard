@@ -1,0 +1,17 @@
+[Unit]
+Description=MySQL streaming backup service
+
+[Service]
+User=mysql
+Group=mysql
+Type=notify
+Restart=always
+ExecStart=/usr/bin/myhoard --config /var/lib/myhoard/myhoard.json
+ExecReload=/bin/kill -HUP $MAINPID
+WorkingDirectory=/var/lib/myhoard
+# Percona XtraBackup needs to keep all database tables open simultaneously and it inherits our
+# nofile limit. Set to very large number to allow it to operate in large environments
+LimitNOFILE=2000000
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,61 @@
+{
+    "backup_settings": {
+        "backup_age_days_max": 14,
+        "backup_count_max": 30,
+        "backup_count_min": 14,
+        "backup_hour": 3,
+        "backup_interval_minutes": 1440,
+        "backup_minute": 0,
+        "forced_binlog_rotation_interval": 300,
+        "upload_site": "default"
+    },
+    "backup_sites": {
+        "default": {
+            "encryption_keys": {
+                "private": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----",
+                "public": "-----BEGIN PUBLIC KEY-----\n...-----END PUBLIC KEY-----\n"
+            },
+            "object_storage": {
+                "directory": "/tmp/sample_backup_dir",
+                "storage_type": "local"
+            },
+            "recovery_only": false
+        }
+    },
+    "binlog_purge_settings": {
+        "enabled": true,
+        "min_binlog_age_before_purge": 600,
+        "purge_interval": 60,
+        "purge_when_observe_no_streams": true
+    },
+    "http_address": "127.0.0.1",
+    "http_port": 16001,
+    "mysql": {
+        "binlog_prefix": "/var/lib/mysql/binlog",
+        "client_params": {
+            "host": "127.0.0.1",
+            "password": "NgLqvU8gbWCtfJWJPy",
+            "port": 3306,
+            "user": "root"
+        },
+        "config_file_name": "/etc/my.cnf",
+        "data_directory": "/var/lib/mysql",
+        "relay_log_index_file": "/var/lib/mysql/relay.index",
+        "relay_log_prefix": "/var/lib/mysql/relay"
+    },
+    "restore_max_binlog_bytes": 4294967296,
+    "sentry_dsn": null,
+    "server_id": 1,
+    "start_command": ["/usr/sbin/mysqld", "--defaults-file=/etc/my.cnf", "--basedir=/opt/mysql"],
+    "state_directory": "/tmp/sample_state_dir",
+    "statsd": {
+        "host": null,
+        "port": null,
+        "tags": {
+            "app": "myhoard"
+        }
+    },
+    "systemctl_command": ["sudo", "/usr/bin/systemctl"],
+    "systemd_service": "mysql-server",
+    "temporary_directory": "/var/tmp/sample_temp_dir"
+}
