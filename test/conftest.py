@@ -166,7 +166,9 @@ FLUSH PRIVILEGES;
         "user": "root",
     }
 
-    cmd = [mysqld_bin, f"--defaults-file={config_file}", f"--basedir={mysql_basedir}"]
+    cmd = [mysqld_bin, f"--defaults-file={config_file}"]
+    if mysql_basedir:
+        cmd.append(f"--basedir={mysql_basedir}")
     if empty:
         # Empty server is used for restoring data. Wipe data directory and don't start the server
         shutil.rmtree(data_dir)
