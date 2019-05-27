@@ -196,6 +196,7 @@ class DataGenerator(threading.Thread):
 
     def __init__(self, *, connect_info, index_offset=0, make_temp_tables=True):
         super().__init__()
+        self.basic_wait = 0.1
         self.committed_row_count = 0
         self.connect_info = connect_info
         self.estimated_bytes = 0
@@ -222,7 +223,7 @@ class DataGenerator(threading.Thread):
                     self.direct_data_generate(cursor1)
                     if self.make_temp_tables:
                         self.indirect_data_generate(cursor2)
-                    time.sleep(0.1)
+                    time.sleep(self.basic_wait)
 
                 for table_name in self.temp_tables:
                     cursor2.execute(f"INSERT INTO db1.t1 (id, data) SELECT id, data FROM {table_name}")
@@ -236,8 +237,8 @@ class DataGenerator(threading.Thread):
             self.join()
 
     def direct_data_generate(self, cursor):
-        do_commit = random.random() < 0.30
-        do_flush = random.random() < 0.2
+        do_commit = random.random() < self.basic_wait * 3
+        do_flush = random.random() < self.basic_wait * 2
         self.pending_row_count += self.generate_rows(cursor, "db1.t1")
         if do_commit:
             self.committed_row_count += self.pending_row_count

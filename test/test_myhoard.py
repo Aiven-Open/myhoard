@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 
 import pytest
 import requests
@@ -34,7 +35,9 @@ def test_basic_daemon_execution(myhoard_config):
     with open(config_name, "w") as f:
         json.dump(myhoard_config, f)
 
-    cmd = ["python3", "-c", "from myhoard.myhoard import main; main()", "--config", config_name, "--log-level", "DEBUG"]
+    python3 = sys.executable or os.environ.get("PYTHON", "python3")
+    cmd = [python3, "-c", "from myhoard.myhoard import main; main()", "--config", config_name, "--log-level", "DEBUG"]
+    print("Running command", cmd)
     proc = subprocess.Popen(cmd, env={"PYTHONPATH": ROOT_DIR})
     try:
         http_address = myhoard_config["http_address"]

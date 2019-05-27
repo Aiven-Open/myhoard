@@ -8,7 +8,6 @@ License:        ASL 2.0
 Source0:        myhoard-rpm-src.tar
 BuildRequires:  percona-xtrabackup-80 >= 8.0
 BuildRequires:  pghoard >= 2.0.0-115
-BuildRequires:  procps
 BuildRequires:  python3-aiohttp
 BuildRequires:  python3-devel
 BuildRequires:  python3-flake8
@@ -22,7 +21,6 @@ BuildRequires:  python3-yapf
 BuildRequires:  rpm-build
 Requires:       percona-xtrabackup-80 >= 8.0
 Requires:       pghoard >= 2.0.0-115
-Requires:       procps
 Requires:       python3-aiohttp
 Requires:       python3-cryptography >= 0.8
 Requires:       python3-PyMySQL >= 0.9.2

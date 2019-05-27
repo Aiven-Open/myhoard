@@ -184,7 +184,18 @@ def test_3_node_service_failover_and_restore(
                 )
                 new_master_dg.start()
 
+                start_time = time.monotonic()
+                wait_increased = []
+
                 def restore_complete():
+                    # Stop generating data for the old master after a while to reduce disk IO pressure so
+                    # that standby can make better progress catching up with master
+                    if time.monotonic() - start_time > 15:
+                        master_dg.stop()
+                    # Make data generation slower after a while to ensure standby can catch up
+                    if time.monotonic() - start_time > 30 and not wait_increased:
+                        new_master_dg.basic_wait = new_master_dg.basic_wait * 2
+                        wait_increased.append(True)
                     new_master_cursor.execute("FLUSH BINARY LOGS")
                     return s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete()
 
