@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 import copy
 import os
+import subprocess
 from datetime import datetime
 
 import myhoard.util as myhoard_util
@@ -254,5 +255,7 @@ def test_encrypt_decrypt():
 def test_detect_running_process_id():
     pytest_id = myhoard_util.detect_running_process_id("python3 -m pytest")
     coverage_id = myhoard_util.detect_running_process_id("python3 -m coverage")
-    assert pytest_id is not None or coverage_id is not None
+    if pytest_id is None and coverage_id is None:
+        output = subprocess.check_output(["ps", "-x", "--cols", "1000", "-o", "pid,command"])
+        raise AssertionError(f"None of the commands included in ps output {output!r}")
     assert myhoard_util.detect_running_process_id("certainlynosuchprocesscurrentlyrunning") is None

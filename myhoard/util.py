@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -412,7 +413,8 @@ def detect_running_process_id(command):
     output = subprocess.check_output(["ps", "-x", "--cols", "1000", "-o", "pid,command"])
     # We don't expect to have non-ASCII characters, convert using ISO-8859-1, which should always work without raising
     output = output.decode("ISO-8859-1")
-    ids = [int(line.strip().split()[0]) for line in output.splitlines() if command in line]
+    regex = re.compile(r"^\s*\d+\s+{}".format(re.escape(command)))
+    ids = [int(line.strip().split()[0]) for line in output.splitlines() if regex.match(line)]
     if not ids or len(ids) > 1:
         return None
     return ids[0]
