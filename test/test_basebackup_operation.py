@@ -89,7 +89,7 @@ def test_stream_handler_error_is_propagated(mysql_master):
         stream_handler=stream_handler,
         temp_dir=mysql_master["base_dir"],
     )
-    with pytest.raises(ValueError, message="This is test error"):
+    with pytest.raises(ValueError, match="^This is test error$"):
         op.create_backup()
 
 
@@ -99,7 +99,7 @@ def test_fails_on_invalid_params(mysql_master):
 
     op = BasebackupOperation(
         encryption_algorithm="nosuchalgo",
-        encryption_key="/tmp/nosuchkey",
+        encryption_key=os.urandom(24),
         mysql_client_params={
             "host": "127.0.0.1",
         },
@@ -109,5 +109,5 @@ def test_fails_on_invalid_params(mysql_master):
         stream_handler=stream_handler,
         temp_dir=mysql_master["base_dir"],
     )
-    with pytest.raises(Exception, message="xtrabackup exited with non-zero exit code 1: b''"):
+    with pytest.raises(Exception, match="^xtrabackup failed with code 13$"):
         op.create_backup()
