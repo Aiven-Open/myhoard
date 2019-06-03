@@ -224,12 +224,15 @@ def fixture_default_backup_site(session_tmpdir, encryption_keys):
     backup_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "backups"))
     os.makedirs(backup_dir)
     backup_site = {
-        "recovery_only": False,
+        "compression": {
+            "algorithm": "snappy",
+        },
         "encryption_keys": encryption_keys,
         "object_storage": {
             "directory": backup_dir,
             "storage_type": "local",
-        }
+        },
+        "recovery_only": False,
     }
     yield backup_site
 

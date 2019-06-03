@@ -72,6 +72,7 @@ class BackupStream(threading.Thread):
         *,
         backup_reason,
         binlogs=None,
+        compression=None,
         file_storage,
         file_uploaded_callback=None,
         mode,
@@ -92,6 +93,7 @@ class BackupStream(threading.Thread):
         self.basebackup_bytes_uploaded = 0
         self.basebackup_operation = None
         self.basebackup_progress = None
+        self.compression = compression
         self.current_upload_index = None
         self.file_storage = file_storage
         self.file_uploaded_callback = file_uploaded_callback
@@ -900,7 +902,9 @@ class BackupStream(threading.Thread):
         # minus one in first bucket since index starts from 1)
         bucket = next_index // BINLOG_BUCKET_SIZE
         index_name = self._build_full_name(f"binlogs/{bucket}/{next_index}_{self.server_id}")
-        compression_algorithm = "snappy"
+        # pylint: disable=consider-using-ternary
+        compression_algorithm = (self.compression and self.compression.get("algorithm")) or "snappy"
+        compression_level = (self.compression and self.compression.get("level")) or 0
         binlog = dict(binlog)
         binlog["remote_index"] = next_index
         binlog["remote_key"] = index_name
@@ -925,7 +929,7 @@ class BackupStream(threading.Thread):
                     self.stats.increase("myhoard.binlog.remote_copy")
                 else:
                     with open(binlog["full_name"], "rb") as input_file:
-                        compress_stream = CompressionStream(input_file, compression_algorithm)
+                        compress_stream = CompressionStream(input_file, compression_algorithm, compression_level)
                         encrypt_stream = EncryptorStream(compress_stream, self.rsa_public_key_pem)
                         self.file_storage.store_file_object(index_name, encrypt_stream, metadata=metadata)
                         self.stats.increase("myhoard.binlog.upload")
