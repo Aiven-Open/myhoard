@@ -11,6 +11,9 @@
     },
     "backup_sites": {
         "default": {
+            "compression": {
+                "algorithm": "snappy"
+            },
             "encryption_keys": {
                 "private": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----",
                 "public": "-----BEGIN PUBLIC KEY-----\n...-----END PUBLIC KEY-----\n"

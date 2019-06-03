@@ -229,6 +229,20 @@ pick whatever names you like.
 
 Each site has the following configuration options:
 
+**backup_sites.{name}.compression**
+
+The compression method and option to use for binary logs uploaded to this
+site:
+
+**backup_sites.{name}.compression.algorithm**
+
+One of the supported compression algorithms: ``lzma``, ``snappy``, ``zstd``.
+Defaults to ``snappy``.
+
+**backup_sites.{name}.compression.level**
+
+Compression level for ``lzma`` or ``zstd``.
+
 **backup_sites.{name}.encryption_keys**
 
 This is an object containing two keys, ``public`` and ``private``. These define

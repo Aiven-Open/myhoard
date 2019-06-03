@@ -475,6 +475,7 @@ class Controller(threading.Thread):
         # data stored in local state file if available or in backup file storage if local state is not available
         return BackupStream(
             backup_reason=None,
+            compression=backup_site.get("compression"),
             file_storage=get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
             # Always create in observe mode, will be switched to
@@ -1168,6 +1169,7 @@ class Controller(threading.Thread):
         stream = BackupStream(
             backup_reason=backup_reason,
             binlogs=self.binlog_scanner.binlogs,
+            compression=backup_site.get("compression"),
             file_storage=get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
             mode=BackupStream.Mode.active,

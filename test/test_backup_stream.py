@@ -42,6 +42,10 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     _private_key_pem, public_key_pem = generate_rsa_key_pair()
     bs = backup_stream_class(
         backup_reason=BackupStream.BackupReason.requested,
+        compression={
+            "algorithm": "lzma",
+            "level": 1,
+        },
         file_storage=file_storage,
         mode=BackupStream.Mode.active,
         mysql_client_params=mysql_master["connect_options"],
@@ -110,6 +114,8 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     assert bs_observer.is_binlog_safe_to_delete(new_binlogs[0])
     # This stream isn't in active mode so is_log_backed_up will return false for any input
     assert not bs_observer.is_log_backed_up(log_index=new_binlogs[0]["local_index"])
+    # Check the compression algorithm for binlogs is set as expected
+    assert bs_observer.remote_binlogs[0]["compression_algorithm"] == "lzma"
 
     assert bs.state["basebackup_errors"] == 0
     assert bs.state["remote_read_errors"] == 0
