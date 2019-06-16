@@ -46,7 +46,7 @@ def test_3_node_service_failover_and_restore(
     try:
         master_dg.start()
 
-        phase_duration = 0.5
+        phase_duration = 1
         time.sleep(phase_duration)
         assert master_dg.row_count > 0
 
@@ -449,6 +449,78 @@ def test_manual_backup_creation(master_controller):
     time.sleep(0.1)
     current_backups = set(backup["stream_id"] for backup in mcontroller.state["backups"] if backup["completed_at"])
     assert len(current_backups) == 5
+
+
+def test_automatic_old_backup_recovery(default_backup_site, master_controller, mysql_empty, session_tmpdir):
+    mcontroller, master = master_controller
+
+    # Empty server will be initialized from backup that has been created from master so it'll use the same password
+    # (normally all servers should be restored from same backup but we're not simulating that here now)
+    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+
+    mcontroller.switch_to_active_mode()
+    mcontroller.start()
+
+    def streaming_binlogs():
+        assert mcontroller.backup_streams
+        assert all(bs.active_phase == BackupStream.ActivePhase.binlog for bs in mcontroller.backup_streams)
+
+    while_asserts(streaming_binlogs, timeout=10)
+
+    # Write some data to database that predates second backup
+    with mysql_cursor(**master["connect_options"]) as cursor:
+        cursor.execute("CREATE TABLE foo (id INTEGER)")
+        cursor.execute("INSERT INTO foo VALUES (1)")
+        cursor.execute("COMMIT")
+        cursor.execute("FLUSH BINARY LOGS")
+
+    mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+
+    def has_multiple_streams():
+        assert len(mcontroller.backup_streams) > 1
+
+    while_asserts(has_multiple_streams, timeout=10)
+    while_asserts(streaming_binlogs, timeout=10)
+
+    # Insert something that is only included in the second backup
+    with mysql_cursor(**master["connect_options"]) as cursor:
+        cursor.execute("INSERT INTO foo VALUES (2)")
+        cursor.execute("COMMIT")
+        cursor.execute("FLUSH BINARY LOGS")
+
+    # Corrupt second basebackup just uploading dummy bytes should do it
+    bs = mcontroller.backup_streams[0]
+    basebackup_name = f"{bs.site}/{bs.stream_id}/basebackup.xbstream"
+    bs.file_storage.store_file_from_memory(basebackup_name, b"abc")
+
+    # Restore last backup to empty server. This should initially fail because basebackup is
+    # broken but succeed because it then proceeds restoring the earlier backup
+    new_controller = build_controller(
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    new_controller.stats = MagicMock()
+    new_controller.start()
+    try:
+        wait_for_condition(lambda: new_controller.state["backups_fetched_at"] != 0, timeout=2)
+        new_controller.restore_backup(site=bs.site, stream_id=bs.stream_id)
+
+        def restore_complete():
+            return new_controller.restore_coordinator and new_controller.restore_coordinator.is_complete()
+
+        wait_for_condition(restore_complete, timeout=30)
+        new_controller.stats.increase.assert_any_call("myhoard.restore_errors")
+        new_controller.stats.increase.assert_any_call("myhoard.basebackup_broken")
+    finally:
+        new_controller.stop()
+
+    # Check we have all the expected data available
+    with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+        cursor.execute("SELECT id FROM foo")
+        results = cursor.fetchall()
+        assert len(results) == 2
+        assert {result["id"] for result in results} == {1, 2}
 
 
 def test_binlog_auto_rotation(master_controller):

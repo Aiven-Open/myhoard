@@ -205,6 +205,7 @@ class DataGenerator(threading.Thread):
         self.index_offset = index_offset
         self.is_running = True
         self.make_temp_tables = make_temp_tables
+        self.paused = False
         self.pending_row_count = 0
         self.row_count = 0
         self.row_infos = []
@@ -218,8 +219,11 @@ class DataGenerator(threading.Thread):
                 cursor1.execute("CREATE TABLE IF NOT EXISTS db1.t1 (id INTEGER PRIMARY KEY, data TEXT)")
                 while self.is_running:
                     if not self.generate_data_event.wait(timeout=0.1):
+                        self.commit_pending(cursor1)
+                        self.paused = True
                         continue
 
+                    self.paused = False
                     self.direct_data_generate(cursor1)
                     if self.make_temp_tables:
                         self.indirect_data_generate(cursor2)
@@ -236,14 +240,20 @@ class DataGenerator(threading.Thread):
         with contextlib.suppress(Exception):
             self.join()
 
+    def commit_pending(self, cursor):
+        if not self.pending_row_count:
+            return
+
+        self.committed_row_count += self.pending_row_count
+        self.pending_row_count = 0
+        cursor.execute("COMMIT")
+
     def direct_data_generate(self, cursor):
         do_commit = random.random() < self.basic_wait * 3
         do_flush = random.random() < self.basic_wait * 2
         self.pending_row_count += self.generate_rows(cursor, "db1.t1")
         if do_commit:
-            self.committed_row_count += self.pending_row_count
-            self.pending_row_count = 0
-            cursor.execute("COMMIT")
+            self.commit_pending(cursor=cursor)
         if do_flush:
             self.committed_row_count += self.pending_row_count
             self.pending_row_count = 0
