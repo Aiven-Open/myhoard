@@ -184,16 +184,16 @@ class Controller(threading.Thread):
             else:
                 raise ValueError(f"Requested backup {stream_id!r} for site {site!r} not found")
 
-            state_file_name = os.path.join(self.state_dir, "restore_coordinator_state.json")
-            # If we're retrying restoration there could be an old state file, make sure to delete it
-            # so that obsolete state doesn't get reused
-            with contextlib.suppress(Exception):
-                os.remove(state_file_name)
             self.log.info("Restoring backup stream %r, target time %r", stream_id, target_time)
             self.state_manager.update_state(
                 mode=self.Mode.restore,
                 restore_options={
-                    "state_file": state_file_name,
+                    "binlog_streams": [{
+                        "site": site,
+                        "stream_id": stream_id,
+                    }],
+                    "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
+                    "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
                     "stream_id": stream_id,
                     "site": site,
                     "target_time": target_time,
@@ -556,6 +556,7 @@ class Controller(threading.Thread):
         storage_config = backup_site["object_storage"]
         self.log.info("Creating new restore coordinator")
         self.restore_coordinator = RestoreCoordinator(
+            binlog_streams=options["binlog_streams"],
             file_storage_config=storage_config,
             max_binlog_bytes=self.restore_max_binlog_bytes,
             mysql_client_params=self.mysql_client_params,
@@ -563,6 +564,7 @@ class Controller(threading.Thread):
             mysql_data_directory=self.mysql_data_directory,
             mysql_relay_log_index_file=self.mysql_relay_log_index_file,
             mysql_relay_log_prefix=self.mysql_relay_log_prefix,
+            pending_binlogs_state_file=options["pending_binlogs_state_file"],
             restart_mysqld_callback=self.restart_mysqld_callback,
             rsa_private_key_pem=backup_site["encryption_keys"]["private"],
             site=options["site"],
@@ -743,6 +745,22 @@ class Controller(threading.Thread):
                 return backup["site"]
         raise KeyError(f"Stream {stream_id} not found in backups")
 
+    def _get_restore_coordinator_state_file_and_remove_old(self):
+        state_file_name = os.path.join(self.state_dir, "restore_coordinator_state.json")
+        # If we're retrying restoration there could be an old state file, make sure to delete it
+        # so that obsolete state doesn't get reused
+        with contextlib.suppress(Exception):
+            os.remove(state_file_name)
+        return state_file_name
+
+    def _get_restore_coordinator_pending_state_file_and_remove_old(self):
+        state_file_name = os.path.join(self.state_dir, "restore_coordinator_state.pending_binlogs")
+        # If we're retrying restoration there could be an old state file, make sure to delete it
+        # so that obsolete state doesn't get reused
+        with contextlib.suppress(Exception):
+            os.remove(state_file_name)
+        return state_file_name
+
     def _handle_mode_active(self):
         self._cache_server_uuid_if_missing()
         self._set_uploaded_binlog_references()
@@ -807,6 +825,8 @@ class Controller(threading.Thread):
         # read replica connects to the new server and must be able to download missing binlogs from there
         self._purge_old_binlogs(mysql_maybe_not_running=True)
         self._process_local_binlog_updates()
+        if self.restore_coordinator.phase == RestoreCoordinator.Phase.failed_basebackup:
+            self._switch_basebackup_if_possible()
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()
@@ -1195,6 +1215,45 @@ class Controller(threading.Thread):
     def _state_file_from_stream_id(self, stream_id):
         safe_stream_id = stream_id.replace(":", "_").replace(".", "_")
         return os.path.join(self.state_dir, f"{safe_stream_id}.json")
+
+    def _switch_basebackup_if_possible(self):
+        # We're trying to restore a backup but that keeps on failing in the basebackup restoration phase.
+        # If we have an older backup available try restoring that and play back all binlogs so that the
+        # system should end up in the exact same state eventually.
+        backups = sorted(
+            (backup for backup in self.state["backups"] if backup["completed_at"]), key=lambda d: d["completed_at"]
+        )
+        current_stream_id = self.state["restore_options"]["stream_id"]
+        earlier_backup = None
+        for backup in backups:
+            if backup["stream_id"] == current_stream_id:
+                break
+            else:
+                earlier_backup = backup
+        else:
+            raise Exception(f"Stream {current_stream_id} being restored not found in completed backups: {backups}")
+
+        if earlier_backup:
+            self.log.info("Earlier backup %r is available, restoring basebackup from that", earlier_backup)
+            options = self.state["restore_options"]
+            self.restore_coordinator.stop()
+            self.state_manager.update_state(restore_options={
+                # Get binlogs from all backup streams
+                "binlog_streams": [{
+                    "site": earlier_backup["site"],
+                    "stream_id": earlier_backup["stream_id"],
+                }] + options["binlog_streams"],
+                "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
+                "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
+                "stream_id": earlier_backup["stream_id"],
+                "site": earlier_backup["site"],
+                "target_time": options["target_time"],
+            })
+            self.restore_coordinator = None
+        else:
+            # Switch restore coordinator to permanently failed mode
+            self.log.info("No earlier basebackup available, cannot recover")
+            self.restore_coordinator.update_state(phase=RestoreCoordinator.Phase.failed)
 
     def _update_stream_completed_and_closed_statuses(self):
         """Mark streams that are catching up with earlier streams as completed when they catch up with the

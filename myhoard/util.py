@@ -395,12 +395,14 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
                 server_id, ranges
             )
         else:
-            if index != last_index + 1:
+            adjusted_index = binlog.get("adjusted_remote_index", index)
+            if adjusted_index != last_index + 1:
                 raise Exception(
-                    "Binlog sequence has a gap, expected {} after {}, found {}".format(last_index + 1, last_index, index)
+                    f"Binlog sequence has a gap, expected {last_index + 1} after {last_index}, found {adjusted_index}: "
+                    f"{binlog} / {binlogs}"
                 )
             valid_binlogs.append(binlog)
-            last_index = index
+            last_index = adjusted_index
 
     return valid_binlogs
 

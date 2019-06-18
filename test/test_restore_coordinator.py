@@ -33,7 +33,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     backup_target_location = session_tmpdir().strpath
     file_storage = LocalTransfer(backup_target_location)
     state_file_name = os.path.join(session_tmpdir().strpath, "backup_stream.json")
-    bs = BackupStream(
+    bs1 = BackupStream(
         backup_reason=BackupStream.BackupReason.requested,
         file_storage=file_storage,
         mode=BackupStream.Mode.active,
@@ -41,6 +41,23 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         mysql_config_file_name=mysql_master["config_name"],
         mysql_data_directory=mysql_master["config_options"]["datadir"],
         normalized_backup_time="2019-02-25T08:20",
+        rsa_public_key_pem=public_key_pem,
+        server_id=mysql_master["server_id"],
+        site="default",
+        state_file=state_file_name,
+        stats=build_statsd_client(),
+        temp_dir=mysql_master["base_dir"],
+    )
+    # Use two backup streams to test recovery mode where basebackup is restored from earlier
+    # backup and binlogs are applied from several different backups
+    bs2 = BackupStream(
+        backup_reason=BackupStream.BackupReason.requested,
+        file_storage=file_storage,
+        mode=BackupStream.Mode.active,
+        mysql_client_params=mysql_master["connect_options"],
+        mysql_config_file_name=mysql_master["config_name"],
+        mysql_data_directory=mysql_master["config_options"]["datadir"],
+        normalized_backup_time="2019-02-26T08:20",
         rsa_public_key_pem=public_key_pem,
         server_id=mysql_master["server_id"],
         site="default",
@@ -72,7 +89,9 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         state_file=os.path.join(session_tmpdir().strpath, "scanner_state.json"),
         stats=build_statsd_client(),
     )
-    bs.add_binlogs(scanner.scan_new(None))
+    binlogs = scanner.scan_new(None)
+    bs1.add_binlogs(binlogs)
+    bs2.add_binlogs(binlogs)
 
     print(
         int(time.monotonic() - data_gen_start),
@@ -81,13 +100,24 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         "binlog count:", len(scanner.binlogs),
     )  # yapf: disable
 
-    bs.start()
+    bs1.start()
 
     start = time.monotonic()
-    while not bs.is_streaming_binlogs():
+    while not bs1.is_streaming_binlogs():
         assert time.monotonic() - start < 30
         time.sleep(0.1)
-        bs.add_binlogs(scanner.scan_new(None))
+        binlogs = scanner.scan_new(None)
+        bs1.add_binlogs(binlogs)
+        bs2.add_binlogs(binlogs)
+
+    bs2.start()
+
+    while not bs2.is_streaming_binlogs():
+        assert time.monotonic() - start < 30
+        time.sleep(0.1)
+        binlogs = scanner.scan_new(None)
+        bs1.add_binlogs(binlogs)
+        bs2.add_binlogs(binlogs)
 
     print(
         int(time.monotonic() - data_gen_start),
@@ -96,10 +126,20 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         "binlog count:", len(scanner.binlogs),
     )  # yapf: disable
 
+    # Wait until bs1 has uploaded all binlogs, then mark that backup as closed and stop it
+    start = time.monotonic()
+    while bs1.state["pending_binlogs"]:
+        assert time.monotonic() - start < 10
+        time.sleep(0.1)
+
+    bs1.mark_as_completed()
+    bs1.mark_as_closed()
+    bs1.stop()
+
     start = time.monotonic()
     while time.monotonic() - start < phase_duration:
         time.sleep(0.1)
-        bs.add_binlogs(scanner.scan_new(None))
+        bs2.add_binlogs(scanner.scan_new(None))
 
     pitr_master_status = None
     pitr_row_count = None
@@ -107,16 +147,18 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     if pitr:
         # Pause the data generator for a while
         data_generator.generate_data_event.clear()
-        # Times in logs are with one second precision so need to sleep one second before
-        # and after to make sure we restore exactly the events we want
-        time.sleep(1.1)
+        while not data_generator.paused:
+            time.sleep(0.1)
+        # Times in logs are with one second precision so need to sleep at least one second before and after
+        # to make sure we restore exactly the events we want. To avoid any transient failures sleep a bit more
+        time.sleep(2)
         pitr_row_count = data_generator.committed_row_count
         with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
             cursor.execute("SHOW MASTER STATUS")
             pitr_master_status = cursor.fetchone()
             print(time.time(), "Master status at PITR target time", pitr_master_status)
         pitr_target_time = int(time.time())
-        time.sleep(1)
+        time.sleep(2)
         data_generator.generate_data_event.set()
 
     print(
@@ -125,12 +167,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         "estimated bytes:", data_generator.estimated_bytes,
         "binlog count:", len(scanner.binlogs),
     )  # yapf: disable
-    bs.mark_as_completed()
+    bs2.mark_as_completed()
 
     start = time.monotonic()
     while time.monotonic() - start < phase_duration:
         time.sleep(0.1)
-        bs.add_binlogs(scanner.scan_new(None))
+        bs2.add_binlogs(scanner.scan_new(None))
 
     data_generator.is_running = False
     data_generator.join()
@@ -139,7 +181,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
         cursor.execute("FLUSH BINARY LOGS")
 
-    bs.add_binlogs(scanner.scan_new(None))
+    bs2.add_binlogs(scanner.scan_new(None))
 
     print(
         int(time.monotonic() - data_gen_start),
@@ -149,13 +191,13 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     )  # yapf: disable
 
     start = time.monotonic()
-    while bs.state["pending_binlogs"]:
+    while bs2.state["pending_binlogs"]:
         assert time.monotonic() - start < 10
         time.sleep(0.1)
 
-    bs.stop()
+    bs2.stop()
 
-    assert bs.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog
+    assert bs2.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog
 
     with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
         cursor.execute("SHOW MASTER STATUS")
@@ -168,7 +210,16 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         "user": mysql_master["user"],
     }
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
+    # Restore basebackup from backup stream 1 but binlogs from both streams. First stream doesn't
+    # contain latest state but applying binlogs from second stream should get it fully up-to-date
     rc = RestoreCoordinator(
+        binlog_streams=[{
+            "site": "default",
+            "stream_id": bs1.state["stream_id"],
+        }, {
+            "site": "default",
+            "stream_id": bs2.state["stream_id"],
+        }],
         file_storage_config={
             "directory": backup_target_location,
             "storage_type": "local",
@@ -178,12 +229,13 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         mysql_data_directory=mysql_empty["config_options"]["datadir"],
         mysql_relay_log_index_file=mysql_empty["config_options"]["relay_log_index_file"],
         mysql_relay_log_prefix=mysql_empty["config_options"]["relay_log_file_prefix"],
+        pending_binlogs_state_file=state_file_name.replace(".json", "") + ".pending_binlogs",
         restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_empty, **kwargs),
         rsa_private_key_pem=private_key_pem,
         site="default",
         state_file=state_file_name,
         stats=build_statsd_client(),
-        stream_id=bs.state["stream_id"],
+        stream_id=bs1.state["stream_id"],
         target_time=pitr_target_time,
         temp_dir=mysql_empty["base_dir"],
     )

@@ -71,6 +71,7 @@ async def test_backup_list(master_controller, web_client):
 
     async def has_backup():
         response = await get_and_verify_json_body(web_client, "/backup")
+        assert response["backups"]
         assert len(response["backups"]) == 1
         backup = response["backups"][0]
         expected = {"basebackup_info", "closed_at", "completed_at", "recovery_site", "resumable", "site", "stream_id"}
