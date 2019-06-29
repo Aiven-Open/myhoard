@@ -571,6 +571,7 @@ class RestoreCoordinator(threading.Thread):
     def _basebackup_data_provider(self, target_stream):
         name = self._build_full_name("basebackup.xbstream")
         compressed_size = self.state["basebackup_info"].get("compressed_size")
+        file_storage = get_transfer(self.file_storage_config)
 
         last_time = [time.monotonic()]
         last_value = [0]
@@ -592,7 +593,7 @@ class RestoreCoordinator(threading.Thread):
                     stats=self.stats,
                 )
 
-        self.file_storage.get_contents_to_fileobj(name, target_stream, progress_callback=download_progress)
+        file_storage.get_contents_to_fileobj(name, target_stream, progress_callback=download_progress)
 
     def _get_iteration_sleep(self):
         if self.phase in self.POLL_PHASES:

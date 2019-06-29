@@ -73,7 +73,7 @@ class BackupStream(threading.Thread):
         backup_reason,
         binlogs=None,
         compression=None,
-        file_storage,
+        file_storage_setup_fn,
         file_uploaded_callback=None,
         mode,
         mysql_client_params,
@@ -95,7 +95,10 @@ class BackupStream(threading.Thread):
         self.basebackup_progress = None
         self.compression = compression
         self.current_upload_index = None
-        self.file_storage = file_storage
+        # This file storage object must only be called from BackupStream's own thread. Calls from
+        # other threads must use file_storage_setup_fn to create new file storage instance
+        self.file_storage = None
+        self.file_storage_setup_fn = file_storage_setup_fn
         self.file_uploaded_callback = file_uploaded_callback
         self.is_running = True
         self.iteration_sleep = BackupStream.ITERATION_SLEEP
@@ -284,48 +287,65 @@ class BackupStream(threading.Thread):
             yield binlog
 
     def mark_as_closed(self):
-        self.log.info("Stream %r marked as closed", self.stream_id)
-        closed_info = self.state["closed_info"] or {"closed_at": time.time(), "server_id": self.server_id}
+        if self.state["closed_info"]:
+            self.log.warning("Stream %s marked as closed multiple times", self.stream_id)
+            return
+
+        self.log.info("Marking stream %s as closed (local update only)", self.stream_id)
+        # Just write the closed info to local state here to ensure file storage
+        # operation happens from appropriate thread
+        self.state_manager.update_state(
+            closed_info={
+                "closed_at": time.time(),
+                "server_id": self.server_id,
+            },
+        )
+        self.wakeup_event.set()
+
+    def _handle_pending_mark_as_closed(self):
+        self.log.info("Handling pending mark as closed request for stream %r", self.stream_id)
+        closed_info = self.state["closed_info"]
         try:
             key = self._build_full_name("closed.json")
             data = json.dumps(closed_info)
             metadata = make_fs_metadata(closed_info)
             self.file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
-            self.state_manager.update_state(
-                active_details={"phase": self.ActivePhase.none},
-                closed_info=closed_info,
-            )
-            self.wakeup_event.set()
+            self.state_manager.update_state(active_details={"phase": self.ActivePhase.none})
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to create closed.json")
-            self.stats.unexpected_exception(ex=ex, where="BackupStream.mark_as_closed")
-            self.state_manager.update_state(
-                # Write closed_info but don't change state so the operation will be retried
-                closed_info=closed_info,
-                remote_write_errors=self.state["remote_write_errors"] + 1,
-            )
+            self.stats.unexpected_exception(ex=ex, where="BackupStream._handle_pending_mark_as_closed")
+            self.state_manager.update_state(remote_write_errors=self.state["remote_write_errors"] + 1)
             self.stats.increase("myhoard.remote_write_errors")
 
     def mark_as_completed(self):
-        self.log.info("Stream %r marked as completed", self.stream_id)
-        completed_info = self.state["completed_info"] or {"completed_at": time.time(), "server_id": self.server_id}
+        if self.state["completed_info"]:
+            self.log.warning("Stream %s marked as completed multiple times", self.stream_id)
+            return
+
+        self.log.info("Marking stream %r as completed (local update only)", self.stream_id)
+        # Just write the completed info to local state here to ensure file storage
+        # operation happens from appropriate thread
+        self.state_manager.update_state(
+            completed_info={
+                "completed_at": time.time(),
+                "server_id": self.server_id,
+            },
+        )
+        self.wakeup_event.set()
+
+    def _handle_pending_mark_as_completed(self):
+        self.log.info("Handling pending mark as completed request for stream %r", self.stream_id)
+        completed_info = self.state["completed_info"]
         try:
             key = self._build_full_name("completed.json")
             data = json.dumps(completed_info)
             metadata = make_fs_metadata(completed_info)
             self.file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
-            self.state_manager.update_state(
-                active_details={"phase": self.ActivePhase.binlog},
-                completed_info=completed_info,
-            )
+            self.state_manager.update_state(active_details={"phase": self.ActivePhase.binlog})
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to create completed.json")
-            self.stats.unexpected_exception(ex=ex, where="BackupStream.mark_as_completed")
-            self.state_manager.update_state(
-                # Write completed_info but don't change state so the operation will be retried
-                completed_info=completed_info,
-                remote_write_errors=self.state["remote_write_errors"] + 1,
-            )
+            self.stats.unexpected_exception(ex=ex, where="BackupStream._handle_pending_mark_as_completed")
+            self.state_manager.update_state(remote_write_errors=self.state["remote_write_errors"] + 1)
             self.stats.increase("myhoard.remote_write_errors")
 
     @property
@@ -348,9 +368,10 @@ class BackupStream(threading.Thread):
 
     def remove(self):
         self.stop()
+        file_storage = self.file_storage_setup_fn()
         self.state_manager.delete_state()
         try:
-            self.file_storage.delete_tree(f"{self.site}/{self.stream_id}")
+            file_storage.delete_tree(f"{self.site}/{self.stream_id}")
         except FileNotFoundError:
             pass
         except Exception as ex:  # pylint: disable=broad-except
@@ -382,11 +403,13 @@ class BackupStream(threading.Thread):
         self.log.info("Backup stream %r running", self.stream_id)
         while self.is_running:
             try:
+                if not self.file_storage:
+                    self.file_storage = self.file_storage_setup_fn()
                 if self.mode == self.Mode.active:
                     if self.state["completed_info"] and self.active_phase == self.ActivePhase.binlog_catchup:
-                        self.mark_as_completed()
+                        self._handle_pending_mark_as_completed()
                     if self.state["closed_info"] and self.active_phase != self.ActivePhase.none:
-                        self.mark_as_closed()
+                        self._handle_pending_mark_as_closed()
                     if self.active_phase == self.ActivePhase.basebackup:
                         self._take_basebackup()
                     if self.is_streaming_binlogs():
@@ -440,6 +463,8 @@ class BackupStream(threading.Thread):
         self.basebackup_progress = kwargs
 
     def _basebackup_stream_handler(self, stream):
+        file_storage = self.file_storage_setup_fn()
+
         metadata = make_fs_metadata({
             "backup_started_at": time.time(),
             "uploaded_from": self.server_id,
@@ -463,7 +488,7 @@ class BackupStream(threading.Thread):
                 stats=self.stats,
             )
 
-        self.file_storage.store_file_object(
+        file_storage.store_file_object(
             self._build_full_name("basebackup.xbstream"), stream, metadata=metadata, upload_progress_fn=upload_progress
         )
         self.state_manager.update_state(basebackup_file_metadata=metadata)

@@ -47,7 +47,8 @@ def test_3_node_service_failover_and_restore(
         master_dg.start()
 
         phase_duration = 1
-        time.sleep(phase_duration)
+        # Wait some extra in the beginning to give the new thread time to start up
+        time.sleep(1 + phase_duration)
         assert master_dg.row_count > 0
 
         mcontroller.switch_to_active_mode()
@@ -482,6 +483,11 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
     while_asserts(has_multiple_streams, timeout=10)
     while_asserts(streaming_binlogs, timeout=10)
 
+    def has_single_stream():
+        assert len(mcontroller.backup_streams) == 1
+
+    while_asserts(has_single_stream, timeout=10)
+
     # Insert something that is only included in the second backup
     with mysql_cursor(**master["connect_options"]) as cursor:
         cursor.execute("INSERT INTO foo VALUES (2)")
@@ -509,7 +515,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
         def restore_complete():
             return new_controller.restore_coordinator and new_controller.restore_coordinator.is_complete()
 
-        wait_for_condition(restore_complete, timeout=30)
+        wait_for_condition(restore_complete, timeout=40)
         new_controller.stats.increase.assert_any_call("myhoard.restore_errors")
         new_controller.stats.increase.assert_any_call("myhoard.basebackup_broken")
     finally:
@@ -586,6 +592,7 @@ def test_binlog_auto_rotation(master_controller):
     def has_multiple_backups():
         assert len(mcontroller.state["backups"]) == 2
         assert all(backup["completed_at"] for backup in mcontroller.state["backups"])
+        assert len(mcontroller.backup_streams) == 1
 
     while_asserts(has_multiple_backups, timeout=15)
     bb_gtid_executed = mcontroller.backup_streams[-1].state["basebackup_info"]["gtid_executed"]
