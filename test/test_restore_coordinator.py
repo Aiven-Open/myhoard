@@ -31,11 +31,10 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     private_key_pem, public_key_pem = generate_rsa_key_pair()
     backup_target_location = session_tmpdir().strpath
-    file_storage = LocalTransfer(backup_target_location)
     state_file_name = os.path.join(session_tmpdir().strpath, "backup_stream.json")
     bs1 = BackupStream(
         backup_reason=BackupStream.BackupReason.requested,
-        file_storage=file_storage,
+        file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
         mode=BackupStream.Mode.active,
         mysql_client_params=mysql_master["connect_options"],
         mysql_config_file_name=mysql_master["config_name"],
@@ -52,7 +51,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     # backup and binlogs are applied from several different backups
     bs2 = BackupStream(
         backup_reason=BackupStream.BackupReason.requested,
-        file_storage=file_storage,
+        file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
         mode=BackupStream.Mode.active,
         mysql_client_params=mysql_master["connect_options"],
         mysql_config_file_name=mysql_master["config_name"],

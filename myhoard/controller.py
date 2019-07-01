@@ -476,7 +476,7 @@ class Controller(threading.Thread):
         return BackupStream(
             backup_reason=None,
             compression=backup_site.get("compression"),
-            file_storage=get_transfer(backup_site["object_storage"]),
+            file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
             # Always create in observe mode, will be switched to
             # active mode later if needed
@@ -1190,7 +1190,7 @@ class Controller(threading.Thread):
             backup_reason=backup_reason,
             binlogs=self.binlog_scanner.binlogs,
             compression=backup_site.get("compression"),
-            file_storage=get_transfer(backup_site["object_storage"]),
+            file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
             mode=BackupStream.Mode.active,
             mysql_client_params=self.mysql_client_params,
@@ -1260,11 +1260,11 @@ class Controller(threading.Thread):
         stream furthest ahead. When multiple streams are completed mark all but the last one as closed and
         refresh our backup and stream list so that completed ones get removed and new active ones may be
         created when requested."""
-        refresh_backups = False
+        expected_completed = []
         if len(self.backup_streams) == 1:
             if self.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog_catchup:
                 self.backup_streams[0].mark_as_completed()
-                refresh_backups = True
+                expected_completed.append(self.backup_streams[0])
         elif self.backup_streams:
             streams_in_catchup = 0
             highest_processed_local_index = -1
@@ -1297,7 +1297,7 @@ class Controller(threading.Thread):
                         streams[0].stream_id
                     )
                     streams[0].mark_as_completed()
-                    refresh_backups = True
+                    expected_completed.append(streams[0])
                     self.binlog_not_caught_log_counter = 0
                 elif streams_in_catchup > 0 and streams_active_no_binlogs:
                     # Special case: we have zero GTIDs in binlogs so new streams cannot catch up the old one.
@@ -1306,7 +1306,7 @@ class Controller(threading.Thread):
                         if stream.active_phase == BackupStream.ActivePhase.binlog_catchup:
                             self.log.info("No local binlogs. Marking stream %r completed", stream.stream_id)
                             stream.mark_as_completed()
-                            refresh_backups = True
+                            expected_completed.append(stream)
             else:
                 for stream in self.backup_streams:
                     if (
@@ -1318,7 +1318,7 @@ class Controller(threading.Thread):
                             stream.highest_processed_local_index, highest_processed_local_index
                         )
                         stream.mark_as_completed()
-                        refresh_backups = True
+                        expected_completed.append(stream)
                         self.binlog_not_caught_log_counter = 0
                     elif stream.active_phase == BackupStream.ActivePhase.binlog_catchup:
                         # This condition may repeat every iteration (default 1 second) for fairly long time.
@@ -1330,16 +1330,56 @@ class Controller(threading.Thread):
                             )
                         self.binlog_not_caught_log_counter += 1
 
-            # Close all but the latest stream in regular binlog streaming phase
-            streaming_binlogs = [
-                stream for stream in self.backup_streams if stream.active_phase == BackupStream.ActivePhase.binlog
-            ]
-            if len(streaming_binlogs) > 1:
-                streaming_binlogs = sorted(streaming_binlogs, key=lambda s: s.created_at)
-                for stream in streaming_binlogs[:-1]:
-                    self.log.info("Multiple streams in completed state, marking %r as closed", stream.stream_id)
-                    stream.mark_as_closed()
+        max_completion_wait = 2.0
+        if expected_completed:
+            def is_completed():
+                return all(stream.active_phase == BackupStream.ActivePhase.binlog for stream in expected_completed)
 
-        if refresh_backups:
-            self.state_manager.update_state(backups_fetched_at=0)
-            self._refresh_backups_list_and_streams()
+            # Wait a moment for the streams to actually get marked as completed;
+            # The real update happens on another thread so there is some delay
+            if self._wait_for_operation_to_finish(is_completed, wait_time=max_completion_wait):
+                self.log.info("All pending mark as completed operations finished")
+            else:
+                self.log.warning(
+                    "Not all streams finished marking themselves completed in %.1f seconds", max_completion_wait
+                )
+
+        # Close all but the latest stream in regular binlog streaming phase
+        expected_closed = []
+        streaming_binlogs = [
+            stream for stream in self.backup_streams if stream.active_phase == BackupStream.ActivePhase.binlog
+        ]
+        if len(streaming_binlogs) > 1:
+            streaming_binlogs = sorted(streaming_binlogs, key=lambda s: s.created_at)
+            for stream in streaming_binlogs[:-1]:
+                self.log.info("Multiple streams in completed state, marking %r as closed", stream.stream_id)
+                stream.mark_as_closed()
+                expected_closed.append(stream)
+
+        if expected_closed:
+            def is_closed():
+                return all(stream.active_phase == BackupStream.ActivePhase.none for stream in expected_closed)
+
+            # Wait a moment for the streams to actually get marked as closed;
+            # The real update happens on another thread so there is some delay
+            if self._wait_for_operation_to_finish(is_closed, wait_time=max_completion_wait):
+                self.log.info("All pending mark as closed operations finished")
+            else:
+                self.log.warning(
+                    "Not all streams finished marking themselves closed in %.1f seconds", max_completion_wait
+                )
+
+        self.state_manager.update_state(backups_fetched_at=0)
+        self._refresh_backups_list_and_streams()
+
+    @staticmethod
+    def _wait_for_operation_to_finish(check_fn, *, wait_time=2.0):
+        # Wait a moment for the streams to actually get marked as completed;
+        # The real update happens on another thread so there is some delay
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < wait_time:
+            if check_fn():
+                return True
+            time.sleep(0.1)
+
+        return False

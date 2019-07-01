@@ -37,7 +37,6 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     BackupStream.REMOTE_POLL_INTERVAL = 0.1
 
     backup_target_location = session_tmpdir().strpath
-    file_storage = LocalTransfer(backup_target_location)
     state_file_name = os.path.join(session_tmpdir().strpath, "backup_stream.json")
     _private_key_pem, public_key_pem = generate_rsa_key_pair()
     bs = backup_stream_class(
@@ -46,7 +45,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
             "algorithm": "lzma",
             "level": 1,
         },
-        file_storage=file_storage,
+        file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
         mode=BackupStream.Mode.active,
         mysql_client_params=mysql_master["connect_options"],
         mysql_config_file_name=mysql_master["config_name"],
@@ -74,7 +73,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     _private_key_pem, public_key_pem = generate_rsa_key_pair()
     bs_observer = backup_stream_class(
         backup_reason=None,
-        file_storage=file_storage,
+        file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
         mode=BackupStream.Mode.observe,
         mysql_client_params=mysql_master["connect_options"],
         mysql_config_file_name=mysql_master["config_name"],
@@ -104,6 +103,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     bs.add_binlogs(new_binlogs)
     wait_for_condition(lambda: not bs.state["pending_binlogs"])
     bs.mark_as_completed()
+    wait_for_condition(lambda: bs.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog)
     bs.stop()
     assert bs.is_binlog_safe_to_delete(new_binlogs[0])
     assert bs.is_log_backed_up(log_index=new_binlogs[0]["local_index"])
@@ -120,7 +120,6 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     assert bs.state["basebackup_errors"] == 0
     assert bs.state["remote_read_errors"] == 0
     assert bs.state["remote_write_errors"] == 0
-    assert bs.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog
     with open(state_file_name) as f:
         assert bs.state == json.load(f)
 
