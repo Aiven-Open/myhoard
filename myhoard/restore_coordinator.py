@@ -1031,14 +1031,13 @@ class RestoreCoordinator(threading.Thread):
                     continue
 
                 if existing_range["interval_end"] != gtid_range["start"] - 1:
-                    # This is not expected to happen because gtid_executed is updated whenever binlog is
-                    # rotated so all missing values should've been found from the binlog we parsed. It's
-                    # not clear if there could be some corner case where this could happen and we'd still
-                    # want to update the range but for now log an error and don't try to patch gtid_executed
-                    self.log.error(
+                    # This usually shouldn't happen because gtid_executed is updated whenever binlog is
+                    # rotated so all missing values should've been found from the binlog we parsed. There
+                    # seem to be some corner cases where the backup still ends up containing older GTID
+                    # executed value so that there's a gap in the sequence.
+                    self.log.info(
                         "Existing gtid_executed %r does not end just before new range %r", existing_range, gtid_range
                     )
-                    continue
 
                 cursor.execute(
                     ("UPDATE mysql.gtid_executed SET interval_end = %s "
