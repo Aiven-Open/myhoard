@@ -191,6 +191,11 @@ class RestoreCoordinator(threading.Thread):
     def run(self):
         self.log.info("Restore coordinator running")
         self._start_process_pool()
+        # If we're in a state where binary logs should be downloaded ensure we have appropriate
+        # download operations scheduled. If restore coordinator is destroyed and new one re-created
+        # in the middle of applying binary logs we could end up not having any ongoing download
+        # operations for the newly created restore coordinator, causing restoration to stall
+        self._queue_prefetch_operations()
 
         while self.is_running:
             try:
@@ -515,6 +520,7 @@ class RestoreCoordinator(threading.Thread):
         fail_counters = self.state["file_fail_counters"]
         if result["result"] == "success":
             fail_counters.pop(key, None)
+            self.log.info("Successfully prefetched %r", key)
             prefetched_binlogs = self.state["prefetched_binlogs"]
             # TODO: Add some tracking for how long has elapsed since we got any results from
             # downloaders and if enough time has passed tear down processes, create new queues,
@@ -842,6 +848,7 @@ class RestoreCoordinator(threading.Thread):
                 "local_file_name": self._relay_log_prefetch_name(index=binlog["adjusted_remote_index"]),
                 "remote_key": key,
             }
+            self.log.info("Queuing prefetch operation for %r", key)
             self.queue_out.put(props)
             on_disk_binlog_count += 1
             on_disk_binlog_bytes += binlog["file_size"]

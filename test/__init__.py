@@ -19,16 +19,16 @@ import threading
 import time
 
 
-def build_controller(*, default_backup_site, mysql_config, session_tmpdir):
+def build_controller(*, default_backup_site, mysql_config, session_tmpdir, state_dir=None, temp_dir=None):
     Controller.ITERATION_SLEEP = 0.1
     Controller.BACKUP_REFRESH_INTERVAL = 0.1
     BackupStream.ITERATION_SLEEP = 0.1
     BackupStream.REMOTE_POLL_INTERVAL = 0.1
 
-    state_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "myhoard_state"))
-    os.makedirs(state_dir)
-    temp_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
-    os.makedirs(temp_dir)
+    state_dir = state_dir or os.path.abspath(os.path.join(session_tmpdir().strpath, "myhoard_state"))
+    os.makedirs(state_dir, exist_ok=True)
+    temp_dir = temp_dir or os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
+    os.makedirs(temp_dir, exist_ok=True)
 
     controller = Controller(
         backup_settings={

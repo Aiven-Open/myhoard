@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+import random
 import time
 from unittest.mock import MagicMock
 
@@ -25,7 +26,7 @@ def test_3_node_service_failover_and_restore(
     mcontroller, master = master_controller
     s1controller, standby1 = standby1_controller
     s2controller, standby2 = standby2_controller
-    s3controller = None
+    s3controller = []
 
     # Empty server will be initialized from backup that has been created from master so it'll use the same password
     # (normally all servers should be restored from same backup but we're not simulating that here now)
@@ -143,18 +144,26 @@ def test_3_node_service_failover_and_restore(
 
                 time.sleep(phase_duration)
 
-                s3controller = build_controller(
-                    default_backup_site=default_backup_site,
-                    mysql_config=mysql_empty,
-                    session_tmpdir=session_tmpdir,
-                )
-                s3controller.state_manager.update_state(replication_state={"s1": {}})
-                s3controller.binlog_purge_settings["min_binlog_age_before_purge"] = 1
-                s3controller.binlog_purge_settings["purge_interval"] = 0.1
-                s3controller.start()
-                wait_for_condition(lambda: s3controller.state["backups_fetched_at"] != 0, timeout=2)
-                backup = s3controller.state["backups"][0]
-                s3controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
+                def build_and_initialize_controller():
+                    state_dir = s3controller[0].state_dir if s3controller else None
+                    temp_dir = s3controller[0].temp_dir if s3controller else None
+                    new_controller = build_controller(
+                        default_backup_site=default_backup_site,
+                        mysql_config=mysql_empty,
+                        session_tmpdir=session_tmpdir,
+                        state_dir=state_dir,
+                        temp_dir=temp_dir,
+                    )
+                    new_controller.state_manager.update_state(replication_state={"s1": {}})
+                    new_controller.binlog_purge_settings["min_binlog_age_before_purge"] = 1
+                    new_controller.binlog_purge_settings["purge_interval"] = 0.1
+                    new_controller.start()
+                    return new_controller
+
+                s3controller = [build_and_initialize_controller()]
+                wait_for_condition(lambda: s3controller[0].state["backups_fetched_at"] != 0, timeout=2)
+                backup = s3controller[0].state["backups"][0]
+                s3controller[0].restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
                 master_options = {
                     "MASTER_AUTO_POSITION": 1,
@@ -187,8 +196,16 @@ def test_3_node_service_failover_and_restore(
 
                 start_time = time.monotonic()
                 wait_increased = []
+                restart_times = []
 
                 def restore_complete():
+                    # Re-create the restore coordinator a couple of times during restoration
+                    # to ensure that works without problems
+                    if len(restart_times) < 3 and random.random() < 0.25 and s3controller[0].is_safe_to_reload():
+                        s3controller[0].stop()
+                        s3controller[0] = build_and_initialize_controller()
+                        restart_times.append(time.monotonic())
+
                     # Stop generating data for the old master after a while to reduce disk IO pressure so
                     # that standby can make better progress catching up with master
                     if time.monotonic() - start_time > 15:
@@ -198,7 +215,7 @@ def test_3_node_service_failover_and_restore(
                         new_master_dg.basic_wait = new_master_dg.basic_wait * 2
                         wait_increased.append(True)
                     new_master_cursor.execute("FLUSH BINARY LOGS")
-                    return s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete()
+                    return s3controller[0].restore_coordinator and s3controller[0].restore_coordinator.is_complete()
 
                 # Wait for replacement server to finish restoring basebackup and whatever binlogs were available
                 # when basebackup restoration finished
@@ -207,7 +224,7 @@ def test_3_node_service_failover_and_restore(
                 with mysql_cursor(**mysql_empty["connect_options"]) as standby3_cursor:
                     change_master_to(cursor=standby3_cursor, options=master_options)
                     standby3_cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
-                    s3controller.switch_to_observe_mode()
+                    s3controller[0].switch_to_observe_mode()
 
                     time.sleep(phase_duration)
                     master_dg.stop()
@@ -263,17 +280,17 @@ def test_3_node_service_failover_and_restore(
                 # Set correct replication states for all controllers. Should result in all local binlogs getting purged
                 # because everything has been backed up and replicated
                 replication_state = {}
-                for server_name, controller in [["s1", s1controller], ["s2", s2controller], ["s3", s3controller]]:
+                for server_name, controller in [["s1", s1controller], ["s2", s2controller], ["s3", s3controller[0]]]:
                     with mysql_cursor(**controller.mysql_client_params) as cursor:
                         cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
                         gtid_executed = parse_gtid_range_string(cursor.fetchone()["gtid_executed"])
                         replication_state[server_name] = gtid_executed
-                for controller in [s1controller, s2controller, s3controller]:
+                for controller in [s1controller, s2controller, s3controller[0]]:
                     controller.state_manager.update_state(replication_state=replication_state)
 
                 # Set GTID_NEXT on standby to cause new GTID entry getting created even though there are no data
                 # changes. This should not interfere with binlog removals.
-                with mysql_cursor(**s3controller.mysql_client_params) as cursor:
+                with mysql_cursor(**s3controller[0].mysql_client_params) as cursor:
                     cursor.execute("SELECT @@GLOBAL.server_uuid AS server_uuid")
                     server_uuid = cursor.fetchone()["server_uuid"]
                     cursor.execute(f"SET @@SESSION.GTID_NEXT = '{server_uuid}:1'")
@@ -283,7 +300,7 @@ def test_3_node_service_failover_and_restore(
                     time.sleep(0.5)
 
                 def all_binlogs_purged():
-                    for controller in [s1controller, s2controller, s3controller]:
+                    for controller in [s1controller, s2controller, s3controller[0]]:
                         if controller.mode == Controller.Mode.active:
                             # For master we may have some binlogs because list of binlogs may end with binlogs that have
                             # no GTID ranges, which cannot be safely cleaned up. But some binlogs must have been flushed
@@ -300,9 +317,9 @@ def test_3_node_service_failover_and_restore(
         if new_master_dg:
             new_master_dg.stop()
         if s3controller:
-            s3controller.stop()
+            s3controller[0].stop()
 
-    for controller in [mcontroller, s1controller, s2controller, s3controller]:
+    for controller in [mcontroller, s1controller, s2controller, s3controller[0]]:
         assert controller.state["errors"] == 0
         assert controller.backup_streams[0].state["backup_errors"] == 0
         assert controller.backup_streams[0].state["remote_read_errors"] == 0
