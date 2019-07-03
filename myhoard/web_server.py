@@ -27,6 +27,7 @@ class WebServer:
     def __init__(self, *, controller, http_address="127.0.0.1", http_port, stats):
         super().__init__()
         self.app = web.Application()
+        logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
         self.controller = controller
         self.http_address = http_address
         self.http_port = http_port
