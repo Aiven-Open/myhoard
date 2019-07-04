@@ -59,6 +59,9 @@
         }
     },
     "systemctl_command": ["sudo", "/usr/bin/systemctl"],
+    "systemd_env_update_command": [
+        "sudo", "/usr/bin/myhoard_mysql_env_update", "--", "/etc/systemd/system/mysqld.environment", "MYSQLD_OPTS"
+    ],
     "systemd_service": "mysql-server",
     "temporary_directory": "/var/tmp/sample_temp_dir"
 }

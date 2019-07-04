@@ -330,6 +330,9 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             },
         },
         "systemctl_command": ["sudo", "/usr/bin/systemctl"],
+        "systemd_env_update_command": [
+            "sudo", "/usr/bin/myhoard_mysql_env_update", "--", "/etc/systemd/system/mysqld.environment", "MYSQLD_OPTS"
+        ],
         "systemd_service": None,
         "temporary_directory": temp_dir
     }

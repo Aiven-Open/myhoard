@@ -136,13 +136,19 @@ class MyHoard:
 
     def _restart_systemd(self, *, mysqld_options, service):
         self.log.info("Restarting service %r", service)
+
+        command = self.config["systemd_env_update_command"] + [mysqld_options or ""]
+        proc = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        stdout, stderr = proc.communicate()
+        if proc.returncode != 0:
+            self.log.error(
+                "Failed to update MySQL config, %r exited with code %s. Output: %r / %r", command, proc.returncode, stdout,
+                stderr
+            )
+            raise Exception(f"Reconfiguring {service!r} failed. Code {proc.returncode}")
+
         systemctl = self.config["systemctl_command"]
-        proc = subprocess.Popen(
-            systemctl + ["restart", service],
-            env={"MYSQLD_OPTS": mysqld_options},
-            stderr=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-        )
+        proc = subprocess.Popen(systemctl + ["restart", service], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         stdout, stderr = proc.communicate()
         if proc.returncode != 0:
             self.log.error(

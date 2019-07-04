@@ -401,6 +401,13 @@ to be started after full database snapshot has been recovered and restarted
 a couple of times with slightly different settings to allow patching GTID
 executed information appropriately.
 
+**systemd_env_update_command**
+
+A command to invoke before ``systemctl`` to configure MySQL server to use the
+desired configuration options. This is typically just the built-in
+``myhoard_mysql_env_update`` command that writes to MySQL systemd environment
+file. Separate command is needed to allow running the update as root user.
+
 **systemd_service**
 
 Name of the MySQL systemd service.
