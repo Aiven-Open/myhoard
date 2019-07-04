@@ -308,7 +308,11 @@ class RestoreCoordinator(threading.Thread):
 
     def refresh_binlogs(self):
         self._fetch_more_binlog_infos(force=True)
-        self.update_state(completed_apply_ops=[], phase=self.Phase.applying_binlogs)
+        if not self.pending_binlogs:
+            self.log.info("No binary logs available, marking restore completed immediately")
+            self.update_state(phase=self.Phase.finalizing)
+        else:
+            self.update_state(completed_apply_ops=[], phase=self.Phase.applying_binlogs)
 
     def apply_binlogs(self):
         binlogs = self._get_binlogs_to_apply()
