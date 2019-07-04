@@ -29,6 +29,7 @@ setup(
     entry_points={
         "console_scripts": [
             "myhoard = myhoard.myhoard:main",
+            "myhoard_mysql_env_update = myhoard.update_mysql_environment:main",
         ],
     },
     author="Rauli Ikonen",
