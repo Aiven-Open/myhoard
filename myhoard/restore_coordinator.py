@@ -491,9 +491,13 @@ class RestoreCoordinator(threading.Thread):
         return apply_finished
 
     def finalize_restoration(self):
-        with self._mysql_cursor() as cursor:
-            cursor.execute("STOP SLAVE")
-            cursor.execute("CHANGE MASTER TO MASTER_HOST='dummy'")
+        # If there were no binary logs to restore MySQL server has not been started yet and trying
+        # to connect to it would fail. If it hasn't been started (no mysql_params specified) it also
+        # doesn't have slave configured or running so we can just skip the calls below.
+        if self.state["mysql_params"]:
+            with self._mysql_cursor() as cursor:
+                cursor.execute("STOP SLAVE")
+                cursor.execute("CHANGE MASTER TO MASTER_HOST='dummy'")
         self._ensure_mysql_server_is_started(with_binlog=True, with_gtids=True)
         self.update_state(phase=self.Phase.completed)
         self.log.info("Backup restoration completed")
