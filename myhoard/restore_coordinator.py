@@ -956,10 +956,31 @@ class RestoreCoordinator(threading.Thread):
             cursor.execute("SHOW SLAVE STATUS")
             slave_status = cursor.fetchone()
             current_file = slave_status["Relay_Log_File"]
+            sql_running_state = slave_status["Slave_SQL_Running_State"]
             current_index = int(current_file.rsplit(".", 1)[-1])
             if expected_index is not None and current_index < expected_index:
                 self.log.debug("Expected relay log name not reached (%r < %r)", current_index, expected_index)
-                return False, current_index
+                if sql_running_state == "Slave has read all relay log; waiting for more updates":
+                    # Sometimes if the next file is empty MySQL SQL thread does not update the relay log
+                    # file to match the last one. Because the thread has finished doing anything we need
+                    # to react to the situation or else restoration will stall indefinitely.
+                    if expected_range:
+                        self.log.info(
+                            "SQL thread has finished executing even though target file has not been reached (%r < %r), "
+                            "target GTID range has been set. Continuing with GTID check", current_index, expected_index
+                        )
+                    else:
+                        # We don't quite know if proceeding is safe. Probably there's no other sensible action than
+                        # returning `True, expected_index` from this branch as we know there aren't any transactions
+                        # that should be applied anyway so there should be no data loss. Not doing that until seeing
+                        # some actual cases where this branch gets executed in its current form, however.
+                        self.log.warning(
+                            "SQL thread has finished executing even though target file has not been reached (%r < %r), "
+                            "no GTID range set, not proceeding", current_index, expected_index
+                        )
+                        return False, current_index
+                else:
+                    return False, current_index
             # The batch we're applying might not have contained any GTIDs
             if not expected_range:
                 self.log.info(
@@ -979,6 +1000,12 @@ class RestoreCoordinator(threading.Thread):
                         "Expected log file %r reached and GTID range %r has been applied: %s", current_file, expected_range,
                         result["gtid_executed"]
                     )
+                    # In some cases SQL thread doesn't change Relay_Log_File value appropriately. Update
+                    # the index we return from here to match expected index if all transactions have been
+                    # applied so that all applying binlogs are marked as completed even if the SQL thread
+                    # did not say so.
+                    if expected_index is not None and current_index < expected_index:
+                        current_index = expected_index
             if found:
                 cursor.execute("STOP SLAVE")
                 # Current file could've been updated since we checked it the first time before slave was stopped.
