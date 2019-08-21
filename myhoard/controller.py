@@ -698,11 +698,10 @@ class Controller(threading.Thread):
             cursor.execute("SHOW SLAVE STATUS")
             info = cursor.fetchone()
             if info is None:
-                # None happens if RESET SLAVE has been performed. Getting the relay logs applied is a bit
-                # tricky business and in order for us to be able to correctly rotate relay logs so that we
-                # can inject real content over empty relay log files there must be valid slave status to
-                # begin with.
-                raise Exception("SHOW SLAVE STATUS returned no results. Must not run RESET SLAVE before promotion")
+                # None happens if RESET SLAVE has been performed or if the slave never was running, e.g.
+                # because there were no binary logs to restore.
+                self.log.warning("SHOW SLAVE STATUS returned no results.")
+                return
             if info["Slave_IO_Running"] == "Yes":
                 raise Exception("Slave IO thread expected to be stopped but is running")
             if info["Slave_SQL_Running"] == "Yes":
