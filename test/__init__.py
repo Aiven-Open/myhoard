@@ -153,16 +153,6 @@ def wait_for_condition(condition, *, timeout=5.0, interval=0.1):
         time.sleep(interval)
 
 
-async def await_for_condition(condition, *, timeout=5.0, interval=0.1):
-    start_time = time.monotonic()
-    while True:
-        if time.monotonic() - start_time >= timeout:
-            raise Exception("Timeout exceeded before condition was met")
-        if await condition():
-            break
-        asyncio.sleep(interval)
-
-
 def while_asserts(condition, *, timeout=5.0, interval=0.1):
     last_exception = AssertionError("for static checker")
     start_time = time.monotonic()

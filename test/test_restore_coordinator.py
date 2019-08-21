@@ -201,6 +201,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
         cursor.execute("SHOW MASTER STATUS")
         original_master_status = cursor.fetchone()
+        print("Original master status", original_master_status)
 
     restored_connect_options = {
         "host": "127.0.0.1",
@@ -264,7 +265,9 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
         cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
         expected_row_count = pitr_row_count or data_generator.row_count
-        assert cursor.fetchone()["count"] == expected_row_count
+        print("Expected row count", expected_row_count)
+        actual_row_count = cursor.fetchone()["count"]
+        print("Actual row count", actual_row_count)
         for batch_start in range(0, expected_row_count - 1, 200):
             cursor.execute("SELECT id, data FROM db1.t1 WHERE id > %s ORDER BY id ASC LIMIT 200", [batch_start])
             results = cursor.fetchall()
@@ -273,6 +276,8 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
                 row_info = data_generator.row_infos[batch_start + i]
                 expected_data = row_info[0] * row_info[1]
                 assert result["data"] == expected_data
+
+        assert actual_row_count == expected_row_count
 
         master_status = pitr_master_status or original_master_status
         assert final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"]
