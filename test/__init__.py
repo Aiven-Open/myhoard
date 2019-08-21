@@ -219,11 +219,13 @@ class DataGenerator(threading.Thread):
                         self.indirect_data_generate(cursor2)
                     time.sleep(self.basic_wait)
 
+                self.commit_pending(cursor1)
+
                 for table_name in self.temp_tables:
                     cursor2.execute(f"INSERT INTO db1.t1 (id, data) SELECT id, data FROM {table_name}")
                     cursor2.execute(f"DROP TEMPORARY TABLE {table_name}")
                     cursor2.execute("COMMIT")
-                    cursor1.execute("FLUSH BINARY LOGS")
+                cursor1.execute("FLUSH BINARY LOGS")
 
     def stop(self):
         self.is_running = False
