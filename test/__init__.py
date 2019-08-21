@@ -222,6 +222,7 @@ class DataGenerator(threading.Thread):
                 self.commit_pending(cursor1)
 
                 for table_name in self.temp_tables:
+                    print("Inserting rows from temp table", table_name)
                     cursor2.execute(f"INSERT INTO db1.t1 (id, data) SELECT id, data FROM {table_name}")
                     cursor2.execute(f"DROP TEMPORARY TABLE {table_name}")
                     cursor2.execute("COMMIT")
@@ -253,6 +254,7 @@ class DataGenerator(threading.Thread):
 
     def indirect_data_generate(self, cursor):
         table_name = f"db1.temp_t{self.temp_table_index}"
+        print("Creating temp table", table_name, "start identifier", self.row_count + self.index_offset + 1)
         self.temp_table_index += 1
         cursor.execute(f"CREATE TEMPORARY TABLE {table_name} (id INTEGER, data TEXT)")
         self.temp_tables.append(table_name)
@@ -263,6 +265,7 @@ class DataGenerator(threading.Thread):
             index = random.randrange(0, len(self.temp_tables))
             table_name = self.temp_tables[index]
             self.temp_tables.pop(index)
+            print("Inserting rows from temp table", table_name)
             cursor.execute(f"INSERT INTO db1.t1 (id, data) SELECT id, data FROM {table_name}")
             cursor.execute(f"DROP TEMPORARY TABLE {table_name}")
             cursor.execute("COMMIT")
