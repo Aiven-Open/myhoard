@@ -202,6 +202,9 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         cursor.execute("SHOW MASTER STATUS")
         original_master_status = cursor.fetchone()
         print("Original master status", original_master_status)
+        cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
+        original_count = cursor.fetchone()["count"]
+        print("Number of rows in original master", original_count)
 
     restored_connect_options = {
         "host": "127.0.0.1",
