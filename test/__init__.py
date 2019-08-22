@@ -269,6 +269,9 @@ class DataGenerator(threading.Thread):
             cursor.execute(f"INSERT INTO db1.t1 (id, data) SELECT id, data FROM {table_name}")
             cursor.execute(f"DROP TEMPORARY TABLE {table_name}")
             cursor.execute("COMMIT")
+            cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
+            gtid_executed = cursor.fetchone()["gtid_executed"]
+            print("GTID executed after", table_name, "insert:", gtid_executed)
 
     def generate_rows(self, cursor, table):
         row_count = random.randrange(50, 200)
