@@ -109,6 +109,13 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         bs1.add_binlogs(binlogs)
         bs2.add_binlogs(binlogs)
 
+    print(
+        int(time.monotonic() - data_gen_start),
+        "rows when basebackup 1 finished:", data_generator.row_count,
+        "estimated bytes:", data_generator.estimated_bytes,
+        "binlog count:", len(scanner.binlogs),
+    )  # yapf: disable
+
     bs2.start()
 
     while not bs2.is_streaming_binlogs():
@@ -120,7 +127,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     print(
         int(time.monotonic() - data_gen_start),
-        "rows when basebackup finished:", data_generator.row_count,
+        "rows when basebackup 2 finished:", data_generator.row_count,
         "estimated bytes:", data_generator.estimated_bytes,
         "binlog count:", len(scanner.binlogs),
     )  # yapf: disable
