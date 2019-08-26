@@ -896,7 +896,7 @@ class BackupStream(threading.Thread):
                 else:
                     self.log.info(
                         "Local binlog %r contains no GTID ranges and we haven't uploaded any binlogs with GTIDs since "
-                        "promotion. Cannot determine whether the file is needed or not -> skipping"
+                        "promotion. Cannot determine whether the file is needed or not -> skipping", binlog
                     )
 
                 if skip:
