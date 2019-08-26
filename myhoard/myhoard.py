@@ -26,6 +26,7 @@ class MyHoard:
         self.loop = asyncio.get_event_loop()
         self.mysqld_pid = None
         self.reload_retry_interval = 10
+        self.reloading = False
         self.systemd_notified = False
         self.web_server = None
 
@@ -48,9 +49,19 @@ class MyHoard:
         await self._reload_and_initialize()
 
     async def _reload_and_initialize(self):
-        await self._stop()
-        self._load_configuration()
-        await self._start()
+        if self.reloading:
+            self.log.info("Reload called while already reloading configuration")
+            await asyncio.sleep(0.1)
+            asyncio.ensure_future(self._reload_and_initialize_if_possible())
+            return
+
+        self.reloading = True
+        try:
+            await self._stop()
+            self._load_configuration()
+            await self._start()
+        finally:
+            self.reloading = False
 
     def run(self):
         self.loop.add_signal_handler(signal.SIGHUP, self.request_reload)
