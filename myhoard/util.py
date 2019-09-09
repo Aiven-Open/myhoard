@@ -280,24 +280,26 @@ def add_gtid_ranges_to_executed_set(existing_set, *new_ranges):
 
 
 def truncate_gtid_executed(gtid_executed, truncate_to):
-    """Truncates (in place) the gtid_executed dict so that for server identified by truncate_to (which must be a string
-    in the format "server_uuid:gno"), the list of executed transactions does not include anything after the GNO in
-    truncate_to string."""
-    server_uuid, gno = truncate_to.split(":", 1)
-    # truncate_to could also be in uuid:1-2:5:7-9 format, extract the last int from it
-    gno = gno.rsplit(":", 1)[-1].rsplit("-", 1)[-1]
-    gno = int(gno)
-    server_executed = gtid_executed[server_uuid]
-    truncated_executed = []
-    for start, end in server_executed:
-        if end < gno:
-            truncated_executed.append([start, end])
-        elif start <= gno:
-            truncated_executed.append([start, gno])
-            break
-        else:
-            break
-    gtid_executed[server_uuid] = truncated_executed
+    """Truncates (in place) the gtid_executed dict so that gtid_executed does not include any transactions that are not
+    included in the truncate_to string (which must be in the format "server_uuid1:gno1,server_uuid2:gno2"). The
+    truncation is only performed for servers included in the truncate_to string, for other servers the executed
+    transactions are left intact."""
+    server_gnos = parse_gtid_range_string(truncate_to)
+    for server_uuid, gnos in server_gnos.items():
+        if not gnos:
+            continue
+        gno = max(max(low_high) for low_high in gnos)
+        server_executed = gtid_executed[server_uuid]
+        truncated_executed = []
+        for start, end in server_executed:
+            if end < gno:
+                truncated_executed.append([start, end])
+            elif start <= gno:
+                truncated_executed.append([start, gno])
+                break
+            else:
+                break
+        gtid_executed[server_uuid] = truncated_executed
 
 
 def are_gtids_in_executed_set(gtid_executed, ranges, *, exclude_uuid=None):

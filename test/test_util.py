@@ -203,6 +203,9 @@ def test_parse_gtid_executed_and_truncate_gtid_executed():
     myhoard_util.truncate_gtid_executed(gtid_executed, "uuid1:9")
     assert gtid_executed == {"uuid1": [[1, 6], [9, 9]], "uuid2": [[1, 30]]}
     gtid_executed = myhoard_util.parse_gtid_range_string(gtid_executed_str)
+    myhoard_util.truncate_gtid_executed(gtid_executed, "uuid1:9, uuid2:7")
+    assert gtid_executed == {"uuid1": [[1, 6], [9, 9]], "uuid2": [[1, 7]]}
+    gtid_executed = myhoard_util.parse_gtid_range_string(gtid_executed_str)
     myhoard_util.truncate_gtid_executed(gtid_executed, "uuid1:8")
     assert gtid_executed == {"uuid1": [[1, 6]], "uuid2": [[1, 30]]}
     myhoard_util.truncate_gtid_executed(gtid_executed, "uuid2:1")
