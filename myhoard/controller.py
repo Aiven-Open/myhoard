@@ -308,9 +308,7 @@ class Controller(threading.Thread):
                 can_purge = all(
                     stream.is_binlog_safe_to_delete(binlog, exclude_uuid=exclude_uuid) for stream in backup_streams
                 )
-                if can_purge:
-                    log.info("Binlog %s is reported safe to delete by all backup streams", binlog["local_index"])
-                else:
+                if not can_purge:
                     log.info("Binlog %s reported not safe to delete by some backup streams", binlog["local_index"])
             elif purge_settings["purge_when_observe_no_streams"] and not backup_streams:
                 log.info("No backup streams and purging is allowed, assuming purging %s is safe", binlog["local_index"])
@@ -349,7 +347,6 @@ class Controller(threading.Thread):
                 if only_binlogs_without_gtids is None:
                     only_binlogs_without_gtids = True
                 if mode == cls.Mode.observe:
-                    log.info("Binlog %s has no GTIDs, safe to delete on standby", binlog["local_index"])
                     binlogs_to_purge.append(binlog)
                 else:
                     # Maybe purge this. We cannot tell based on the information we have whether deleting is safe because
@@ -358,7 +355,6 @@ class Controller(threading.Thread):
                     # empty, replication will break. We know this is safe to purge when we encounter at least one binlog
                     # with GTIDs after this one and those GTIDs have all been replicated.
                     binlogs_to_maybe_purge.append(binlog)
-                    log.info("Binlog %s has no GTIDs, purging is maybe safe", binlog["local_index"])
             else:
                 only_binlogs_without_gtids = False
                 for server_name, gtid_executed in replication_state.items():

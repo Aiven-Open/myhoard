@@ -773,8 +773,6 @@ def test_collect_binlogs_to_purge():
     )
     assert not binlogs_to_purge
     assert only_binlogs_without_gtids is True
-    log.info.assert_any_call("Binlog %s has no GTIDs, purging is maybe safe", 1)
-    log.info.assert_any_call("Binlog %s has no GTIDs, purging is maybe safe", 2)
 
     binlogs.append({
         "local_index": 3,
@@ -796,6 +794,4 @@ def test_collect_binlogs_to_purge():
     )
     assert binlogs_to_purge == binlogs
     assert only_binlogs_without_gtids is False
-    log.info.assert_any_call("Binlog %s has no GTIDs, purging is maybe safe", 1)
-    log.info.assert_any_call("Binlog %s has no GTIDs, purging is maybe safe", 2)
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 3)
