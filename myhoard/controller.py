@@ -1364,6 +1364,9 @@ class Controller(threading.Thread):
                     "Not all streams finished marking themselves closed in %.1f seconds", max_completion_wait
                 )
 
+        if not expected_completed and not expected_closed:
+            return
+
         self.state_manager.update_state(backups_fetched_at=0)
         self._refresh_backups_list_and_streams()
 
