@@ -149,7 +149,7 @@ class BackupStream(threading.Thread):
             "mode": mode,
             "next_index": 0,
             "normalized_backup_time": normalized_backup_time,
-            "pending_binlogs": binlogs or [],
+            "pending_binlogs": list(binlogs) if binlogs else [],
             "prepare_details": {},
             # Set of GTIDs that have been stored persistently to file storage.
             "remote_gtid_executed": {},
