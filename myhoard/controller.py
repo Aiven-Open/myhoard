@@ -1187,6 +1187,7 @@ class Controller(threading.Thread):
             compression=backup_site.get("compression"),
             file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
+            latest_complete_binlog_index=self.binlog_scanner.latest_complete_binlog_index(),
             mode=BackupStream.Mode.active,
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
