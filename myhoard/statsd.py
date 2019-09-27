@@ -58,7 +58,7 @@ class StatsClient:
         if self.sentry_config.get("dsn"):
             try:
                 # Lazy-load raven as this to make importing the file faster
-                import raven
+                import raven  # pylint: disable=import-outside-toplevel
                 self.raven_client = raven.Client(**self.sentry_config)
             except ImportError:
                 self.raven_client = None

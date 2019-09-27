@@ -612,7 +612,7 @@ class Controller(threading.Thread):
             for binlog in stream.iterate_remote_binlogs(reverse=True):
                 if binlog["remote_index"] in already_processed_remote_indexes:
                     break
-                elif not binlog["gtid_ranges"]:
+                if not binlog["gtid_ranges"]:
                     missing_binlogs.insert(0, binlog)
                 else:
                     gtid_str = make_gtid_range_string(binlog["gtid_ranges"])
@@ -1187,7 +1187,7 @@ class Controller(threading.Thread):
             compression=backup_site.get("compression"),
             file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
-            latest_complete_binlog_index=self.binlog_scanner.latest_complete_binlog_index(),
+            latest_complete_binlog_index=self.binlog_scanner.latest_complete_binlog_index,
             mode=BackupStream.Mode.active,
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
@@ -1224,8 +1224,7 @@ class Controller(threading.Thread):
         for backup in backups:
             if backup["stream_id"] == current_stream_id:
                 break
-            else:
-                earlier_backup = backup
+            earlier_backup = backup
         else:
             raise Exception(f"Stream {current_stream_id} being restored not found in completed backups: {backups}")
 

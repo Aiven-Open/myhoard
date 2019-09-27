@@ -259,8 +259,8 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
             assert rc.state["phase"] != RestoreCoordinator.Phase.failed
             if rc.state["phase"] == RestoreCoordinator.Phase.completed:
                 break
-            else:
-                print("Current restore coordinator phase:", rc.state["phase"])
+
+            print("Current restore coordinator phase:", rc.state["phase"])
             time.sleep(1)
     finally:
         rc.stop()
