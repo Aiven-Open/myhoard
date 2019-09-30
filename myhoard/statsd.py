@@ -16,6 +16,11 @@ from contextlib import contextmanager
 from copy import copy
 from typing import Union
 
+try:
+    import raven
+except ImportError:
+    raven = None
+
 
 class StatsClient:
     def __init__(self, *, host, port=8125, sentry_dsn=None, tags=None):
@@ -56,11 +61,9 @@ class StatsClient:
 
         self.sentry_config = new_config
         if self.sentry_config.get("dsn"):
-            try:
-                # Lazy-load raven as this to make importing the file faster
-                import raven  # pylint: disable=import-outside-toplevel
+            if raven:
                 self.raven_client = raven.Client(**self.sentry_config)
-            except ImportError:
+            else:
                 self.raven_client = None
                 self.log.warning("Cannot enable Sentry.io sending: importing 'raven' failed")
         else:
