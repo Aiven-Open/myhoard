@@ -75,6 +75,7 @@ class BackupStream(threading.Thread):
         compression=None,
         file_storage_setup_fn,
         file_uploaded_callback=None,
+        latest_complete_binlog_index=None,
         mode,
         mysql_client_params,
         mysql_config_file_name,
@@ -140,6 +141,7 @@ class BackupStream(threading.Thread):
             "backup_reason": backup_reason,
             "created_at": time.time(),
             "immediate_scan_required": False,
+            "initial_latest_complete_binlog_index": latest_complete_binlog_index,
             "last_binlog_upload_time": 0,
             "last_processed_local_index": None,
             "last_remote_state_check": 0,
@@ -244,6 +246,12 @@ class BackupStream(threading.Thread):
         to determine whether a specific binary log is safe to delete from backup persistence point-of-view.
         This particular backup stream itself might not yet have made the log part of its remote list of binlogs
         but if some other stream has uploaded the file and this stream is aware of that deletion is safe."""
+        # Completed binary logs that existed before this backup stream was originally created
+        # cannot be required by us because our basebackup was triggered later
+        initial_index = self.state.get("initial_latest_complete_binlog_index")
+        if initial_index is not None and binlog["local_index"] <= initial_index:
+            return True
+
         mode = self.mode
         backed_up = False
         if mode == self.Mode.active:

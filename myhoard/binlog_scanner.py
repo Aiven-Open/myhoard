@@ -38,6 +38,10 @@ class BinlogScanner:
         self.stats = stats
         self.server_id = server_id
 
+    @property
+    def latest_complete_binlog_index(self):
+        return self.state["next_index"] - 1
+
     def scan_new(self, added_callback):
         """Scan for any added binlogs. Passes any found binlogs to the given callback function
         before updating internal state."""

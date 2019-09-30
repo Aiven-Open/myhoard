@@ -55,7 +55,7 @@ class AppendOnlyStateManager:
                     header = f.read(self.HEADER_BYTES).decode("utf-8")
                     if not header:
                         break
-                    elif len(header) < self.HEADER_BYTES:
+                    if len(header) < self.HEADER_BYTES:
                         raise EOFError(
                             f"Unexpected end of file at {pos}. Expected {self.HEADER_BYTES} bytes, got only {len(header)}"
                         )

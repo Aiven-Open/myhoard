@@ -40,8 +40,7 @@ def test_basic_backup(mysql_master):
             data = stream.read(10 * 1024)
             if not data:
                 break
-            else:
-                bytes_read[0] += len(data)
+            bytes_read[0] += len(data)
 
     encryption_key = os.urandom(24)
     op = BasebackupOperation(

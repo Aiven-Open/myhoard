@@ -157,3 +157,6 @@ def _run_backup_stream_test(session_tmpdir, mysql_master, backup_stream_class):
     assert not bs_observer.is_binlog_safe_to_delete(new_binlogs[0])
     assert not bs_observer.is_log_backed_up(log_index=new_binlogs[0]["local_index"])
     bs_observer.stop()
+
+    bs.state_manager.update_state(initial_latest_complete_binlog_index=new_binlogs[0]["local_index"])
+    assert bs.is_binlog_safe_to_delete(new_binlogs[0])

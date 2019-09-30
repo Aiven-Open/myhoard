@@ -31,7 +31,7 @@ def test_read_gtids_from_log():
     ]
     assert events == expected_events
 
-    ranges = [range for range in myhoard_util.build_gtid_ranges(myhoard_util.read_gtids_from_log(fn))]
+    ranges = list(myhoard_util.build_gtid_ranges(myhoard_util.read_gtids_from_log(fn)))
     expected_ranges = [
         {
             "end": 1000010,
@@ -68,7 +68,7 @@ def test_build_gtid_ranges():
         (1003, 2, "b", 5),
         (1004, 2, "b", 6),
     ]
-    ranges = [range for range in myhoard_util.build_gtid_ranges(events)]
+    ranges = list(myhoard_util.build_gtid_ranges(events))
     expected_ranges = [
         {
             "end": 2,

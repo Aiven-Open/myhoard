@@ -663,7 +663,7 @@ class RestoreCoordinator(threading.Thread):
                         )
                         target_time_reached_by_server.add(binlog["server_id"])
                         continue
-                    elif binlog["gtid_ranges"][0]["end_ts"] >= self.target_time:
+                    if binlog["gtid_ranges"][0]["end_ts"] >= self.target_time:
                         # Log and mark target time reached but include binlog and continue processing results. We may
                         # get binlogs from multiple servers in some race conditions and we don't yet know if this binlog
                         # was from a server that was actually valid at that point in time and some other server may have
@@ -1061,12 +1061,11 @@ class RestoreCoordinator(threading.Thread):
                             " VALUES (%s, %s, %s)"
                         ), (gtid_range["server_uuid"], gtid_range["start"], gtid_range["end"]))
                         cursor.execute("COMMIT")
-                        continue
                     else:
                         # This is not expected to happen. We cannot ensure gtid_executed is in sane state if it
                         # happens but applying old binlog is not dependent on this so allow continuing regardless
                         self.log.error("Could not find existing gtid_executed info for range %r", gtid_range)
-                        continue
+                    continue
 
                 if existing_range["interval_end"] == gtid_range["end"]:
                     self.log.info("Existing gtid_executed info already up-to-date, no need to apply %r", gtid_range)
