@@ -18,9 +18,9 @@ from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, first_contains_gtids_not_in_second, make_fs_metadata,
-    mysql_cursor, parse_fs_metadata, parse_gtid_range_string, rsa_encrypt_bytes, sort_and_filter_binlogs, track_rate,
-    truncate_gtid_executed
+    add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, DEFAULT_MYSQL_TIMEOUT, first_contains_gtids_not_in_second,
+    make_fs_metadata, mysql_cursor, parse_fs_metadata, parse_gtid_range_string, rsa_encrypt_bytes, sort_and_filter_binlogs,
+    track_rate, truncate_gtid_executed
 )
 
 BINLOG_BUCKET_SIZE = 500
@@ -778,7 +778,11 @@ class BackupStream(threading.Thread):
             # This is to ensure the binlog is immediately backed up and available for
             # patching gtid_executed even if restoration is performed to the time when
             # basebackup was created.
-            with mysql_cursor(**self.mysql_client_params) as cursor:
+            # FLUSH BINARY LOGS might take a long time if the server is under heavy load,
+            # use longer than normal timeout here.
+            connect_params = dict(self.mysql_client_params)
+            connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5
+            with mysql_cursor(**connect_params) as cursor:
                 cursor.execute("FLUSH BINARY LOGS")
                 cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
                 gtid_executed = parse_gtid_range_string(cursor.fetchone()["gtid_executed"])

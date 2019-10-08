@@ -19,7 +19,13 @@ from .binlog_scanner import BinlogScanner
 from .restore_coordinator import RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
-    are_gtids_in_executed_set, change_master_to, make_gtid_range_string, mysql_cursor, parse_fs_metadata, relay_log_name
+    are_gtids_in_executed_set,
+    change_master_to,
+    DEFAULT_MYSQL_TIMEOUT,
+    make_gtid_range_string,
+    mysql_cursor,
+    parse_fs_metadata,
+    relay_log_name,
 )
 
 ERR_CANNOT_CONNECT = 2003
@@ -1080,7 +1086,11 @@ class Controller(threading.Thread):
 
     def _rotate_binlog(self, *, force_interval=None):
         local_log_index = None
-        with mysql_cursor(**self.mysql_client_params) as cursor:
+        # FLUSH BINARY LOGS might take a long time if the server is under heavy load,
+        # use longer than normal timeout here.
+        connect_params = dict(self.mysql_client_params)
+        connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5
+        with mysql_cursor(**connect_params) as cursor:
             if force_interval:
                 self.log.info("Over %s seconds elapsed since last new binlog, forcing rotation", force_interval)
             else:
