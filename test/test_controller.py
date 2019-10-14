@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+import os
 import random
 import time
 from unittest.mock import MagicMock
@@ -8,7 +9,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.util import (change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges)
 
-from . import (DataGenerator, build_controller, wait_for_condition, while_asserts)
+from . import (DataGenerator, build_controller, get_mysql_config_options, wait_for_condition, while_asserts)
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -392,6 +393,90 @@ def test_empty_server_backup_and_restore(
             s3controller.stop()
 
 
+def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
+    backups = MagicMock()
+
+    class DummyController(Controller):
+        def extend_binlog_stream_list(self):
+            self._extend_binlog_stream_list()
+
+        def _refresh_backups_list(self):
+            self.state["backups"] = backups()
+
+    name = "dummyserver"
+    test_base_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, name))
+    config_path = os.path.join(test_base_dir, "etc")
+    state_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "state"))
+    temp_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
+    controller = build_controller(
+        cls=DummyController,
+        default_backup_site=default_backup_site,
+        mysql_config={
+            "config_options": get_mysql_config_options(
+                config_path=config_path, name=name, server_id=1, test_base_dir=test_base_dir
+            ),
+            "config_name": os.path.join(config_path, "my.cnf"),
+            "connect_options": {},
+            "server_id": 1,
+        },
+        session_tmpdir=session_tmpdir,
+        state_dir=state_dir,
+        temp_dir=temp_dir,
+    )
+    rc = MagicMock()
+    controller.restore_coordinator = rc
+
+    # Cannot add backups, extend_binlog_stream_list does nothing
+    rc.can_add_binlog_streams.return_value = False
+    controller.extend_binlog_stream_list()
+    backups.assert_not_called()
+
+    # Can add backups but backup being restored is not the last one, does not try to look up new backups
+    rc.can_add_binlog_streams.return_value = True
+    controller.state["backups"] = [
+        {"completed_at": "2", "site": "a", "stream_id": "2"},
+        {"completed_at": "1", "site": "a", "stream_id": "1"},
+    ]
+    rc.binlog_streams = [
+        {"site": "a", "stream_id": "1"},
+    ]
+    controller.extend_binlog_stream_list()
+    backups.assert_not_called()
+
+    # Can add backups and restoring last backup, looks up new backups but does nothing because no new ones are found
+    rc.binlog_streams = [
+        {"site": "a", "stream_id": "2"},
+    ]
+    rc.stream_id = "2"
+    backups.return_value = [
+        {"completed_at": "2", "site": "a", "stream_id": "2"},
+        {"completed_at": "1", "site": "a", "stream_id": "1"},
+        {"completed_at": "0", "site": "a", "stream_id": "0"},
+    ]
+    controller.extend_binlog_stream_list()
+    backups.assert_called()
+    rc.add_new_binlog_streams.assert_not_called()
+
+    # Can add backups and restoring last backup, new backup is found and added to list of binlog streams to restore
+    backups.return_value = [
+        {"completed_at": "3", "site": "a", "stream_id": "3"},
+        {"completed_at": "2", "site": "a", "stream_id": "2"},
+        {"completed_at": "1", "site": "a", "stream_id": "1"},
+    ]
+    rc.add_new_binlog_streams.return_value = True
+    controller.state["restore_options"] = {"binlog_streams": rc.binlog_streams, "foo": "abc"}
+    controller.extend_binlog_stream_list()
+    backups.assert_called()
+    rc.add_new_binlog_streams.assert_called_with([{"site": "a", "stream_id": "3"}])
+    assert controller.state["restore_options"] == {
+        "binlog_streams": [
+            {"site": "a", "stream_id": "2"},
+            {"site": "a", "stream_id": "3"},
+        ],
+        "foo": "abc",
+    }
+
+
 def test_multiple_backup_management(master_controller):
     mcontroller, master = master_controller
     # Backup every 3 seconds
@@ -544,6 +629,99 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
         results = cursor.fetchall()
         assert len(results) == 2
         assert {result["id"] for result in results} == {1, 2}
+
+
+def test_new_binlog_stream_while_restoring(
+    default_backup_site,
+    master_controller,
+    mysql_empty,
+    session_tmpdir,
+):
+    mcontroller, master = master_controller
+    s3controller = None
+
+    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+
+    try:
+        mcontroller.switch_to_active_mode()
+        mcontroller.start()
+
+        # Write some data that gets included in the first backup
+        with mysql_cursor(**master["connect_options"]) as cursor:
+            cursor.execute("CREATE TABLE foo (id INTEGER)")
+            cursor.execute("INSERT INTO foo VALUES (1)")
+            cursor.execute("COMMIT")
+            cursor.execute("FLUSH BINARY LOGS")
+
+        def streaming_binlogs(controller):
+            assert controller.backup_streams
+            assert len(controller.backup_streams) == 1
+            assert controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+
+        while_asserts(lambda: streaming_binlogs(mcontroller), timeout=15)
+        stream_id = mcontroller.backup_streams[0].stream_id
+
+        s3controller = build_controller(
+            default_backup_site=default_backup_site,
+            mysql_config=mysql_empty,
+            session_tmpdir=session_tmpdir,
+        )
+        s3controller.start()
+        wait_for_condition(lambda: s3controller.state["backups_fetched_at"] != 0, timeout=2)
+        backup = s3controller.state["backups"][0]
+        # Start restoring the only backup we have at the moment
+        s3controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
+
+        # Start creating new backup
+        mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+
+        # Make backup restoration very slow by increasing all waits hundredfold
+        def slow_down_restore():
+            if not s3controller.restore_coordinator:
+                return False
+            s3controller.restore_coordinator.iteration_sleep_short *= 100
+            s3controller.restore_coordinator.iteration_sleep_long *= 100
+            return True
+
+        wait_for_condition(slow_down_restore, timeout=5)
+
+        # Wait until second backup completes
+        wait_for_condition(
+            lambda: len(mcontroller.backup_streams) == 1 and mcontroller.backup_streams[0].stream_id != stream_id,
+            timeout=20,
+        )
+
+        # Write something that gets included in the second backup
+        with mysql_cursor(**master["connect_options"]) as cursor:
+            cursor.execute("INSERT INTO foo VALUES (2)")
+            cursor.execute("COMMIT")
+            cursor.execute("FLUSH BINARY LOGS")
+
+        # Ensure the binlog has been processed and uploaded
+        time.sleep(1)
+
+        # Backup restoration shouldn't have completed by now because we made it very slow
+        assert not s3controller.restore_coordinator.is_complete()
+        # Make it faster again
+        s3controller.restore_coordinator.iteration_sleep_short /= 100
+        s3controller.restore_coordinator.iteration_sleep_long /= 100
+
+        wait_for_condition(
+            lambda: s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete(), timeout=20
+        )
+
+        # Restored data should contain changes from first backup that we originally restored plus the binlog
+        # from second backup that was created while the first one was restoring
+        with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+            cursor.execute("SELECT id FROM foo ORDER BY id")
+            results = cursor.fetchall()
+            assert len(results) == 2
+            assert results[0]["id"] == 1
+            assert results[1]["id"] == 2
+    finally:
+        mcontroller.stop()
+        if s3controller:
+            s3controller.stop()
 
 
 def test_binlog_auto_rotation(master_controller):

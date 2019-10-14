@@ -19,7 +19,7 @@ import threading
 import time
 
 
-def build_controller(*, default_backup_site, mysql_config, session_tmpdir, state_dir=None, temp_dir=None):
+def build_controller(*, cls=None, default_backup_site, mysql_config, session_tmpdir, state_dir=None, temp_dir=None):
     Controller.ITERATION_SLEEP = 0.1
     Controller.BACKUP_REFRESH_INTERVAL = 0.1
     BackupStream.ITERATION_SLEEP = 0.1
@@ -30,7 +30,8 @@ def build_controller(*, default_backup_site, mysql_config, session_tmpdir, state
     temp_dir = temp_dir or os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
     os.makedirs(temp_dir, exist_ok=True)
 
-    controller = Controller(
+    cls = cls or Controller
+    controller = cls(
         backup_settings={
             "backup_age_days_max": 14,
             "backup_count_max": 100,
@@ -65,6 +66,29 @@ def build_controller(*, default_backup_site, mysql_config, session_tmpdir, state
 
 def build_statsd_client():
     return StatsClient(host=None, port=None, tags=None)
+
+
+def get_mysql_config_options(*, config_path, name, server_id, test_base_dir):
+    os.makedirs(config_path)
+    data_dir = os.path.join(test_base_dir, "data")
+    os.makedirs(data_dir)
+    binlog_dir = os.path.join(test_base_dir, "binlogs")
+    os.makedirs(binlog_dir)
+    relay_log_dir = os.path.join(test_base_dir, "relay_logs")
+    os.makedirs(relay_log_dir)
+
+    port = get_random_port()
+    return dict(
+        binlog_file_prefix=os.path.join(binlog_dir, "bin"),
+        binlog_index_file=os.path.join(test_base_dir, "binlog.index"),
+        datadir=data_dir,
+        pid_file=os.path.join(config_path, "mysql.pid"),
+        port=port,
+        read_only=name != "master",
+        relay_log_file_prefix=os.path.join(relay_log_dir, "relay"),
+        relay_log_index_file=os.path.join(test_base_dir, "relay_log.index"),
+        server_id=server_id,
+    )
 
 
 def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):

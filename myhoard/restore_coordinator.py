@@ -164,6 +164,12 @@ class RestoreCoordinator(threading.Thread):
         self.temp_dir = temp_dir
         self.worker_processes = []
 
+    def add_new_binlog_streams(self, new_binlog_streams):
+        if not self.can_add_binlog_streams():
+            return False
+        self.binlog_streams = self.binlog_streams + new_binlog_streams
+        return True
+
     @property
     def basebackup_bytes_total(self):
         return self.state["basebackup_info"].get("compressed_size") or 0
@@ -180,6 +186,14 @@ class RestoreCoordinator(threading.Thread):
     @property
     def binlogs_restored(self):
         return self.state["binlogs_restored"]
+
+    def can_add_binlog_streams(self):
+        # If we're restoring to a specific backup then we don't want to look for possible new backup
+        # streams that we should restore. Also, if we've already decided to stop looking for binlogs
+        # cannot add new ones or if we're already past the point of applying binlogs altogether we
+        # obviously cannot do anything with new binlog streams.
+        final_phases = {self.Phase.finalizing, self.Phase.completed, self.Phase.failed, self.Phase.failed_basebackup}
+        return not self.target_time and not self.state["target_time_reached"] and self.phase not in final_phases
 
     def is_complete(self):
         return self.phase == self.Phase.completed

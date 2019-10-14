@@ -9,7 +9,10 @@ import pytest
 from myhoard.util import (atomic_create_file, change_master_to, mysql_cursor, wait_for_port)
 from myhoard.web_server import WebServer
 
-from . import (build_controller, build_statsd_client, generate_rsa_key_pair, get_random_port, random_basic_string)
+from . import (
+    build_controller, build_statsd_client, generate_rsa_key_pair, get_mysql_config_options, get_random_port,
+    random_basic_string
+)
 
 pytest_plugins = "aiohttp.pytest_plugin"
 
@@ -76,26 +79,10 @@ def mysql_initialize_and_start(session_tmpdir, *, empty=False, master=None, name
 
     test_base_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, name))
     config_path = os.path.join(test_base_dir, "etc")
-    os.makedirs(config_path)
-    data_dir = os.path.join(test_base_dir, "data")
-    os.makedirs(data_dir)
-    binlog_dir = os.path.join(test_base_dir, "binlogs")
-    os.makedirs(binlog_dir)
-    relay_log_dir = os.path.join(test_base_dir, "relay_logs")
-    os.makedirs(relay_log_dir)
-
-    port = get_random_port()
-    config_options = dict(
-        binlog_file_prefix=os.path.join(binlog_dir, "bin"),
-        binlog_index_file=os.path.join(test_base_dir, "binlog.index"),
-        datadir=data_dir,
-        pid_file=os.path.join(config_path, "mysql.pid"),
-        port=port,
-        read_only=name != "master",
-        relay_log_file_prefix=os.path.join(relay_log_dir, "relay"),
-        relay_log_index_file=os.path.join(test_base_dir, "relay_log.index"),
-        server_id=server_id,
+    config_options = get_mysql_config_options(
+        config_path=config_path, name=name, server_id=server_id, test_base_dir=test_base_dir
     )
+    port = config_options["port"]
 
     config = """
 [mysqld]
@@ -171,7 +158,7 @@ FLUSH PRIVILEGES;
         cmd.append(f"--basedir={mysql_basedir}")
     if empty:
         # Empty server is used for restoring data. Wipe data directory and don't start the server
-        shutil.rmtree(data_dir)
+        shutil.rmtree(config_options["datadir"])
         proc = None
     else:
         proc = subprocess.Popen(cmd)

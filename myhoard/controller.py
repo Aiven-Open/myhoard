@@ -685,6 +685,48 @@ class Controller(threading.Thread):
                 },
             )
 
+    def _extend_binlog_stream_list(self):
+        """If we're currently restoring a backup to most recent point in time, checks for new available
+        backup streams and if there is one adds that to the list of streams from which to apply binlogs.
+        The reasoning for this logic is that if restoring binary logs takes a long time the current master
+        could fail while we're restoring data but before failing it could've created new backup stream and
+        uploaded some files there but not in the backup we're restoring, causing data loss when this node
+        gets promoted after backup restoration completes and there's no available master."""
+        if not self.restore_coordinator.can_add_binlog_streams():
+            return
+        backups = sorted(
+            (backup for backup in self.state["backups"] if backup["completed_at"]), key=lambda backup: backup["completed_at"]
+        )
+        # If most recent current backup is not in the list of backups being restored then we're probably
+        # restoring some old backup and don't want to automatically get latest changes
+        if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_streams):
+            return
+
+        old_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
+        self._refresh_backups_list()
+        backups = sorted(
+            (backup for backup in self.state["backups"] if backup["completed_at"]), key=lambda backup: backup["completed_at"]
+        )
+        new_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
+        if old_backups == new_backups:
+            return
+
+        active_stream_found = False
+        new_binlog_streams = []
+        for backup in new_backups:
+            if backup["stream_id"] == self.restore_coordinator.stream_id:
+                active_stream_found = True
+            elif active_stream_found:
+                if backup not in self.restore_coordinator.binlog_streams:
+                    new_binlog_streams.append(backup)
+
+        if new_binlog_streams:
+            if self.restore_coordinator.add_new_binlog_streams(new_binlog_streams):
+                options = self.state["restore_options"]
+                options = dict(options, binlog_streams=options["binlog_streams"] + new_binlog_streams)
+                self.state_manager.update_state(restore_options=options)
+                self.log.info("Added new binlog streams %r", new_binlog_streams)
+
     def _fail_if_not_read_only(self):
         with mysql_cursor(**self.mysql_client_params) as cursor:
             cursor.execute("SELECT @@GLOBAL.read_only AS read_only")
@@ -826,6 +868,7 @@ class Controller(threading.Thread):
         # read replica connects to the new server and must be able to download missing binlogs from there
         self._purge_old_binlogs(mysql_maybe_not_running=True)
         self._process_local_binlog_updates()
+        self._extend_binlog_stream_list()
         if self.restore_coordinator.phase == RestoreCoordinator.Phase.failed_basebackup:
             self._switch_basebackup_if_possible()
 
