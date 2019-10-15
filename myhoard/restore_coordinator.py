@@ -970,15 +970,14 @@ class RestoreCoordinator(threading.Thread):
                             "target GTID range has been set. Continuing with GTID check", current_index, expected_index
                         )
                     else:
-                        # We don't quite know if proceeding is safe. Probably there's no other sensible action than
+                        # We don't quite know if proceeding is safe but there's no other sensible action than
                         # returning `True, expected_index` from this branch as we know there aren't any transactions
-                        # that should be applied anyway so there should be no data loss. Not doing that until seeing
-                        # some actual cases where this branch gets executed in its current form, however.
+                        # that should be applied anyway so there should be no data loss.
                         self.log.warning(
                             "SQL thread has finished executing even though target file has not been reached (%r < %r), "
-                            "no GTID range set, not proceeding", current_index, expected_index
+                            "no GTID range set. Considering complete", current_index, expected_index
                         )
-                        return False, current_index
+                        return True, expected_index
                 else:
                     return False, current_index
             # The batch we're applying might not have contained any GTIDs
