@@ -768,6 +768,11 @@ class Controller(threading.Thread):
         else:
             return self.iteration_sleep
 
+    def _get_long_timeout_params(self):
+        connect_params = dict(self.mysql_client_params)
+        connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5
+        return connect_params
+
     def _get_upload_backup_site(self):
         non_recovery_sites = {id: values for id, values in self.backup_sites.items() if not values.get("recovery_only")}
         if not non_recovery_sites:
@@ -1027,7 +1032,7 @@ class Controller(threading.Thread):
                 up_until_name = relay_log_name(prefix=base_name, index=up_until_index, full_path=False)
                 self.log.info("Purging %s binlogs, up until %r", len(binlogs_to_purge), up_until_name)
                 try:
-                    with mysql_cursor(**self.mysql_client_params) as cursor:
+                    with mysql_cursor(**self._get_long_timeout_params()) as cursor:
                         cursor.execute(f"PURGE BINARY LOGS TO '{up_until_name}'")
                 except pymysql.err.OperationalError as ex:
                     if mysql_maybe_not_running and ex.args[0] == ERR_CANNOT_CONNECT:
@@ -1131,9 +1136,7 @@ class Controller(threading.Thread):
         local_log_index = None
         # FLUSH BINARY LOGS might take a long time if the server is under heavy load,
         # use longer than normal timeout here.
-        connect_params = dict(self.mysql_client_params)
-        connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5
-        with mysql_cursor(**connect_params) as cursor:
+        with mysql_cursor(**self._get_long_timeout_params()) as cursor:
             if force_interval:
                 self.log.info("Over %s seconds elapsed since last new binlog, forcing rotation", force_interval)
             else:

@@ -22,7 +22,7 @@ class BinlogDownloader:
         self.queue_in = queue_in
         self.queue_out = queue_out
         self.rsa_private_key_pem = config["rsa_private_key_pem"].encode("ascii")
-        self.transfer = get_transfer(self.config["object_storage"])
+        self.transfer = None
 
     def loop(self):
         while True:
@@ -33,6 +33,8 @@ class BinlogDownloader:
             exception = None
             try:
                 self.log.info("Starting to download %r", action["remote_key"])
+                if self.transfer is None:
+                    self.transfer = get_transfer(self.config["object_storage"])
                 # TODO: Monitor progress
                 with contextlib.suppress(OSError):
                     os.remove(action["local_file_name"])
