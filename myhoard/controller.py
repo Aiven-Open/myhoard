@@ -99,6 +99,7 @@ class Controller(threading.Thread):
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
         self.restore_coordinator = None
+        self.seen_basebackup_infos = {}
         self.server_id = server_id
         self.site_transfers = {}
         self.state = {
@@ -381,7 +382,9 @@ class Controller(threading.Thread):
         return binlogs_to_purge, only_binlogs_without_gtids
 
     @staticmethod
-    def get_backup_list(backup_sites, *, site_transfers=None):
+    def get_backup_list(backup_sites, *, seen_basebackup_infos=None, site_transfers=None):
+        if seen_basebackup_infos is None:
+            seen_basebackup_infos = {}
         if site_transfers is None:
             site_transfers = {}
         backups = []
@@ -401,8 +404,13 @@ class Controller(threading.Thread):
                     if file_name == "basebackup.xbstream":
                         basebackup_compressed_size = info["size"]
                     elif file_name == "basebackup.json":
-                        info_str, _ = file_storage.get_contents_to_string(info["name"])
-                        basebackup_info = json.loads(info_str.decode("utf-8"))
+                        # The basebackup info json contents never change after creation so we can use cached
+                        # value if available to avoid re-fetching the same content over and over again
+                        basebackup_info = seen_basebackup_infos.get(site_and_stream_id)
+                        if basebackup_info is None:
+                            info_str, _ = file_storage.get_contents_to_string(info["name"])
+                            basebackup_info = json.loads(info_str.decode("utf-8"))
+                            seen_basebackup_infos[site_and_stream_id] = basebackup_info
                     elif file_name == "closed.json":
                         closed_info = parse_fs_metadata(info["metadata"])
                     elif file_name == "completed.json":
@@ -1064,7 +1072,9 @@ class Controller(threading.Thread):
         if time.time() - self.state["backups_fetched_at"] < self.backup_refresh_interval:
             return None
 
-        backups = self.get_backup_list(self.backup_sites, site_transfers=self.site_transfers)
+        backups = self.get_backup_list(
+            self.backup_sites, seen_basebackup_infos=self.seen_basebackup_infos, site_transfers=self.site_transfers
+        )
         self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
