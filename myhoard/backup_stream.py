@@ -39,7 +39,7 @@ class BackupStream(threading.Thread):
     standbys. When a node is promoted it goes via prepare_promotion and promoted modes to active mode."""
 
     ITERATION_SLEEP = 10
-    REMOTE_POLL_INTERVAL = 120
+    REMOTE_POLL_INTERVAL = 240
 
     @enum.unique
     class Mode(str, enum.Enum):
