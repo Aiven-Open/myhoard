@@ -21,7 +21,8 @@ import time
 
 def build_controller(*, cls=None, default_backup_site, mysql_config, session_tmpdir, state_dir=None, temp_dir=None):
     Controller.ITERATION_SLEEP = 0.1
-    Controller.BACKUP_REFRESH_INTERVAL = 0.1
+    Controller.BACKUP_REFRESH_INTERVAL_BASE = 0.1
+    Controller.BACKUP_REFRESH_ACTIVE_MULTIPLIER = 1
     BackupStream.ITERATION_SLEEP = 0.1
     BackupStream.REMOTE_POLL_INTERVAL = 0.1
 

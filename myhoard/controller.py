@@ -49,7 +49,10 @@ class Controller(threading.Thread):
         # Restore system to given backup
         restore = "restore"
 
-    BACKUP_REFRESH_INTERVAL = 120
+    BACKUP_REFRESH_INTERVAL_BASE = 120
+    # We don't expect anyone but the single active MyHoard to make any changes to backups but we still want
+    # to sometimes check there aren't some unexpected changes. The "sometimes" can be pretty infrequently
+    BACKUP_REFRESH_ACTIVE_MULTIPLIER = 10
     ITERATION_SLEEP = 1
 
     def __init__(
@@ -72,7 +75,7 @@ class Controller(threading.Thread):
         temp_dir,
     ):
         super().__init__()
-        self.backup_refresh_interval = self.BACKUP_REFRESH_INTERVAL
+        self.backup_refresh_interval_base = self.BACKUP_REFRESH_INTERVAL_BASE
         self.backup_settings = backup_settings
         self.backup_sites = backup_sites
         self.backup_streams = []
@@ -1069,7 +1072,10 @@ class Controller(threading.Thread):
             self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", time.time() - last_could_have_purged)
 
     def _refresh_backups_list(self):
-        if time.time() - self.state["backups_fetched_at"] < self.backup_refresh_interval:
+        interval = self.backup_refresh_interval_base
+        if self.mode == self.Mode.active:
+            interval *= self.BACKUP_REFRESH_ACTIVE_MULTIPLIER
+        if time.time() - self.state["backups_fetched_at"] < interval:
             return None
 
         backups = self.get_backup_list(
