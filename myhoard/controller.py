@@ -100,6 +100,7 @@ class Controller(threading.Thread):
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
         self.restore_coordinator = None
         self.server_id = server_id
+        self.site_transfers = {}
         self.state = {
             "backup_request": {},
             "backups": [],
@@ -380,10 +381,15 @@ class Controller(threading.Thread):
         return binlogs_to_purge, only_binlogs_without_gtids
 
     @staticmethod
-    def get_backup_list(backup_sites):
+    def get_backup_list(backup_sites, *, site_transfers=None):
+        if site_transfers is None:
+            site_transfers = {}
         backups = []
         for site_name, site_config in backup_sites.items():
-            file_storage = get_transfer(site_config["object_storage"])
+            file_storage = site_transfers.get(site_name)
+            if file_storage is None:
+                file_storage = get_transfer(site_config["object_storage"])
+                site_transfers[site_name] = file_storage
             streams = list(file_storage.list_prefixes(site_name))
             for site_and_stream_id in streams:
                 basebackup_compressed_size = None
@@ -664,9 +670,13 @@ class Controller(threading.Thread):
                 os.remove(prefetch_name)
             with open(prefetch_name, "wb") as output_file:
                 output_obj = DecompressSink(output_file, binlog["compression_algorithm"])
-                backup_site = self.backup_sites[binlog["site"]]
+                site = binlog["site"]
+                backup_site = self.backup_sites[site]
                 output_obj = DecryptSink(output_obj, binlog["remote_file_size"], backup_site["encryption_keys"]["private"])
-                transfer = get_transfer(backup_site["object_storage"])
+                transfer = self.site_transfers.get(site)
+                if transfer is None:
+                    transfer = get_transfer(backup_site["object_storage"])
+                    self.site_transfers[site] = transfer
                 transfer.get_contents_to_fileobj(binlog["remote_key"], output_obj)
                 self.log.info(
                     "%r successfully saved as %r in %.2f seconds", binlog["remote_key"], prefetch_name,
@@ -1054,7 +1064,7 @@ class Controller(threading.Thread):
         if time.time() - self.state["backups_fetched_at"] < self.backup_refresh_interval:
             return None
 
-        backups = self.get_backup_list(self.backup_sites)
+        backups = self.get_backup_list(self.backup_sites, site_transfers=self.site_transfers)
         self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
