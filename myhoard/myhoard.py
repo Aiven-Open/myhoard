@@ -14,6 +14,11 @@ from myhoard.statsd import StatsClient
 from myhoard.util import detect_running_process_id, wait_for_port
 from myhoard.web_server import WebServer
 
+try:
+    from systemd import daemon  # pylint: disable=no-name-in-module
+except ImportError:
+    daemon = None
+
 
 class MyHoard:
     def __init__(self, config_file):
@@ -102,11 +107,8 @@ class MyHoard:
         if self.systemd_notified:
             return
 
-        try:
-            from systemd import daemon  # pylint: disable=no-name-in-module
+        if daemon:
             daemon.notify("READY=1")
-        except ImportError:
-            pass
 
         self.systemd_notified = True
 

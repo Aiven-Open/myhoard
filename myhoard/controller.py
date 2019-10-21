@@ -49,7 +49,10 @@ class Controller(threading.Thread):
         # Restore system to given backup
         restore = "restore"
 
-    BACKUP_REFRESH_INTERVAL = 120
+    BACKUP_REFRESH_INTERVAL_BASE = 120
+    # We don't expect anyone but the single active MyHoard to make any changes to backups but we still want
+    # to sometimes check there aren't some unexpected changes. The "sometimes" can be pretty infrequently
+    BACKUP_REFRESH_ACTIVE_MULTIPLIER = 10
     ITERATION_SLEEP = 1
 
     def __init__(
@@ -72,7 +75,7 @@ class Controller(threading.Thread):
         temp_dir,
     ):
         super().__init__()
-        self.backup_refresh_interval = self.BACKUP_REFRESH_INTERVAL
+        self.backup_refresh_interval_base = self.BACKUP_REFRESH_INTERVAL_BASE
         self.backup_settings = backup_settings
         self.backup_sites = backup_sites
         self.backup_streams = []
@@ -99,7 +102,9 @@ class Controller(threading.Thread):
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
         self.restore_coordinator = None
+        self.seen_basebackup_infos = {}
         self.server_id = server_id
+        self.site_transfers = {}
         self.state = {
             "backup_request": {},
             "backups": [],
@@ -380,10 +385,17 @@ class Controller(threading.Thread):
         return binlogs_to_purge, only_binlogs_without_gtids
 
     @staticmethod
-    def get_backup_list(backup_sites):
+    def get_backup_list(backup_sites, *, seen_basebackup_infos=None, site_transfers=None):
+        if seen_basebackup_infos is None:
+            seen_basebackup_infos = {}
+        if site_transfers is None:
+            site_transfers = {}
         backups = []
         for site_name, site_config in backup_sites.items():
-            file_storage = get_transfer(site_config["object_storage"])
+            file_storage = site_transfers.get(site_name)
+            if file_storage is None:
+                file_storage = get_transfer(site_config["object_storage"])
+                site_transfers[site_name] = file_storage
             streams = list(file_storage.list_prefixes(site_name))
             for site_and_stream_id in streams:
                 basebackup_compressed_size = None
@@ -395,8 +407,13 @@ class Controller(threading.Thread):
                     if file_name == "basebackup.xbstream":
                         basebackup_compressed_size = info["size"]
                     elif file_name == "basebackup.json":
-                        info_str, _ = file_storage.get_contents_to_string(info["name"])
-                        basebackup_info = json.loads(info_str.decode("utf-8"))
+                        # The basebackup info json contents never change after creation so we can use cached
+                        # value if available to avoid re-fetching the same content over and over again
+                        basebackup_info = seen_basebackup_infos.get(site_and_stream_id)
+                        if basebackup_info is None:
+                            info_str, _ = file_storage.get_contents_to_string(info["name"])
+                            basebackup_info = json.loads(info_str.decode("utf-8"))
+                            seen_basebackup_infos[site_and_stream_id] = basebackup_info
                     elif file_name == "closed.json":
                         closed_info = parse_fs_metadata(info["metadata"])
                     elif file_name == "completed.json":
@@ -664,9 +681,13 @@ class Controller(threading.Thread):
                 os.remove(prefetch_name)
             with open(prefetch_name, "wb") as output_file:
                 output_obj = DecompressSink(output_file, binlog["compression_algorithm"])
-                backup_site = self.backup_sites[binlog["site"]]
+                site = binlog["site"]
+                backup_site = self.backup_sites[site]
                 output_obj = DecryptSink(output_obj, binlog["remote_file_size"], backup_site["encryption_keys"]["private"])
-                transfer = get_transfer(backup_site["object_storage"])
+                transfer = self.site_transfers.get(site)
+                if transfer is None:
+                    transfer = get_transfer(backup_site["object_storage"])
+                    self.site_transfers[site] = transfer
                 transfer.get_contents_to_fileobj(binlog["remote_key"], output_obj)
                 self.log.info(
                     "%r successfully saved as %r in %.2f seconds", binlog["remote_key"], prefetch_name,
@@ -1051,10 +1072,15 @@ class Controller(threading.Thread):
             self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", time.time() - last_could_have_purged)
 
     def _refresh_backups_list(self):
-        if time.time() - self.state["backups_fetched_at"] < self.backup_refresh_interval:
+        interval = self.backup_refresh_interval_base
+        if self.mode == self.Mode.active:
+            interval *= self.BACKUP_REFRESH_ACTIVE_MULTIPLIER
+        if time.time() - self.state["backups_fetched_at"] < interval:
             return None
 
-        backups = self.get_backup_list(self.backup_sites)
+        backups = self.get_backup_list(
+            self.backup_sites, seen_basebackup_infos=self.seen_basebackup_infos, site_transfers=self.site_transfers
+        )
         self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
