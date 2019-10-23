@@ -86,6 +86,7 @@ def mysql_initialize_and_start(session_tmpdir, *, empty=False, master=None, name
 
     config = """
 [mysqld]
+binlog-transaction-dependency-tracking=WRITESET_SESSION
 binlog-format=ROW
 datadir={datadir}
 enforce-gtid-consistency=ON
@@ -102,8 +103,11 @@ server-id={server_id}
 skip-name-resolve=ON
 skip-slave-start=ON
 slave-parallel-type=LOGICAL_CLOCK
+slave-parallel-workers={parallel_workers}
+slave-preserve-commit-order=ON
 socket={datadir}/mysql.sock
 sql-mode=ANSI,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+transaction-write-set-extraction=XXHASH64
 
 [validate_password]
 policy=LOW
@@ -140,6 +144,7 @@ FLUSH PRIVILEGES;
             "--initialize",
             "--disable-log-bin",
             "--gtid-mode=OFF",
+            "--skip-slave-preserve-commit-order",
             "--init-file",
             init_file,
         ])
@@ -150,6 +155,7 @@ FLUSH PRIVILEGES;
         "host": "127.0.0.1",
         "password": password,
         "port": port,
+        "timeout": 10,
         "user": "root",
     }
 
