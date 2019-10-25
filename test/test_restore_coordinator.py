@@ -31,7 +31,8 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     private_key_pem, public_key_pem = generate_rsa_key_pair()
     backup_target_location = session_tmpdir().strpath
-    state_file_name = os.path.join(session_tmpdir().strpath, "backup_stream.json")
+    state_file_name1 = os.path.join(session_tmpdir().strpath, "backup_stream1.json")
+    state_file_name2 = os.path.join(session_tmpdir().strpath, "backup_stream2.json")
     bs1 = BackupStream(
         backup_reason=BackupStream.BackupReason.requested,
         file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
@@ -43,7 +44,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         rsa_public_key_pem=public_key_pem,
         server_id=mysql_master["server_id"],
         site="default",
-        state_file=state_file_name,
+        state_file=state_file_name1,
         stats=build_statsd_client(),
         temp_dir=mysql_master["base_dir"],
     )
@@ -60,7 +61,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         rsa_public_key_pem=public_key_pem,
         server_id=mysql_master["server_id"],
         site="default",
-        state_file=state_file_name,
+        state_file=state_file_name2,
         stats=build_statsd_client(),
         temp_dir=mysql_master["base_dir"],
     )
