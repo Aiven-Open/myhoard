@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
 
 DEFAULT_MYSQL_TIMEOUT = 4.0
+ERR_TIMEOUT = 2013
 
 
 @contextlib.contextmanager

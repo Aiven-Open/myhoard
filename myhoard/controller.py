@@ -22,6 +22,7 @@ from .util import (
     are_gtids_in_executed_set,
     change_master_to,
     DEFAULT_MYSQL_TIMEOUT,
+    ERR_TIMEOUT,
     make_gtid_range_string,
     mysql_cursor,
     parse_fs_metadata,
@@ -789,9 +790,9 @@ class Controller(threading.Thread):
         else:
             return self.iteration_sleep
 
-    def _get_long_timeout_params(self):
+    def _get_long_timeout_params(self, *, multiplier=1):
         connect_params = dict(self.mysql_client_params)
-        connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5
+        connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5 * multiplier
         return connect_params
 
     def _get_upload_backup_site(self):
@@ -1059,6 +1060,10 @@ class Controller(threading.Thread):
                     if mysql_maybe_not_running and ex.args[0] == ERR_CANNOT_CONNECT:
                         self.log.warning("Failed to connect to MySQL to purge binary logs: %r", ex)
                         return
+                    if ex.args[0] == ERR_TIMEOUT:
+                        # Timeout here doesn't matter much. We'll just retry momentarily
+                        self.log.warning("Timeout while purging binary logs: %r", ex)
+                        return
                     raise
                 last_purge = time.time()
                 last_could_have_purged = last_purge
@@ -1161,21 +1166,34 @@ class Controller(threading.Thread):
     def _rotate_binlog(self, *, force_interval=None):
         local_log_index = None
         # FLUSH BINARY LOGS might take a long time if the server is under heavy load,
-        # use longer than normal timeout here.
-        with mysql_cursor(**self._get_long_timeout_params()) as cursor:
-            if force_interval:
-                self.log.info("Over %s seconds elapsed since last new binlog, forcing rotation", force_interval)
-            else:
-                self.log.info("Rotating binlog due to external request")
-            cursor.execute("FLUSH BINARY LOGS")
-            cursor.execute("SHOW BINARY LOGS")
-            log_names = [row["Log_name"] for row in cursor.fetchall()]
-            log_indexes = sorted(int(name.rsplit(".", 1)[-1]) for name in log_names)
-            if len(log_indexes) > 1:
-                # The second last log is the one expected to get backed up. Last one is currently empty
-                local_log_index = log_indexes[-2]
-            self.state_manager.update_state(last_binlog_rotation=time.time())
-            return local_log_index
+        # use longer than normal timeout here with multiple retries and increasing timeout.
+        for retry, multiplier in [(True, 1), (True, 2), (False, 3)]:
+            try:
+                with mysql_cursor(**self._get_long_timeout_params(multiplier=multiplier)) as cursor:
+                    if force_interval:
+                        self.log.info("Over %s seconds elapsed since last new binlog, forcing rotation", force_interval)
+                    else:
+                        self.log.info("Rotating binlog due to external request")
+                    cursor.execute("FLUSH BINARY LOGS")
+                    cursor.execute("SHOW BINARY LOGS")
+                    log_names = [row["Log_name"] for row in cursor.fetchall()]
+                    log_indexes = sorted(int(name.rsplit(".", 1)[-1]) for name in log_names)
+                    if len(log_indexes) > 1:
+                        # The second last log is the one expected to get backed up. Last one is currently empty
+                        local_log_index = log_indexes[-2]
+                    self.state_manager.update_state(last_binlog_rotation=time.time())
+                    return local_log_index
+            except pymysql.err.OperationalError as ex:
+                if ex.args[0] != ERR_TIMEOUT:
+                    raise ex
+                # If this is scheduled rotation we can just ignore the error. The operation will be retried momentarily
+                # and if it keeps on failing metric like time since last binlog upload can be used to detect problems
+                if force_interval:
+                    self.log.warning("Failed to flush binary log due to timeout: %r", ex)
+                    return None
+                if not retry:
+                    raise ex
+                self.log.error("Failed to flush binary logs due to timeout, retrying: %r", ex)
 
     def _rotate_binlog_if_threshold_exceeded(self):
         # If we haven't seen new binlogs in a while, forcibly flush binlogs so that we upload latest
