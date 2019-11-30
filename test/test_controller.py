@@ -707,7 +707,7 @@ def test_new_binlog_stream_while_restoring(
         s3controller.restore_coordinator.iteration_sleep_long /= 100
 
         wait_for_condition(
-            lambda: s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete(), timeout=20
+            lambda: s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete(), timeout=30
         )
 
         # Restored data should contain changes from first backup that we originally restored plus the binlog
