@@ -758,7 +758,8 @@ def test_binlog_auto_rotation(master_controller):
         time.sleep(0.1)
 
     new_binlogs = final_binlogs - initial_binlogs
-    assert len(new_binlogs) == 3
+    # We wait 3.5 seconds so depending on the timing there could be 3 or 4 binlogs
+    assert len(new_binlogs) in {3, 4}
 
     # Ensure one more rotation is done (we previously wrote some data that was not included in latest rotation)
     mcontroller.rotate_and_back_up_binlog()
@@ -767,7 +768,7 @@ def test_binlog_auto_rotation(master_controller):
         final_binlogs = set(binlog["Log_name"] for binlog in cursor.fetchall())
 
     new_binlogs = final_binlogs - initial_binlogs
-    assert len(new_binlogs) == 4
+    assert len(new_binlogs) in {4, 5}
 
     # Binlog rotation will happen even if there are no changes
     time.sleep(1.5)
