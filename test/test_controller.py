@@ -541,7 +541,7 @@ def test_manual_backup_creation(master_controller):
     start_time = time.monotonic()
     seen_backups = set()
     # Create up to 10 backups so that we have enough to verify deleting backups when max count is exceeded works
-    while time.monotonic() - start_time < 30 and len(seen_backups) < 10:
+    while time.monotonic() - start_time < 60 and len(seen_backups) < 10:
         current_backups = set(backup["stream_id"] for backup in mcontroller.state["backups"] if backup["completed_at"])
         if current_backups - seen_backups:
             mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
