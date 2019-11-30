@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+import contextlib
 import os
 import random
 import time
@@ -666,6 +667,17 @@ def test_new_binlog_stream_while_restoring(
             mysql_config=mysql_empty,
             session_tmpdir=session_tmpdir,
         )
+
+        binlog_uploaded = False
+
+        @contextlib.contextmanager
+        def timing_manager(block_name):
+            if block_name == "myhoard.basebackup_restore.xtrabackup_move":
+                while not binlog_uploaded:
+                    time.sleep(0.1)
+            yield
+
+        s3controller.stats.timing_manager = timing_manager
         s3controller.start()
         wait_for_condition(lambda: s3controller.state["backups_fetched_at"] != 0, timeout=2)
         backup = s3controller.state["backups"][0]
@@ -674,16 +686,6 @@ def test_new_binlog_stream_while_restoring(
 
         # Start creating new backup
         mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
-
-        # Make backup restoration very slow by increasing all waits hundredfold
-        def slow_down_restore():
-            if not s3controller.restore_coordinator:
-                return False
-            s3controller.restore_coordinator.iteration_sleep_short *= 100
-            s3controller.restore_coordinator.iteration_sleep_long *= 100
-            return True
-
-        wait_for_condition(slow_down_restore, timeout=5)
 
         # Wait until second backup completes
         wait_for_condition(
@@ -700,11 +702,11 @@ def test_new_binlog_stream_while_restoring(
         # Ensure the binlog has been processed and uploaded
         time.sleep(1)
 
-        # Backup restoration shouldn't have completed by now because we made it very slow
+        # Backup restoration shouldn't have completed by now because we're blocking before one of
+        # the basebackup restore operations
         assert not s3controller.restore_coordinator.is_complete()
-        # Make it faster again
-        s3controller.restore_coordinator.iteration_sleep_short /= 100
-        s3controller.restore_coordinator.iteration_sleep_long /= 100
+
+        binlog_uploaded = True
 
         wait_for_condition(
             lambda: s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete(), timeout=30
