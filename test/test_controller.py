@@ -518,8 +518,8 @@ def test_multiple_backup_management(master_controller):
     assert highest_backup_count >= 3
 
     # We waited for 35 seconds altogether and backup interval is 3 seconds. There should be somewhere between
-    # 10 and 13 backups depending on timing
-    assert 10 <= len(seen_backups) <= 13
+    # 8 and 13 backups depending on timing and how long taking backups takes
+    assert 8 <= len(seen_backups) <= 13
 
 
 def test_manual_backup_creation(master_controller):
