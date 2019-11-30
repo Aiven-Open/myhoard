@@ -591,7 +591,8 @@ Updates current main mode of MyHoard. Request must be like this:
   "mode": "{active|idle|observe|promote|restore}",
   "site": "{site_name}",
   "stream_id": "{backup_id}",
-  "target_time": null
+  "target_time": null,
+  "target_time_approximate_ok": false
 }
 ```
 
@@ -635,6 +636,24 @@ this is defined restoration is performed up until the last transaction before
 this time. Must be ISO 8601 timestamp. If the requested time is not available
 in the given timestamp (time is not between the ``completed_at`` and
 ``closed_at`` timestamps) the request will fail.
+
+**target_time_approximate_ok**
+
+This is only applicable when new mode is ``restore`` and ``target_time`` has
+been specified. If this is set to ``true`` then ``target_time`` is only used to
+restrict results on individual binary log level. That is, the restore process
+is guaranteed not to restore binary logs whose first transaction is later than
+the given target time but the last file that is picked for restoration is fully
+applied even if that means applying some transactions that are more recent than
+the target time.
+
+This mode is useful when restoring potentially large number of binary logs and
+the exact target time is not relevant. Enabling this mode avoids having to use
+the ``UNTIL SQL_AFTER_GTIDS = x`` parameter for the SQL thread. The ``UNTIL``
+modifier forces single threaded apply and on multi-core machines makes the
+restoration slower. The single threaded mode only applies for the last batch
+but that too can be very large and setting this value can significantly reduce
+the restoration time.
 
 GET /status/restore
 -------------------

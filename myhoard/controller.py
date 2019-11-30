@@ -170,7 +170,7 @@ class Controller(threading.Thread):
     def mode(self):
         return self.state["mode"]
 
-    def restore_backup(self, *, site, stream_id, target_time=None):
+    def restore_backup(self, *, site, stream_id, target_time=None, target_time_approximate_ok=None):
         with self.lock:
             if self.mode != self.Mode.idle:
                 # Could consider allowing restore request also when mode is `restore`
@@ -195,7 +195,10 @@ class Controller(threading.Thread):
             else:
                 raise ValueError(f"Requested backup {stream_id!r} for site {site!r} not found")
 
-            self.log.info("Restoring backup stream %r, target time %r", stream_id, target_time)
+            self.log.info(
+                "Restoring backup stream %r, target time %r%s", stream_id, target_time,
+                " (approximate time)" if target_time_approximate_ok else ""
+            )
             self.state_manager.update_state(
                 mode=self.Mode.restore,
                 restore_options={
@@ -208,6 +211,7 @@ class Controller(threading.Thread):
                     "stream_id": stream_id,
                     "site": site,
                     "target_time": target_time,
+                    "target_time_approximate_ok": target_time_approximate_ok,
                 }
             )
             self._update_mode_tag()
@@ -603,6 +607,7 @@ class Controller(threading.Thread):
             stats=self.stats,
             stream_id=options["stream_id"],
             target_time=options["target_time"],
+            target_time_approximate_ok=options["target_time_approximate_ok"],
             temp_dir=self.temp_dir,
         )
         if not self.restore_coordinator.is_complete():
@@ -1337,6 +1342,7 @@ class Controller(threading.Thread):
                 "stream_id": earlier_backup["stream_id"],
                 "site": earlier_backup["site"],
                 "target_time": options["target_time"],
+                "target_time_approximate_ok": options["target_time_approximate_ok"],
             })
             self.restore_coordinator = None
         else:

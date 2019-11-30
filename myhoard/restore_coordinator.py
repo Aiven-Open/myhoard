@@ -87,6 +87,7 @@ class RestoreCoordinator(threading.Thread):
         stats,
         stream_id,
         target_time=None,
+        target_time_approximate_ok=None,
         temp_dir,
     ):
         super().__init__()
@@ -171,6 +172,7 @@ class RestoreCoordinator(threading.Thread):
         self.stats = stats
         self.stream_id = stream_id
         self.target_time = target_time
+        self.target_time_approximate_ok = target_time_approximate_ok
         self.temp_dir = temp_dir
         self.worker_processes = []
 
@@ -370,7 +372,10 @@ class RestoreCoordinator(threading.Thread):
 
         all_gtids_applied = False
         until_after_gtids = None
-        if final_round and self.target_time and binlogs[-1]["gtid_ranges"]:
+        # If we're restoring to a specific target time get the GTID until which we should be restoring, unless
+        # self.target_time_approximate_ok is True in which case it's OK to restore until the end of the relay
+        # log containing the target time (which avoids MySQL switching to single threaded processing).
+        if final_round and self.target_time and not self.target_time_approximate_ok and binlogs[-1]["gtid_ranges"]:
             renamed = last_remote_index <= self.state["last_renamed_index"]
             if renamed:
                 file_name = self._relay_log_name(

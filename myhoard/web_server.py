@@ -134,8 +134,13 @@ class WebServer:
                         raise self.BadRequest(f"Field {key!r} must be given and a string")
                 if not isinstance(body.get("target_time"), (int, type(None))):
                     raise self.BadRequest("Field 'target_time' must be an integer when present")
+                if not isinstance(body.get("target_time_approximate_ok"), (bool, type(None))):
+                    raise self.BadRequest("Field 'target_time_approximate_ok' must be a boolean when present")
                 self.controller.restore_backup(
-                    site=body["site"], stream_id=body["stream_id"], target_time=body.get("target_time")
+                    site=body["site"],
+                    stream_id=body["stream_id"],
+                    target_time=body.get("target_time"),
+                    target_time_approximate_ok=body.get("target_time_approximate_ok"),
                 )
             else:
                 raise self.BadRequest("Unexpected value {!r} for field 'mode'".format(body.get("mode")))
