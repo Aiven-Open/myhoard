@@ -9,7 +9,7 @@ from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
 from pghoard.rohmu.object_storage.local import LocalTransfer
 
-from . import (DataGenerator, build_statsd_client, generate_rsa_key_pair, restart_mysql)
+from . import (DataGenerator, build_statsd_client, generate_rsa_key_pair, restart_mysql, while_asserts)
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -141,6 +141,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     bs1.mark_as_completed()
     bs1.mark_as_closed()
+
+    def stream_is_closed(stream):
+        assert stream.state["active_details"]["phase"] == BackupStream.ActivePhase.none
+
+    # Wait for the close operation to be handled before stopping the stream
+    while_asserts(lambda: stream_is_closed(bs1))
     bs1.stop()
 
     start = time.monotonic()
