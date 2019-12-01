@@ -486,8 +486,8 @@ def test_multiple_backup_management(master_controller):
     mcontroller.backup_settings["backup_count_min"] = 2
     # Delete backups if there are more than this even if the backup to delete is newer than max age
     mcontroller.backup_settings["backup_count_max"] = 20
-    # Max age 10 seconds (3-4 backups at any given time)
-    mcontroller.backup_settings["backup_age_days_max"] = 1 / 24 / 60 / 6
+    # Max age 12 seconds (3-4 backups at any given time)
+    mcontroller.backup_settings["backup_age_days_max"] = 1 / 24 / 60 / 5
 
     mcontroller.switch_to_active_mode()
     mcontroller.start()
