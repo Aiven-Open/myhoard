@@ -518,8 +518,8 @@ def test_multiple_backup_management(master_controller):
     assert highest_backup_count >= 3
 
     # We waited for 35 seconds altogether and backup interval is 3 seconds. There should be somewhere between
-    # 10 and 13 backups depending on timing
-    assert 10 <= len(seen_backups) <= 13
+    # 8 and 13 backups depending on timing and how long taking backups takes
+    assert 8 <= len(seen_backups) <= 13
 
 
 def test_manual_backup_creation(master_controller):
@@ -541,7 +541,7 @@ def test_manual_backup_creation(master_controller):
     start_time = time.monotonic()
     seen_backups = set()
     # Create up to 10 backups so that we have enough to verify deleting backups when max count is exceeded works
-    while time.monotonic() - start_time < 30 and len(seen_backups) < 10:
+    while time.monotonic() - start_time < 60 and len(seen_backups) < 10:
         current_backups = set(backup["stream_id"] for backup in mcontroller.state["backups"] if backup["completed_at"])
         if current_backups - seen_backups:
             mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
@@ -707,7 +707,7 @@ def test_new_binlog_stream_while_restoring(
         s3controller.restore_coordinator.iteration_sleep_long /= 100
 
         wait_for_condition(
-            lambda: s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete(), timeout=20
+            lambda: s3controller.restore_coordinator and s3controller.restore_coordinator.is_complete(), timeout=30
         )
 
         # Restored data should contain changes from first backup that we originally restored plus the binlog
@@ -758,7 +758,8 @@ def test_binlog_auto_rotation(master_controller):
         time.sleep(0.1)
 
     new_binlogs = final_binlogs - initial_binlogs
-    assert len(new_binlogs) == 3
+    # We wait 3.5 seconds so depending on the timing there could be 3 or 4 binlogs
+    assert len(new_binlogs) in {3, 4}
 
     # Ensure one more rotation is done (we previously wrote some data that was not included in latest rotation)
     mcontroller.rotate_and_back_up_binlog()
@@ -767,7 +768,7 @@ def test_binlog_auto_rotation(master_controller):
         final_binlogs = set(binlog["Log_name"] for binlog in cursor.fetchall())
 
     new_binlogs = final_binlogs - initial_binlogs
-    assert len(new_binlogs) == 4
+    assert len(new_binlogs) in {4, 5}
 
     # Binlog rotation will happen even if there are no changes
     time.sleep(1.5)

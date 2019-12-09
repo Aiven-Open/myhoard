@@ -3,6 +3,7 @@ import enum
 import json
 import logging
 import os
+import pymysql
 import threading
 import time
 import uuid
@@ -18,9 +19,9 @@ from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, DEFAULT_MYSQL_TIMEOUT, first_contains_gtids_not_in_second,
-    make_fs_metadata, mysql_cursor, parse_fs_metadata, parse_gtid_range_string, rsa_encrypt_bytes, sort_and_filter_binlogs,
-    track_rate, truncate_gtid_executed
+    add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, DEFAULT_MYSQL_TIMEOUT, ERR_TIMEOUT,
+    first_contains_gtids_not_in_second, make_fs_metadata, mysql_cursor, parse_fs_metadata, parse_gtid_range_string,
+    rsa_encrypt_bytes, sort_and_filter_binlogs, track_rate, truncate_gtid_executed
 )
 
 BINLOG_BUCKET_SIZE = 500
@@ -779,13 +780,20 @@ class BackupStream(threading.Thread):
             # patching gtid_executed even if restoration is performed to the time when
             # basebackup was created.
             # FLUSH BINARY LOGS might take a long time if the server is under heavy load,
-            # use longer than normal timeout here.
+            # use longer than normal timeout here with multiple retries and increasing timeout.
             connect_params = dict(self.mysql_client_params)
-            connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5
-            with mysql_cursor(**connect_params) as cursor:
-                cursor.execute("FLUSH BINARY LOGS")
-                cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
-                gtid_executed = parse_gtid_range_string(cursor.fetchone()["gtid_executed"])
+            for retry, multiplier in [(True, 1), (True, 2), (False, 3)]:
+                try:
+                    connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5 * multiplier
+                    with mysql_cursor(**connect_params) as cursor:
+                        cursor.execute("FLUSH BINARY LOGS")
+                        cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
+                        gtid_executed = parse_gtid_range_string(cursor.fetchone()["gtid_executed"])
+                    break
+                except pymysql.err.OperationalError as ex:
+                    if not retry or ex.args[0] != ERR_TIMEOUT:
+                        raise ex
+                    self.log.error("Failed to flush binary logs due to timeout, retrying: %r", ex)
 
             # Add one second to ensure any transactions in the binary log we flushed
             # above must be played back when the backup is restored (as restoring to
