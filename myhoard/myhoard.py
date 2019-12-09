@@ -116,6 +116,9 @@ class MyHoard:
         mysqld_options = []
         if not with_binlog:
             mysqld_options.append("--disable-log-bin")
+            # If config says slave-preserve-commit-order=ON MySQL would refuse to start if binlog is
+            # disabled. To prevent that from happening ensure preserve commit order is disabled
+            mysqld_options.append("--skip-slave-preserve-commit-order")
         if not with_gtids:
             mysqld_options.append("--gtid-mode=OFF")
 

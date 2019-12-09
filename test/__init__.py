@@ -8,6 +8,7 @@ from myhoard.statsd import StatsClient
 
 import asyncio
 import contextlib
+import multiprocessing
 import myhoard.util as myhoard_util
 import os
 import random
@@ -83,6 +84,7 @@ def get_mysql_config_options(*, config_path, name, server_id, test_base_dir):
         binlog_file_prefix=os.path.join(binlog_dir, "bin"),
         binlog_index_file=os.path.join(test_base_dir, "binlog.index"),
         datadir=data_dir,
+        parallel_workers=multiprocessing.cpu_count(),
         pid_file=os.path.join(config_path, "mysql.pid"),
         port=port,
         read_only=name != "master",
@@ -100,7 +102,7 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         proc.wait(timeout=20.0)
     command = mysql_config["startup_command"]
     if not with_binlog:
-        command = command + ["--disable-log-bin"]
+        command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
     mysql_config["proc"] = subprocess.Popen(command)
