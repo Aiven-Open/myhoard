@@ -486,7 +486,7 @@ def test_multiple_backup_management(master_controller):
     mcontroller.backup_settings["backup_count_min"] = 2
     # Delete backups if there are more than this even if the backup to delete is newer than max age
     mcontroller.backup_settings["backup_count_max"] = 20
-    # Max age 12 seconds (3-4 backups at any given time)
+    # Max age 12 seconds (3-5 backups at any given time)
     mcontroller.backup_settings["backup_age_days_max"] = 1 / 24 / 60 / 5
 
     mcontroller.switch_to_active_mode()
@@ -512,8 +512,8 @@ def test_multiple_backup_management(master_controller):
         if len(completed_backups) > highest_backup_count:
             highest_backup_count = len(completed_backups)
         if highest_backup_count >= 3:
-            # For very brief moments there could be 5 backups
-            assert 3 <= len(completed_backups) <= 5
+            # For very brief moments there could be 6 backups
+            assert 3 <= len(completed_backups) <= 6
         time.sleep(0.1)
 
     assert highest_backup_count >= 3
