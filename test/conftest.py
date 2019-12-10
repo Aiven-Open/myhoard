@@ -86,7 +86,7 @@ def mysql_initialize_and_start(session_tmpdir, *, empty=False, master=None, name
 
     config = """
 [mysqld]
-binlog-transaction-dependency-tracking=WRITESET_SESSION
+binlog-transaction-dependency-tracking=WRITESET
 binlog-format=ROW
 datadir={datadir}
 enforce-gtid-consistency=ON
