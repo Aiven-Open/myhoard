@@ -1081,6 +1081,10 @@ class Controller(threading.Thread):
                         # Timeout here doesn't matter much. We'll just retry momentarily
                         self.log.warning("Timeout while purging binary logs: %r", ex)
                         return
+                    if ex.args[0] == ERR_CANNOT_CONNECT:
+                        # Connection refused doesn't matter much - similar to timeout. We'll retry.
+                        self.log.warning("Connection refused while purging binary logs: %r", ex)
+                        return
                     raise
                 last_purge = time.time()
                 last_could_have_purged = last_purge
@@ -1201,16 +1205,20 @@ class Controller(threading.Thread):
                     self.state_manager.update_state(last_binlog_rotation=time.time())
                     return local_log_index
             except pymysql.err.OperationalError as ex:
-                if ex.args[0] != ERR_TIMEOUT:
+                if ex.args[0] == ERR_TIMEOUT:
+                    due_to = "timeout"
+                elif ex.args[0] == ERR_CANNOT_CONNECT:
+                    due_to = "connection refused"
+                else:
                     raise ex
                 # If this is scheduled rotation we can just ignore the error. The operation will be retried momentarily
                 # and if it keeps on failing metric like time since last binlog upload can be used to detect problems
                 if force_interval:
-                    self.log.warning("Failed to flush binary log due to timeout: %r", ex)
+                    self.log.warning("Failed to flush binary log due to %s: %r", due_to, ex)
                     return None
                 if not retry:
                     raise ex
-                self.log.error("Failed to flush binary logs due to timeout, retrying: %r", ex)
+                self.log.error("Failed to flush binary logs due to %s, retrying: %r", due_to, ex)
 
     def _rotate_binlog_if_threshold_exceeded(self):
         # If we haven't seen new binlogs in a while, forcibly flush binlogs so that we upload latest
