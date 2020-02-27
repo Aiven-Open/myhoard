@@ -14,20 +14,20 @@ pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 def test_read_gtids_from_log():
     fn = os.path.join(os.path.dirname(__file__), "binlog")
-    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3])
+    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
               for event in myhoard_util.read_gtids_from_log(fn)]
 
     server_uuid = "c1100de1-04f7-11e9-82fd-60f6773756fe"
     server_id = 1
     expected_events = [
-        ("2019-01-03T08:31:29", server_id, server_uuid, 1000003),
-        ("2019-01-03T08:31:33", server_id, server_uuid, 1000004),
-        ("2019-01-03T08:31:37", server_id, server_uuid, 1000005),
-        ("2019-01-03T08:31:41", server_id, server_uuid, 1000006),
-        ("2019-01-03T08:31:51", server_id, server_uuid, 1000007),
-        ("2019-01-03T08:32:08", server_id, server_uuid, 1000008),
-        ("2019-01-03T08:32:15", server_id, server_uuid, 1000009),
-        ("2019-01-03T08:32:19", server_id, server_uuid, 1000010),
+        ("2019-01-03T08:31:29", server_id, server_uuid, 1000003, 195),
+        ("2019-01-03T08:31:33", server_id, server_uuid, 1000004, 495),
+        ("2019-01-03T08:31:37", server_id, server_uuid, 1000005, 795),
+        ("2019-01-03T08:31:41", server_id, server_uuid, 1000006, 1095),
+        ("2019-01-03T08:31:51", server_id, server_uuid, 1000007, 1395),
+        ("2019-01-03T08:32:08", server_id, server_uuid, 1000008, 1695),
+        ("2019-01-03T08:32:15", server_id, server_uuid, 1000009, 2027),
+        ("2019-01-03T08:32:19", server_id, server_uuid, 1000010, 2327),
     ]
     assert events == expected_events
 
@@ -48,13 +48,13 @@ def test_read_gtids_from_log():
         for _ in myhoard_util.read_gtids_from_log(__file__):
             pass
 
-    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3])
+    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
               for event in myhoard_util.read_gtids_from_log(fn, read_until_time=1546504335)]
     expected_events.pop()
     expected_events.pop()
     assert events == expected_events
 
-    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3])
+    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
               for event in myhoard_util.read_gtids_from_log(fn, read_until_position=1695)]
     expected_events.pop()
     assert events == expected_events
@@ -62,11 +62,11 @@ def test_read_gtids_from_log():
 
 def test_build_gtid_ranges():
     events = [
-        (1000, 1, "a", 1),
-        (1001, 1, "a", 2),
-        (1002, 1, "a", 4),
-        (1003, 2, "b", 5),
-        (1004, 2, "b", 6),
+        (1000, 1, "a", 1, 100),
+        (1001, 1, "a", 2, 200),
+        (1002, 1, "a", 4, 300),
+        (1003, 2, "b", 5, 400),
+        (1004, 2, "b", 6, 500),
     ]
     ranges = list(myhoard_util.build_gtid_ranges(events))
     expected_ranges = [
