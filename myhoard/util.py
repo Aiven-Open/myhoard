@@ -104,6 +104,7 @@ def read_gtids_from_log(logfile, *, read_until_position=None, read_until_time=No
             if read_until_position and position >= read_until_position:
                 return
 
+            start_position = position
             bytes_read = stream.readinto(header)
             if not bytes_read:
                 break
@@ -136,7 +137,7 @@ def read_gtids_from_log(logfile, *, read_until_position=None, read_until_time=No
             # str(uuid.UUID(bytes=uuid_bytes)) is slow, construct the UUID string manually
             b = uuid_bytes
             uuid_str = "-".join((b[0:4].hex(), b[4:6].hex(), b[6:8].hex(), b[8:10].hex(), b[10:16].hex()))
-            yield timestamp, server_id, uuid_str, gno
+            yield timestamp, server_id, uuid_str, gno, start_position
 
     # We only want to handle complete log files but unfortunately there's no way to check whether current
     # file is complete or not; if MySQL server crashes it will create a new binlog without finalizing the
@@ -150,7 +151,7 @@ def build_gtid_ranges(iterator):
     If input contains uninterrupted sequence of events from a single server only one range is
     produced."""
     current_range = {}
-    for timestamp, server_id, server_uuid, gno in iterator:
+    for timestamp, server_id, server_uuid, gno, _file_position in iterator:
         if current_range:
             if current_range["server_uuid"] == server_uuid and current_range["end"] + 1 == gno:
                 current_range["end"] = gno

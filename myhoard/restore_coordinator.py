@@ -21,7 +21,8 @@ from .binlog_downloader import download_binlog
 from .state_manager import StateManager
 from .util import (
     add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, make_gtid_range_string, mysql_cursor,
-    parse_fs_metadata, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes, sort_and_filter_binlogs, track_rate
+    parse_fs_metadata, parse_gtid_range_string, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes,
+    sort_and_filter_binlogs, track_rate
 )
 
 # "Could not initialize master info structure; more error messages can be found in the MySQL error log"
@@ -141,6 +142,9 @@ class RestoreCoordinator(threading.Thread):
             "basebackup_restore_duration": None,
             "basebackup_restore_errors": 0,
             "binlog_name_offset": 0,
+            # Corrected binlog position to use instead of the position stored in basebackup info.
+            # For old backups the value in basebackup info might be incorrect.
+            "binlog_position": None,
             "binlog_stream_offset": 0,
             "binlogs_restored": 0,
             "completed_info": None,
@@ -405,7 +409,8 @@ class RestoreCoordinator(threading.Thread):
                     self._generate_updated_relay_log_index(binlogs, names, cursor)
 
                 # Start from where basebackup ended for first binlog and for later iterations after file magic bytes
-                relay_log_pos = (self.state["basebackup_info"]["binlog_position"] or 4) if initial_round else 4
+                initial_position = self.state["binlog_position"] or self.state["basebackup_info"]["binlog_position"] or 4
+                relay_log_pos = initial_position if initial_round else 4
                 self.log.info("Changing master position to %s in file %s", relay_log_pos, names[0])
                 try:
                     change_master_to(
@@ -943,7 +948,8 @@ class RestoreCoordinator(threading.Thread):
             yield cursor
 
     def _parse_gtid_executed_ranges(self, binlog):
-        if not binlog["gtid_ranges"] or not self.state["basebackup_info"]["binlog_position"]:
+        binlog_position = self.state["basebackup_info"]["binlog_position"]
+        if not binlog["gtid_ranges"] or not binlog_position:
             return []
 
         # Scan all GTIDs before our start location and update server gtid_executed based on that.
@@ -952,12 +958,39 @@ class RestoreCoordinator(threading.Thread):
         # only guaranteed to be flushed on log rotation. MySQL server normally recovers by parsing
         # binlogs to see what has actually been executed but since we don't have a binlog in correct
         # state and generating one is cumbersome as well, manually update the table via SQL later.
+
+        # While we're parsing the file also look for the actual location of the gtid value specified in
+        # basebackup info and if the transaction following that is located before the reported start position
+        # then adjust the actual start position accordingly. This is needed because the file_name and
+        # file_position attributes in binlog_info don't seem to necessarily match the position that actually
+        # contains the transaction following the basebackup. This may be # related to locking in MySQL code,
+        # which could result in transaction getting written to binary log but GTID info not having been updated
+        # when table_log_status locks both binlog and gtid status, getting mismatching binlog position and gtid
+        # info.
+        last_gnos = {}
+        if self.state["basebackup_info"]["gtid"]:
+            # "gtid" contains last value for each past server so need to parse it accordingly
+            for uuid_str, ranges in parse_gtid_range_string(self.state["basebackup_info"]["gtid"]).items():
+                for rng in ranges:
+                    last_gnos[uuid_str] = rng[1]
         local_name = self._relay_log_name(index=binlog["adjusted_remote_index"] + self.state["binlog_name_offset"])
-        return list(
-            build_gtid_ranges(
-                read_gtids_from_log(local_name, read_until_position=self.state["basebackup_info"]["binlog_position"])
-            )
-        )
+        gtid_infos = []
+        found_last_entry = False
+        for gtid_info in read_gtids_from_log(local_name, read_until_position=binlog_position):
+            _timestamp, _server_id, uuid_str, gno, start_position = gtid_info
+            last_gno = last_gnos.get(uuid_str)
+            if last_gno == gno:
+                found_last_entry = True
+            elif found_last_entry or (last_gno is not None and gno > last_gno):
+                if start_position != binlog_position:
+                    self.log.warning(
+                        "Basebackup binlog position %r differs from position %r of GTID %s:%r", binlog_position,
+                        start_position, uuid_str, gno
+                    )
+                    self.update_state(binlog_position=start_position)
+                break
+            gtid_infos.append(gtid_info)
+        return list(build_gtid_ranges(gtid_infos))
 
     def _get_binlogs_to_apply(self):
         binlogs = []
