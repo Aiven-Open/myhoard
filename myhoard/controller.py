@@ -504,13 +504,18 @@ class Controller(threading.Thread):
             }
             change_master_to(cursor=cursor, options=options)
             cursor.execute("START SLAVE SQL_THREAD")
+            expected_file = self._relay_log_name(index=first_index + len(to_apply), full_path=False)
+            expected_ranges = make_gtid_range_string(expected_ranges)
+            self.log.info(
+                "Started SQL thread, waiting for file %r and GTID range %r to be reached", expected_file, expected_ranges
+            )
             self.state_manager.update_state(
                 promote_details={
                     **self.state["promote_details"],
                     "binlogs_applying": to_apply,
                     "binlogs_to_apply": [],
-                    "expected_file": self._relay_log_name(index=first_index + len(to_apply), full_path=False),
-                    "expected_ranges": make_gtid_range_string(expected_ranges),
+                    "expected_file": expected_file,
+                    "expected_ranges": expected_ranges,
                 }
             )
 
@@ -572,12 +577,19 @@ class Controller(threading.Thread):
             cursor.execute("SHOW SLAVE STATUS")
             slave_status = cursor.fetchone()
             current_file = slave_status["Relay_Log_File"]
+            reached_target = True
             if current_file != expected_file:
-                return
-            if expected_ranges:
+                reached_target = False
+            elif expected_ranges:
                 cursor.execute("SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed", [expected_ranges])
                 if not cursor.fetchone()["executed"]:
-                    return
+                    reached_target = False
+            if not reached_target:
+                sql_thread_running = slave_status["Slave_SQL_Running"]
+                if sql_thread_running != "Yes":
+                    self.log.warning("Expected SQL thread to be running state is %s, starting it", sql_thread_running)
+                    cursor.execute("START SLAVE SQL_THREAD")
+                return
 
             self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)
             cursor.execute("STOP SLAVE")
