@@ -455,24 +455,45 @@ class Controller(threading.Thread):
             cursor.execute("SHOW SLAVE STATUS")
             slave_status = cursor.fetchone()
             first_name = slave_status["Relay_Log_File"]
-            first_index = int(first_name.split(".")[-1])
-            if (
-                first_index == 1 and not slave_status["Relay_Master_Log_File"] and not slave_status["Exec_Master_Log_Pos"]
-                and not slave_status["Retrieved_Gtid_Set"]
-            ):
-                # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
-                self.log.info(
-                    "Slave status is empty, assuming RESET SLAVE has been executed and writing relay index manually"
+            if not first_name:
+                first_name = "relay.000001"
+            if not self.state["promote_details"].get("relay_index_updated"):
+                first_index = int(first_name.split(".")[-1])
+                if (
+                    first_index == 1 and not slave_status["Relay_Master_Log_File"]
+                    and not slave_status["Exec_Master_Log_Pos"] and not slave_status["Retrieved_Gtid_Set"]
+                ):
+                    # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
+                    self.log.info(
+                        "Slave status is empty, assuming RESET SLAVE has been executed and writing relay index manually"
+                    )
+                    with open(self.mysql_relay_log_index_file, "wb") as index_file:
+                        names = [self._relay_log_name(index=i + 1, full_path=False) for i in range(len(to_apply))]
+                        index_file.write(("\n".join(names) + "\n").encode("utf-8"))
+                    self.log.info("Wrote names: %s", names)
+                else:
+                    for _ in to_apply:
+                        cursor.execute("FLUSH RELAY LOGS")
+                self.state_manager.update_state(
+                    promote_details={
+                        **self.state["promote_details"],
+                        "relay_index_updated": True,
+                    }
                 )
-                with open(self.mysql_relay_log_index_file, "wb") as index_file:
-                    names = [self._relay_log_name(index=i + 1, full_path=False) for i in range(len(to_apply))]
-                    index_file.write(("\n".join(names) + "\n").encode("utf-8"))
-            else:
-                for _ in to_apply:
-                    cursor.execute("FLUSH RELAY LOGS")
             for idx, binlog in enumerate(to_apply):
-                os.rename(binlog["local_prefetch_name"], self._relay_log_name(index=first_index + idx))
+                if not self.state["promote_details"].get("relay_logs_renamed"):
+                    os.rename(binlog["local_prefetch_name"], self._relay_log_name(index=first_index + idx))
+                    self.log.info(
+                        "Renamed %r to %r", binlog["local_prefetch_name"], self._relay_log_name(index=first_index + idx)
+                    )
                 expected_ranges.extend(binlog["gtid_ranges"])
+            if not self.state["promote_details"].get("relay_logs_renamed"):
+                self.state_manager.update_state(
+                    promote_details={
+                        **self.state["promote_details"],
+                        "relay_logs_renamed": True,
+                    }
+                )
             # Make SQL thread replay relay logs starting from where we have replaced empty / old logs with
             # new ones that have actual valid binlogs from previous master
             options = {

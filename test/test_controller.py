@@ -15,6 +15,115 @@ from . import (DataGenerator, build_controller, get_mysql_config_options, wait_f
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
+def test_old_master_has_failed(default_backup_site, master_controller, mysql_empty, session_tmpdir):
+    """Create a master and take backup, ensure some binary logs are created. Start new empty server
+    and restore that from backup and promote as new master immediate to simulate scenario where old
+    master without standbys has failed and is replaced by new server."""
+    mcontroller, master = master_controller
+    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+
+    new_master_controller = None
+    master_dg = DataGenerator(connect_info=master["connect_options"], make_temp_tables=False)
+    try:
+        master_dg.start()
+
+        phase_duration = 1
+        # Wait some extra in the beginning to give the new thread time to start up
+        time.sleep(1 + phase_duration)
+        assert master_dg.row_count > 0
+
+        mcontroller.switch_to_active_mode()
+        mcontroller.stats = MagicMock()
+        mcontroller.start()
+
+        def master_streaming_binlogs():
+            assert mcontroller.backup_streams
+            assert mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+            complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
+            assert complete_backups
+
+        while_asserts(master_streaming_binlogs, timeout=15)
+
+        time.sleep(phase_duration)
+
+        assert mcontroller.backup_streams[0].remote_binlogs
+
+        mcontroller.stop()
+
+        new_master_controller = build_controller(
+            default_backup_site=default_backup_site,
+            mysql_config=mysql_empty,
+            session_tmpdir=session_tmpdir,
+        )
+        new_master_controller.binlog_purge_settings["min_binlog_age_before_purge"] = 1
+        new_master_controller.binlog_purge_settings["purge_interval"] = 0.1
+        new_master_controller.start()
+
+        wait_for_condition(lambda: new_master_controller.state["backups_fetched_at"] != 0, timeout=2)
+        backup = new_master_controller.state["backups"][0]
+        new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
+
+        def restoration_is_complete():
+            return new_master_controller.restore_coordinator and new_master_controller.restore_coordinator.is_complete()
+
+        wait_for_condition(restoration_is_complete, timeout=15)
+
+        # Ensure old master manages to send some more binary logs now that new master has finished
+        # restoring backup. Because new master isn't connected to old one it won't receive these via
+        # replication but it should download and apply them from file storage
+        master_dg.stop()
+        # Need to re-create the controller because a controller that has been stopped once cannot be
+        # started again
+        mcontroller = build_controller(
+            default_backup_site=default_backup_site,
+            mysql_config=master,
+            session_tmpdir=session_tmpdir,
+            state_dir=mcontroller.state_dir,
+            temp_dir=mcontroller.temp_dir,
+        )
+        mcontroller.start()
+
+        binlogs = set()
+        with mysql_cursor(**master["connect_options"]) as cursor:
+            cursor.execute("SHOW BINARY LOGS")
+            for binlog in cursor.fetchall():
+                binlogs.add(binlog["Log_name"])
+            cursor.execute("FLUSH BINARY LOGS")
+            cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
+            old_master_gtid_executed = cursor.fetchone()["gtid_executed"]
+
+        def has_uploaded_all():
+            assert mcontroller.backup_streams
+            remote_binlog_names = {binlog["file_name"] for binlog in mcontroller.backup_streams[0].remote_binlogs}
+            # Binlogs are uploaded in order, just checking that most recent one is uploaded should be fine
+            assert max(remote_binlog_names) == max(binlogs)
+
+        while_asserts(has_uploaded_all, timeout=15)
+        mcontroller.stop()
+
+        # Promote new master. It should end up applying everything from master
+        new_master_controller.switch_to_active_mode()
+        # Wait for backup promotion steps to complete
+        wait_for_condition(lambda: new_master_controller.mode == Controller.Mode.active, timeout=15)
+
+        def new_master_has_all_data():
+            with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+                cursor.execute(
+                    "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed, @@GLOBAL.gtid_executed AS gtid_executed",
+                    [old_master_gtid_executed]
+                )
+                result = cursor.fetchone()
+                new_master_gtid_executed = result["gtid_executed"]
+                assert result["executed"], f"{old_master_gtid_executed} not subset of {new_master_gtid_executed}"
+
+        while_asserts(new_master_has_all_data, timeout=15)
+    finally:
+        mcontroller.stop()
+        master_dg.stop()
+        if new_master_controller:
+            new_master_controller.stop()
+
+
 def test_3_node_service_failover_and_restore(
     default_backup_site,
     master_controller,

@@ -100,12 +100,14 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         mysql_config["proc"] = None
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=20.0)
+        print("Stopped mysqld with pid", proc.pid)
     command = mysql_config["startup_command"]
     if not with_binlog:
         command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
     mysql_config["proc"] = subprocess.Popen(command)
+    print("Started mysqld with pid", mysql_config["proc"].pid)
     wait_for_port(mysql_config["port"], wait_time=10)
 
 
