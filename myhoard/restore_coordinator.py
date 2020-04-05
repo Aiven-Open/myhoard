@@ -143,7 +143,6 @@ class RestoreCoordinator(threading.Thread):
             "basebackup_restore_errors": 0,
             "binlog_name_offset": 0,
             # Corrected binlog position to use instead of the position stored in basebackup info.
-            # For old backups the value in basebackup info might be incorrect.
             "binlog_position": None,
             "binlog_stream_offset": 0,
             "binlogs_restored": 0,
