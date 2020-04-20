@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
+from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges)
 
 from . import (DataGenerator, build_controller, get_mysql_config_options, wait_for_condition, while_asserts)
@@ -120,6 +121,110 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
     finally:
         mcontroller.stop()
         master_dg.stop()
+        if new_master_controller:
+            new_master_controller.stop()
+
+
+def test_force_promote(default_backup_site, master_controller, mysql_empty, session_tmpdir):
+    """Create a master and take backup, create large table without primary key, delete large number
+    of rows from it (which is very slow to replicate with row based replication). Start new empty server
+    and restore that from backup and force promote as new master while binary logs are still being
+    applied (simulating a scenario where old master has failed but binary logs cannot be applied in
+    reasonable amount of time and some data loss is preferable over very long wait)."""
+    mcontroller, master = master_controller
+    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+
+    new_master_controller = None
+    try:
+        mcontroller.switch_to_active_mode()
+        mcontroller.stats = MagicMock()
+        mcontroller.start()
+
+        def master_streaming_binlogs():
+            assert mcontroller.backup_streams
+            assert mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+            complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
+            assert complete_backups
+
+        while_asserts(master_streaming_binlogs, timeout=15)
+
+        # Create table with large number of rows and no primary key; updated and deletes from this
+        # are very slow to replicate
+        with mysql_cursor(**master["connect_options"]) as cursor:
+            cursor.execute("CREATE TABLE large_no_pk (id INTEGER);")
+            iteration_entries = 5000
+            cursor.execute(f"SET cte_max_recursion_depth = {iteration_entries}")
+            current_index = 0
+            batches = 40
+            while current_index < batches * iteration_entries:
+                end = current_index + iteration_entries
+                cursor.execute(
+                    f"""
+                    INSERT INTO large_no_pk (id)
+                       SELECT sq.value + {current_index}
+                       FROM (WITH RECURSIVE nums AS (
+                                SELECT 1 AS value UNION ALL SELECT value + 1 AS value
+                                    FROM nums WHERE nums.value < {iteration_entries})
+                                SELECT * FROM nums) sq
+                    """
+                )
+                current_index = end
+            cursor.execute("COMMIT")
+            cursor.execute("DELETE FROM large_no_pk WHERE id = 1")
+            cursor.execute("COMMIT")
+            max_id = 0
+            for index in range(batches - 4):
+                max_id = current_index - (index + 1) * iteration_entries
+                cursor.execute("DELETE FROM large_no_pk WHERE id > %s", max_id)
+                cursor.execute("COMMIT")
+                cursor.execute("FLUSH BINARY LOGS")
+            assert max_id == 20000
+            cursor.execute("SHOW BINARY LOGS")
+            wait_for_index = max(int(binlog["Log_name"].split(".")[-1]) for binlog in cursor.fetchall())
+            cursor.execute("FLUSH BINARY LOGS")
+
+        wait_for_condition(lambda: mcontroller.is_log_backed_up(log_index=wait_for_index), timeout=10)
+
+        new_master_controller = build_controller(
+            default_backup_site=default_backup_site,
+            mysql_config=mysql_empty,
+            session_tmpdir=session_tmpdir,
+        )
+        new_master_controller.binlog_purge_settings["min_binlog_age_before_purge"] = 1
+        new_master_controller.binlog_purge_settings["purge_interval"] = 0.1
+        new_master_controller.start()
+
+        wait_for_condition(lambda: new_master_controller.state["backups_fetched_at"] != 0, timeout=2)
+        backup = new_master_controller.state["backups"][0]
+        new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
+
+        def applying_binlogs():
+            return (
+                new_master_controller.restore_coordinator
+                and new_master_controller.restore_coordinator.phase == RestoreCoordinator.Phase.waiting_for_apply_to_finish
+            )
+
+        wait_for_condition(applying_binlogs, timeout=15)
+        # Wait a bit to ensure our individual row deletion has been applied so that we can verify
+        # binary logs were applied partially but we just didn't get to the end because of forced promotion
+        time.sleep(2)
+        wait_for_condition(applying_binlogs, timeout=2)
+
+        new_master_controller.switch_to_active_mode(force=True)
+        wait_for_condition(lambda: new_master_controller.mode == Controller.Mode.active, timeout=15)
+
+        with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+            cursor.execute("SELECT COUNT(*) AS count FROM large_no_pk WHERE id = 1")
+            result = cursor.fetchone()
+            # This particular row is expected to be deleted
+            assert result["count"] == 0
+            cursor.execute("SELECT COUNT(*) AS count FROM large_no_pk WHERE id > 20000")
+            result = cursor.fetchone()
+            # We tried deleting anything with id above > 20000 but this should not have completed
+            # because it was so slow that force promotion took place first
+            assert result["count"] > 0
+    finally:
+        mcontroller.stop()
         if new_master_controller:
             new_master_controller.stop()
 

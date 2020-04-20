@@ -4,6 +4,7 @@ import uuid
 import pytest
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
+from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.web_server import WebServer
 
@@ -108,6 +109,9 @@ async def test_status_update_to_active(master_controller, web_client):
     assert response["mode"] == Controller.Mode.promote
     assert controller.mode == Controller.Mode.promote
 
+    response = await put_and_verify_json_body(web_client, "/status", {"force": True, "mode": "active"}, expected_status=400)
+    assert response["message"] == "Can only force promotion while waiting for binlogs to be applied"
+
     response = await put_and_verify_json_body(web_client, "/status", {"mode": Controller.Mode.observe}, expected_status=400)
     assert response["message"] == "Switch from promote to observe mode is not allowed"
 
@@ -197,21 +201,21 @@ def test_validate_replication_state():
     uuid1 = str(uuid.uuid4())
     uuid2 = str(uuid.uuid1())
     WebServer.validate_replication_state({})  # No values is valid value
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state("foo")
     WebServer.validate_replication_state({"foo": {}})  # Server with empty GTID set is valid
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state({"foo": "bar"})
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state({"foo": {"bar": "zob"}})
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state({"foo": {"bar": []}})
     WebServer.validate_replication_state({"foo": {uuid1: []}})
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state({"foo": {uuid1: ["abc"]}})
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state({"foo": {uuid1: [["abc"]]}})
-    with pytest.raises(WebServer.BadRequest):
+    with pytest.raises(BadRequest):
         WebServer.validate_replication_state({"foo": {uuid1: [[1]]}})
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2]]}})
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}})

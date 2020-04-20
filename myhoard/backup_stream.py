@@ -277,7 +277,7 @@ class BackupStream(threading.Thread):
         return self.state["immediate_scan_required"]
 
     def is_log_backed_up(self, *, log_index):
-        return log_index < self.highest_processed_local_index
+        return log_index <= self.highest_processed_local_index
 
     def is_streaming_binlogs(self):
         with self.lock:

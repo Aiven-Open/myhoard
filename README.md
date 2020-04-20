@@ -588,6 +588,7 @@ Updates current main mode of MyHoard. Request must be like this:
 
 ```
 {
+  "force": false,
   "mode": "{active|idle|observe|promote|restore}",
   "site": "{site_name}",
   "stream_id": "{backup_id}",
@@ -595,6 +596,25 @@ Updates current main mode of MyHoard. Request must be like this:
   "target_time_approximate_ok": false
 }
 ```
+
+**force**
+
+This value can only be passed when switching mode to active.
+
+When binary log restoration is ongoing setting this true will cause mode to
+be forcibly switched to promote without waiting for all binary logs to get
+applied and the promote phase will skip the step of ensuring all binary logs
+are applied. If mode is already promote and binary logs are being applied in
+that state, the binary logs sync is considered to be immediately complete.
+If the server is not currently applying binary logs passing ``"force": true``
+will cause the operation to fail with error 400.
+
+This parameter is only intended for exceptional situations. For example
+broken binary logs that cannot be applied and it is preferable to promote the
+server in it's current state. Another possible case is binary logs containing
+changes to large tables without primary keys with row format in use and the
+operation being so slow that it will not complete in reasonable amount of time.
+Data loss will incur when using this option!
 
 **mode**
 
