@@ -16,6 +16,7 @@ from pghoard.rohmu.encryptor import DecryptSink
 
 from .backup_stream import BackupStream
 from .binlog_scanner import BinlogScanner
+from .errors import BadRequest
 from .restore_coordinator import RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
@@ -112,12 +113,14 @@ class Controller(threading.Thread):
             "backups_fetched_at": 0,
             "binlogs_purged_at": 0,
             "errors": 0,
+            "force_promote": False,
             "last_binlog_purge": time.time(),
             "last_binlog_rotation": time.time(),
             "last_could_have_purged": time.time(),
             "mode": self.Mode.idle,
             "owned_stream_ids": [],
             "promote_details": {},
+            "promote_on_restore_completion": False,
             "replication_state": {},
             "restore_options": {},
             "server_uuid": None,
@@ -262,16 +265,30 @@ class Controller(threading.Thread):
             stream.stop()
         self.log.info("Controller stopped")
 
-    def switch_to_active_mode(self):
+    def switch_to_active_mode(self, *, force=False):
         """Requests switching from idle, observe or restore mode to active mode. This does
         not immediately switch mode to active but instead switches to promote mode first, which
         automatically switches to active mode once promotion flow has been successfully completed"""
         with self.lock:
-            if self.mode in {self.Mode.active, self.Mode.promote}:
-                self.log.info("Already in %s mode when switch to active mode was requested", self.mode)
+            # If current mode is promote and some binlogs are being applied, set a flag indicating that
+            # promotion should be considered complete even if applying the binary logs has not completed
+            if self.mode == self.Mode.promote and force and self.state["promote_details"].get("binlogs_applying"):
+                self.state_manager.update_state(force_promote=True)
                 return
             elif self.mode == self.Mode.restore:
-                self._fail_if_restore_is_not_complete()
+                if not force:
+                    self._fail_if_restore_is_not_complete()
+                else:
+                    if not self.restore_coordinator:
+                        raise ValueError("Cannot switch mode, current restoration state is indeterminate")
+                    self.restore_coordinator.force_completion()
+                    self.state_manager.update_state(promote_on_restore_completion=True)
+                    return
+            elif force:
+                raise BadRequest("Can only force promotion while waiting for binlogs to be applied")
+            elif self.mode in {self.Mode.active, self.Mode.promote}:
+                self.log.info("Already in %s mode when switch to active mode was requested", self.mode)
+                return
             elif self.mode == self.Mode.observe:
                 self._fail_if_observe_to_active_switch_is_not_allowed()
             self.state_manager.update_state(
@@ -585,22 +602,27 @@ class Controller(threading.Thread):
                 if not cursor.fetchone()["executed"]:
                     reached_target = False
             if not reached_target:
-                sql_thread_running = slave_status["Slave_SQL_Running"]
-                if sql_thread_running != "Yes":
-                    self.log.warning("Expected SQL thread to be running state is %s, starting it", sql_thread_running)
-                    cursor.execute("START SLAVE SQL_THREAD")
-                return
-
-            self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)
+                if self.state["force_promote"]:
+                    self.log.warning("Promotion target state not reached but forced promotion requested")
+                else:
+                    sql_thread_running = slave_status["Slave_SQL_Running"]
+                    if sql_thread_running != "Yes":
+                        self.log.warning("Expected SQL thread to be running state is %s, starting it", sql_thread_running)
+                        cursor.execute("START SLAVE SQL_THREAD")
+                    return
+            else:
+                self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)
             cursor.execute("STOP SLAVE")
-            self.state_manager.update_state(
-                promote_details={
-                    **self.state["promote_details"],
-                    "binlogs_applying": [],
-                    "expected_file": None,
-                    "expected_ranges": None,
-                }
-            )
+            promote_details = {
+                **self.state["promote_details"],
+                "binlogs_applying": [],
+                "expected_file": None,
+                "expected_ranges": None,
+            }
+            if not reached_target and self.state["force_promote"]:
+                promote_details["binlogs_to_apply"] = []
+                promote_details["binlogs_to_fetch"] = []
+            self.state_manager.update_state(promote_details=promote_details)
 
     def _create_new_backup_stream_if_requested_and_max_streams_not_exceeded(self):
         # Only ever have two open backup streams. Uploading binlogs to more streams than that is
@@ -672,7 +694,7 @@ class Controller(threading.Thread):
         yet been applied locally. Possibly found binlogs are stored in state so that they get
         downloaded and applied."""
         missing_checked_key = f"{stream.stream_id}.missing_checked"
-        if self.state["promote_details"].get(missing_checked_key):
+        if self.state["promote_details"].get(missing_checked_key) or self.state["force_promote"]:
             return
 
         already_processed_remote_indexes = set()
@@ -709,7 +731,7 @@ class Controller(threading.Thread):
         self.state_manager.update_state(
             promote_details={
                 **self.state["promote_details"],
-                "missing_checked_key": True,
+                missing_checked_key: True,
                 "binlogs_to_fetch": binlogs_to_fetch,
             }
         )
@@ -948,6 +970,15 @@ class Controller(threading.Thread):
         self._extend_binlog_stream_list()
         if self.restore_coordinator.phase == RestoreCoordinator.Phase.failed_basebackup:
             self._switch_basebackup_if_possible()
+        if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():
+            self.state_manager.update_state(
+                # Ensure latest backup list is fetched before promotion so that we
+                # start working with appropriate backup streams
+                backups_fetched_at=0,
+                force_promote=True,
+                mode=self.Mode.promote,
+                restore_options={},
+            )
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()

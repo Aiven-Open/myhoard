@@ -11,13 +11,11 @@ from aiohttp import web
 from aiohttp.web_response import json_response
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
+from myhoard.errors import BadRequest
 
 
 class WebServer:
     """Provide an API to list available backups, request state changes, observe current state and obtain metrics"""
-
-    class BadRequest(Exception):
-        pass
 
     @enum.unique
     class BackupType(str, enum.Enum):
@@ -47,12 +45,12 @@ class WebServer:
             with self.controller.lock:
                 if backup_type == self.BackupType.basebackup:
                     if wait_for_upload:
-                        raise self.BadRequest("wait_for_upload currently not supported for basebackup")
+                        raise BadRequest("wait_for_upload currently not supported for basebackup")
                     self.controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
                 elif backup_type == self.BackupType.binlog:
                     log_index = self.controller.rotate_and_back_up_binlog()
                 else:
-                    raise self.BadRequest("`backup_type` must be set to `basebackup` or `binlog` in request body")
+                    raise BadRequest("`backup_type` must be set to `basebackup` or `binlog` in request body")
 
             if log_index is not None and wait_for_upload:
                 self.log.info("Waiting up to %.1f seconds for upload of %r to complete", wait_for_upload, log_index)
@@ -90,7 +88,7 @@ class WebServer:
     async def restore_status_show(self, _request):
         with self._handle_request(name="restore_status_show"):
             if self.controller.mode != Controller.Mode.restore:
-                raise self.BadRequest(f"Mode is {self.controller.mode}, restore status is not available")
+                raise BadRequest(f"Mode is {self.controller.mode}, restore status is not available")
 
             # If restore was just requested or our state was reloaded there might not have
             # been time to create the restore coordinator so wait a bit for that to become
@@ -103,7 +101,7 @@ class WebServer:
 
             if not coordinator:
                 if self.controller.mode != Controller.Mode.restore:
-                    raise self.BadRequest(f"Mode is {self.controller.mode}, restore status is not available")
+                    raise BadRequest(f"Mode is {self.controller.mode}, restore status is not available")
                 raise Exception("Restore coordinator is not available even though state is 'restore'")
 
             with coordinator.state_manager.lock:
@@ -125,17 +123,22 @@ class WebServer:
         with self._handle_request(name="status_update"):
             body = await self._get_request_json(request)
             if body.get("mode") == Controller.Mode.active:
-                self.controller.switch_to_active_mode()
+                force = body.get("force")
+                if not isinstance(force, bool):
+                    force = False
+                if force:
+                    self.log.info("Switch to active mode with force flag requested")
+                self.controller.switch_to_active_mode(force=force)
             elif body.get("mode") == Controller.Mode.observe:
                 self.controller.switch_to_observe_mode()
             elif body.get("mode") == Controller.Mode.restore:
                 for key in {"site", "stream_id"}:
                     if not isinstance(body.get(key), str):
-                        raise self.BadRequest(f"Field {key!r} must be given and a string")
+                        raise BadRequest(f"Field {key!r} must be given and a string")
                 if not isinstance(body.get("target_time"), (int, type(None))):
-                    raise self.BadRequest("Field 'target_time' must be an integer when present")
+                    raise BadRequest("Field 'target_time' must be an integer when present")
                 if not isinstance(body.get("target_time_approximate_ok"), (bool, type(None))):
-                    raise self.BadRequest("Field 'target_time_approximate_ok' must be a boolean when present")
+                    raise BadRequest("Field 'target_time_approximate_ok' must be a boolean when present")
                 self.controller.restore_backup(
                     site=body["site"],
                     stream_id=body["stream_id"],
@@ -143,7 +146,7 @@ class WebServer:
                     target_time_approximate_ok=body.get("target_time_approximate_ok"),
                 )
             else:
-                raise self.BadRequest("Unexpected value {!r} for field 'mode'".format(body.get("mode")))
+                raise BadRequest("Unexpected value {!r} for field 'mode'".format(body.get("mode")))
 
             return json_response({"mode": self.controller.mode})
 
@@ -157,7 +160,7 @@ class WebServer:
     def _convert_exception_to_bad_request(self, *, method_name):
         try:
             yield
-        except (self.BadRequest, ValueError) as ex:
+        except (BadRequest, ValueError) as ex:
             raise web.HTTPBadRequest(content_type="application/json", text=json.dumps({"message": str(ex)}))
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Exception while handling request %r", method_name)
@@ -168,9 +171,9 @@ class WebServer:
         try:
             body = json.loads(await request.text())
         except Exception as ex:  # pylint= disable=broad-except
-            raise self.BadRequest(f"Failed to deserialize request body as JSON: {str(ex)}")
+            raise BadRequest(f"Failed to deserialize request body as JSON: {str(ex)}")
         if not isinstance(body, dict):
-            raise self.BadRequest("Request body must be JSON object")
+            raise BadRequest("Request body must be JSON object")
         return body
 
     async def start(self):
@@ -202,20 +205,20 @@ class WebServer:
     def validate_replication_state(cls, state):
         """Validates that given state value matches the format returned by parse_gtid_range_string"""
         if not isinstance(state, dict):
-            raise cls.BadRequest("Replication state must be name => object mapping")
+            raise BadRequest("Replication state must be name => object mapping")
         for gtids in state.values():
             if not isinstance(gtids, dict):
-                raise cls.BadRequest("Replication state objects must be uuid => object mappings")
+                raise BadRequest("Replication state objects must be uuid => object mappings")
             for maybe_uuid, ranges in gtids.items():
                 try:
                     uuid.UUID(maybe_uuid)
                 except Exception:  # pylint: disable=broad-except
-                    raise cls.BadRequest("Replication state objects must be uuid => object mappings")
+                    raise BadRequest("Replication state objects must be uuid => object mappings")
                 if not isinstance(ranges, list):
-                    raise cls.BadRequest("Individual values must be uuid => [[start1, end1], ...] mappings")
+                    raise BadRequest("Individual values must be uuid => [[start1, end1], ...] mappings")
                 for rng in ranges:
                     if not isinstance(rng, list) or len(rng) != 2:
-                        raise cls.BadRequest("List entries must be 2 element ([start, end]) lists")
+                        raise BadRequest("List entries must be 2 element ([start, end]) lists")
                     for start_end in rng:
                         if not isinstance(start_end, int):
-                            raise cls.BadRequest("Range start/end values must be integers")
+                            raise BadRequest("Range start/end values must be integers")

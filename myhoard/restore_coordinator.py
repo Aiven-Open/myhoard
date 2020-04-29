@@ -18,6 +18,7 @@ from .append_only_state_manager import AppendOnlyStateManager
 from .backup_stream import BINLOG_BUCKET_SIZE
 from .basebackup_restore_operation import BasebackupRestoreOperation
 from .binlog_downloader import download_binlog
+from .errors import BadRequest
 from .state_manager import StateManager
 from .util import (
     add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, make_gtid_range_string, mysql_cursor,
@@ -157,6 +158,7 @@ class RestoreCoordinator(threading.Thread):
             "gtid_executed": None,
             "gtids_patched": False,
             "file_fail_counters": {},
+            "force_complete": False,
             "last_flushed_index": 0,
             "last_poll": None,
             "last_processed_index": None,
@@ -209,6 +211,12 @@ class RestoreCoordinator(threading.Thread):
         # obviously cannot do anything with new binlog streams.
         final_phases = {self.Phase.finalizing, self.Phase.completed, self.Phase.failed, self.Phase.failed_basebackup}
         return not self.target_time and not self.state["target_time_reached"] and self.phase not in final_phases
+
+    def force_completion(self):
+        if self.phase == self.Phase.waiting_for_apply_to_finish:
+            self.update_state(force_complete=True)
+        else:
+            raise BadRequest("Completion can only be forced while waiting for binlog apply to finish")
 
     def is_complete(self):
         return self.phase == self.Phase.completed
@@ -504,6 +512,15 @@ class RestoreCoordinator(threading.Thread):
             self.pending_binlog_manager.remove_many_from_head(len(binlogs))
 
     def wait_for_apply_to_finish(self):
+        if self.state["force_complete"]:
+            self.log.warning("Force completion requested. Treating binlog restoration as complete")
+            self.update_state(
+                applying_binlogs=[],
+                phase=self.Phase.finalizing,
+                prefetched_binlogs=[],
+            )
+            return True
+
         expected_first_index = self.state["expected_first_pending_binlog_remote_index"]
         if expected_first_index:
             count_to_drop = 0
