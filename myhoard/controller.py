@@ -282,7 +282,7 @@ class Controller(threading.Thread):
                     if not self.restore_coordinator:
                         raise ValueError("Cannot switch mode, current restoration state is indeterminate")
                     self.restore_coordinator.force_completion()
-                    self.state_manager.update_state(promote_on_restore_completion=True)
+                    self.state_manager.update_state(force_promote=True, promote_on_restore_completion=True)
                     return
             elif force:
                 raise BadRequest("Can only force promotion while waiting for binlogs to be applied")

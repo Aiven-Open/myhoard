@@ -21,7 +21,7 @@ def test_basic_operations(session_tmpdir):
         new_file_size = os.stat(state_file_name).st_size
         assert new_file_size > file_size
         file_size = new_file_size
-        aosm.append({f"foo": f"bar{index + 1}"})
+        aosm.append({"foo": f"bar{index + 1}"})
         assert len(entries) == index + 2
 
     for index in range(1000):

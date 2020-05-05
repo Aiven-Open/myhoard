@@ -68,7 +68,7 @@ unittest: $(generated)
 
 .PHONY: pylint
 pylint: $(generated)
-	$(PYTHON) -m pylint.lint --rcfile .pylintrc $(ALL_PYTHON_DIRS)
+	$(PYTHON) -m pylint --rcfile .pylintrc $(ALL_PYTHON_DIRS)
 
 .PHONY: yapf
 yapf:
