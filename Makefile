@@ -5,20 +5,49 @@ generated = myhoard/version.py
 all: $(generated)
 
 PYTHON ?= python3
-PYTHON_SOURCE_DIRS = myhoard/
-PYTHON_TEST_DIRS = test/
-ALL_PYTHON_DIRS = $(PYTHON_SOURCE_DIRS) $(PYTHON_TEST_DIRS)
+PYTHON_SOURCE_DIRS = myhoard/ test/
+
 PYTEST_TMP ?= /var/tmp/pytest-of-$(USER)
 PYTEST_ARG ?= -vvv --log-level=INFO --basetemp "$(PYTEST_TMP)"
 
 MYSQL_SERVER_PACKAGE ?= mysql-server >= 8.0
 
+.PHONY: unittest
+unittest: version
+	$(PYTHON) -m pytest -vv test/
+
+.PHONY: typecheck
+typecheck: version
+	$(PYTHON) -m mypy --show-absolute-path $(PYTHON_SOURCE_DIRS)
+
+.PHONY: lint
+lint: version
+	$(PYTHON) -m pylint --rcfile .pylintrc $(PYTHON_SOURCE_DIRS)
+
+.PHONY: fmt
+fmt: version
+	unify --quote '"' --recursive --in-place $(PYTHON_SOURCE_DIRS)
+	isort --recursive $(PYTHON_SOURCE_DIRS)
+	yapf --parallel --recursive --in-place $(PYTHON_SOURCE_DIRS)
+
+.PHONY: copyright
+copyright:
+	grep -EL "Copyright \(c\) 20.* Aiven" $(shell git ls-files "*.py" | grep -v __init__.py)
+
+.PHONY: coverage
+coverage: version
+	$(PYTHON) -m pytest $(PYTEST_ARG) --cov-report term-missing --cov myhoard test/
+
+.PHONY: clean
 clean:
 	$(RM) -r *.egg-info/ build/ dist/
 	$(RM) ../myhoard_* test-*.xml $(generated)
 
 myhoard/version.py: version.py
 	$(PYTHON) $^ $@
+
+.PHONY: version
+version: myhoard/version.py
 
 .PHONY: rpm
 rpm: $(generated)
@@ -47,29 +76,3 @@ copyright:
 coverage: $(generated)
 	$(PYTHON) -m coverage run --source myhoard -m pytest $(PYTEST_ARG) test/
 	$(PYTHON) -m coverage report --show-missing
-
-.PHONY: flake8
-flake8: $(generated)
-	$(PYTHON) -m flake8 --exclude=__init__.py --max-line-len=125 $(ALL_PYTHON_DIRS)
-
-.PHONY: isort
-isort:
-	time isort --recursive $(ALL_PYTHON_DIRS)
-
-.PHONY: reformat
-reformat: isort yapf
-
-.PHONY: test
-test: flake8 pylint copyright unittest
-
-.PHONY: unittest
-unittest: $(generated)
-	$(PYTHON) -m pytest $(PYTEST_ARG) test/
-
-.PHONY: pylint
-pylint: $(generated)
-	$(PYTHON) -m pylint --rcfile .pylintrc $(ALL_PYTHON_DIRS)
-
-.PHONY: yapf
-yapf:
-	time yapf --parallel --recursive --in-place $(ALL_PYTHON_DIRS)

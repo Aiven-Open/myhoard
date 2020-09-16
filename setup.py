@@ -8,10 +8,8 @@ readme_path = os.path.join(os.path.dirname(__file__), "README.md")
 with open(readme_path, "r") as fp:
     readme_text = fp.read()
 
-
 version_for_setup_py = version.get_project_version("myhoard/version.py")
 version_for_setup_py = ".dev".join(version_for_setup_py.split("-", 2)[:2])
-
 
 setup(
     name="myhoard",
@@ -46,6 +44,8 @@ setup(
         "Intended Audience :: System Administrators",
         "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3.6",
+        "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
         "Topic :: Database :: Database Engines/Servers",
         "Topic :: Software Development :: Libraries",
     ],
