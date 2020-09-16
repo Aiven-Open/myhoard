@@ -1,8 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 import os
 
-import myhoard.util as myhoard_util
 import pytest
+
+import myhoard.util as myhoard_util
 from myhoard.basebackup_operation import BasebackupOperation
 
 from . import build_statsd_client
@@ -22,6 +23,7 @@ def test_basic_backup(mysql_master):
 
     backed_up_files = set()
 
+    # pylint: disable=unused-argument
     def progress_callback(
         *,
         estimated_progress,
