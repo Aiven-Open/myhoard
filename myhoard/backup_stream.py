@@ -17,6 +17,7 @@ from pghoard.rohmu.object_storage.s3 import S3Transfer
 
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
+from .errors import XtraBackupError
 from .state_manager import StateManager
 from .util import (
     add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, DEFAULT_MYSQL_TIMEOUT, ERR_TIMEOUT,
@@ -856,10 +857,14 @@ class BackupStream(threading.Thread):
                 self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
-            self.stats.unexpected_exception(ex=ex, where="BackupStream._take_basebackup")
             self.stats.increase("myhoard.basebackup.errors")
             self.state_manager.increment_counter(name="basebackup_errors")
             self.last_basebackup_attempt = time.monotonic()
+            # If this is not a remote failure error (i.e. any type of error arising from programming
+            # issues in Python then we want to log this as an unexpected exception so it'll dispatch
+            # to metrics and Sentry etc.
+            if not isinstance(ex, XtraBackupError):
+                self.stats.unexpected_exception(ex=ex, where="BackupStream._take_basebackup")
         finally:
             self.basebackup_operation = None
 
