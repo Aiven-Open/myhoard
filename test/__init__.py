@@ -1,15 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller
-from myhoard.statsd import StatsClient
-
 import asyncio
 import contextlib
 import multiprocessing
-import myhoard.util as myhoard_util
 import os
 import random
 import signal
@@ -18,6 +10,15 @@ import string
 import subprocess
 import threading
 import time
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+import myhoard.util as myhoard_util
+from myhoard.backup_stream import BackupStream
+from myhoard.controller import Controller
+from myhoard.statsd import StatsClient
 
 
 def build_controller(*, cls=None, default_backup_site, mysql_config, session_tmpdir, state_dir=None, temp_dir=None):
@@ -176,7 +177,7 @@ def wait_for_condition(condition, *, timeout=5.0, interval=0.1):
     start_time = time.monotonic()
     while True:
         if time.monotonic() - start_time >= timeout:
-            raise Exception("Timeout exceeded before condition was met")
+            raise Exception(f"Timeout of {timeout}s exceeded before condition was met")
         if condition():
             break
         time.sleep(interval)
