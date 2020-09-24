@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+import errno
 import json
 import os
 import threading
@@ -13,6 +14,14 @@ class StateManager:
         self.allow_unknown_keys = allow_unknown_keys
         self.lock = lock or threading.RLock()
         self.state = state
+
+        # Check that the state_file directory actually exists before initializing. If it doesn't
+        # then we'll just crash out later when we try to write to it. We'd prefer to crash here,
+        # where we're more likely to find the problem higher up the stack.
+        state_file_dirname = os.path.dirname(state_file)
+        if not os.path.isdir(state_file_dirname):
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), state_file_dirname)
+
         self.state_file = state_file
         self.read_state()
 
