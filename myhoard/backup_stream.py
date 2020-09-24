@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+import contextlib
 import enum
 import json
 import logging
@@ -167,6 +168,13 @@ class BackupStream(threading.Thread):
         self.stats = stats
         self.temp_dir = temp_dir
         self.wakeup_event = threading.Event()
+
+    @contextlib.contextmanager
+    def running(self):
+        """Start the BackupStream thread and shut it down when finished"""
+        self.start()
+        yield
+        self.stop()
 
     def activate(self):
         with self.lock:
