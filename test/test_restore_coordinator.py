@@ -2,12 +2,13 @@
 import os
 import time
 
-import myhoard.util as myhoard_util
 import pytest
+from pghoard.rohmu.object_storage.local import LocalTransfer
+
+import myhoard.util as myhoard_util
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
-from pghoard.rohmu.object_storage.local import LocalTransfer
 
 from . import (DataGenerator, build_statsd_client, generate_rsa_key_pair, restart_mysql, while_asserts)
 
@@ -23,7 +24,7 @@ def test_restore_coordinator_pitr(session_tmpdir, mysql_master, mysql_empty):
 
 
 def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, pitr):
-    with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
         cursor.execute("USE db1")
         cursor.execute("CREATE TABLE t1 (id INTEGER PRIMARY KEY, data TEXT)")
@@ -37,16 +38,16 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         backup_reason=BackupStream.BackupReason.requested,
         file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
         mode=BackupStream.Mode.active,
-        mysql_client_params=mysql_master["connect_options"],
-        mysql_config_file_name=mysql_master["config_name"],
-        mysql_data_directory=mysql_master["config_options"]["datadir"],
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
         normalized_backup_time="2019-02-25T08:20",
         rsa_public_key_pem=public_key_pem,
-        server_id=mysql_master["server_id"],
+        server_id=mysql_master.server_id,
         site="default",
         state_file=state_file_name1,
         stats=build_statsd_client(),
-        temp_dir=mysql_master["base_dir"],
+        temp_dir=mysql_master.base_dir,
     )
     # Use two backup streams to test recovery mode where basebackup is restored from earlier
     # backup and binlogs are applied from several different backups
@@ -54,20 +55,20 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         backup_reason=BackupStream.BackupReason.requested,
         file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
         mode=BackupStream.Mode.active,
-        mysql_client_params=mysql_master["connect_options"],
-        mysql_config_file_name=mysql_master["config_name"],
-        mysql_data_directory=mysql_master["config_options"]["datadir"],
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
         normalized_backup_time="2019-02-26T08:20",
         rsa_public_key_pem=public_key_pem,
-        server_id=mysql_master["server_id"],
+        server_id=mysql_master.server_id,
         site="default",
         state_file=state_file_name2,
         stats=build_statsd_client(),
-        temp_dir=mysql_master["base_dir"],
+        temp_dir=mysql_master.base_dir,
     )
 
     data_generator = DataGenerator(
-        connect_info=mysql_master["connect_options"],
+        connect_info=mysql_master.connect_options,
         # Don't make temp tables when we're testing point-in-time recovery because even though
         # those should work fine the current way of priming data makes it difficult to verify
         # which data should've been inserted at given point in time
@@ -84,8 +85,8 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     time.sleep(phase_duration * 2)
 
     scanner = BinlogScanner(
-        binlog_prefix=mysql_master["config_options"]["binlog_file_prefix"],
-        server_id=mysql_master["server_id"],
+        binlog_prefix=mysql_master.config_options.binlog_file_prefix,
+        server_id=mysql_master.server_id,
         state_file=os.path.join(session_tmpdir().strpath, "scanner_state.json"),
         stats=build_statsd_client(),
     )
@@ -166,7 +167,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         # to make sure we restore exactly the events we want. To avoid any transient failures sleep a bit more
         time.sleep(2)
         pitr_row_count = data_generator.committed_row_count
-        with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
+        with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
             cursor.execute("SHOW MASTER STATUS")
             pitr_master_status = cursor.fetchone()
             print(time.time(), "Master status at PITR target time", pitr_master_status)
@@ -191,7 +192,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     data_generator.join()
     # Force binlog flush, earlier data generation might not have flushed binlogs in which case the target
     # entry would not be available for recovery
-    with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("FLUSH BINARY LOGS")
 
     bs2.add_binlogs(scanner.scan_new(None))
@@ -212,7 +213,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     assert bs2.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog
 
-    with myhoard_util.mysql_cursor(**mysql_master["connect_options"]) as cursor:
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("SHOW MASTER STATUS")
         original_master_status = cursor.fetchone()
         print("Original master status", original_master_status)
@@ -222,9 +223,9 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     restored_connect_options = {
         "host": "127.0.0.1",
-        "password": mysql_master["password"],
-        "port": mysql_empty["port"],
-        "user": mysql_master["user"],
+        "password": mysql_master.password,
+        "port": mysql_empty.port,
+        "user": mysql_master.user,
     }
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
     # Restore basebackup from backup stream 1 but binlogs from both streams. First stream doesn't
@@ -242,10 +243,10 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
             "storage_type": "local",
         },
         mysql_client_params=restored_connect_options,
-        mysql_config_file_name=mysql_empty["config_name"],
-        mysql_data_directory=mysql_empty["config_options"]["datadir"],
-        mysql_relay_log_index_file=mysql_empty["config_options"]["relay_log_index_file"],
-        mysql_relay_log_prefix=mysql_empty["config_options"]["relay_log_file_prefix"],
+        mysql_config_file_name=mysql_empty.config_name,
+        mysql_data_directory=mysql_empty.config_options.datadir,
+        mysql_relay_log_index_file=mysql_empty.config_options.relay_log_index_file,
+        mysql_relay_log_prefix=mysql_empty.config_options.relay_log_file_prefix,
         pending_binlogs_state_file=state_file_name.replace(".json", "") + ".pending_binlogs",
         restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_empty, **kwargs),
         rsa_private_key_pem=private_key_pem,
@@ -254,7 +255,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         stats=build_statsd_client(),
         stream_id=bs1.state["stream_id"],
         target_time=pitr_target_time,
-        temp_dir=mysql_empty["base_dir"],
+        temp_dir=mysql_empty.base_dir,
     )
     # Only allow a few simultaneous binlogs so that we get to test multiple apply rounds even with small data set
     rc.max_binlog_count = 3
