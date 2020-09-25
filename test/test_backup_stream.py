@@ -2,12 +2,13 @@
 import json
 import os
 
-import myhoard.util as myhoard_util
 import pytest
+from pghoard.rohmu.object_storage.local import LocalTransfer
+
+import myhoard.util as myhoard_util
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.controller import Controller
-from pghoard.rohmu.object_storage.local import LocalTransfer
 
 from . import build_statsd_client, generate_rsa_key_pair, wait_for_condition
 
@@ -20,7 +21,7 @@ def test_backup_stream(session_tmpdir, mysql_master):
 
 def test_backup_stream_with_s3_emulation(session_tmpdir, mysql_master):
     class PatchedBackupStream(BackupStream):
-        def _should_list_with_metadata(self, *, next_index):
+        def _should_list_with_metadata(self, *, next_index):  # pylint: disable=unused-argument
             return False
 
     _run_backup_stream_test(session_tmpdir, mysql_master, PatchedBackupStream)

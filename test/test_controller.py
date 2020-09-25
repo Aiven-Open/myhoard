@@ -6,6 +6,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.restore_coordinator import RestoreCoordinator
@@ -301,11 +302,11 @@ def test_3_node_service_failover_and_restore(
             complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
             assert len(complete_backups) == backup_count
 
-        while_asserts(lambda: streams_available_master_streaming_binlogs(1), timeout=15)
+        while_asserts(lambda: streams_available_master_streaming_binlogs(1), timeout=30)
 
         # Take another backup so that we get to test that existing uploads are reused (remote copied)
         mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
-        while_asserts(lambda: streams_available_master_streaming_binlogs(2), timeout=15)
+        while_asserts(lambda: streams_available_master_streaming_binlogs(2), timeout=30)
         mcontroller.stats.increase.assert_any_call("myhoard.binlog.remote_copy")
         mcontroller.stats.increase.assert_any_call("myhoard.binlog.upload")
 
@@ -342,7 +343,7 @@ def test_3_node_service_failover_and_restore(
                         status = cursor.fetchone()["Slave_SQL_Running_State"]
                         assert status == "Slave has read all relay log; waiting for more updates"
 
-                while_asserts(relay_log_applied, timeout=15)
+                while_asserts(relay_log_applied, timeout=30)
                 cursor1.execute("STOP SLAVE SQL_THREAD")
                 cursor2.execute("STOP SLAVE SQL_THREAD")
 
@@ -395,7 +396,7 @@ def test_3_node_service_failover_and_restore(
                 standby_cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
 
                 # Wait for backup promotion steps to complete
-                wait_for_condition(lambda: new_mcontroller.mode == Controller.Mode.active, timeout=15)
+                wait_for_condition(lambda: new_mcontroller.mode == Controller.Mode.active, timeout=30)
 
                 # pylint: disable=protected-access
                 promotions = new_mcontroller.backup_streams[0]._get_promotions(ignore_own_promotion=False)
@@ -649,24 +650,50 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     # Can add backups but backup being restored is not the last one, does not try to look up new backups
     rc.can_add_binlog_streams.return_value = True
     controller.state["backups"] = [
-        {"completed_at": "2", "site": "a", "stream_id": "2"},
-        {"completed_at": "1", "site": "a", "stream_id": "1"},
+        {
+            "completed_at": "2",
+            "site": "a",
+            "stream_id": "2"
+        },
+        {
+            "completed_at": "1",
+            "site": "a",
+            "stream_id": "1"
+        },
     ]
     rc.binlog_streams = [
-        {"site": "a", "stream_id": "1"},
+        {
+            "site": "a",
+            "stream_id": "1"
+        },
     ]
     controller.extend_binlog_stream_list()
     backups.assert_not_called()
 
     # Can add backups and restoring last backup, looks up new backups but does nothing because no new ones are found
     rc.binlog_streams = [
-        {"site": "a", "stream_id": "2"},
+        {
+            "site": "a",
+            "stream_id": "2"
+        },
     ]
     rc.stream_id = "2"
     backups.return_value = [
-        {"completed_at": "2", "site": "a", "stream_id": "2"},
-        {"completed_at": "1", "site": "a", "stream_id": "1"},
-        {"completed_at": "0", "site": "a", "stream_id": "0"},
+        {
+            "completed_at": "2",
+            "site": "a",
+            "stream_id": "2"
+        },
+        {
+            "completed_at": "1",
+            "site": "a",
+            "stream_id": "1"
+        },
+        {
+            "completed_at": "0",
+            "site": "a",
+            "stream_id": "0"
+        },
     ]
     controller.extend_binlog_stream_list()
     backups.assert_called()
@@ -674,9 +701,21 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
 
     # Can add backups and restoring last backup, new backup is found and added to list of binlog streams to restore
     backups.return_value = [
-        {"completed_at": "3", "site": "a", "stream_id": "3"},
-        {"completed_at": "2", "site": "a", "stream_id": "2"},
-        {"completed_at": "1", "site": "a", "stream_id": "1"},
+        {
+            "completed_at": "3",
+            "site": "a",
+            "stream_id": "3"
+        },
+        {
+            "completed_at": "2",
+            "site": "a",
+            "stream_id": "2"
+        },
+        {
+            "completed_at": "1",
+            "site": "a",
+            "stream_id": "1"
+        },
     ]
     rc.add_new_binlog_streams.return_value = True
     controller.state["restore_options"] = {"binlog_streams": rc.binlog_streams, "foo": "abc"}
@@ -685,8 +724,14 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     rc.add_new_binlog_streams.assert_called_with([{"site": "a", "stream_id": "3"}])
     assert controller.state["restore_options"] == {
         "binlog_streams": [
-            {"site": "a", "stream_id": "2"},
-            {"site": "a", "stream_id": "3"},
+            {
+                "site": "a",
+                "stream_id": "2"
+            },
+            {
+                "site": "a",
+                "stream_id": "3"
+            },
         ],
         "foo": "abc",
     }

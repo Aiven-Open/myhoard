@@ -429,7 +429,7 @@ class RestoreCoordinator(threading.Thread):
                             "RELAY_LOG_POS": relay_log_pos,
                         },
                     )
-                except pymysql.err.InternalError as ex:
+                except (pymysql.err.InternalError, pymysql.err.OperationalError) as ex:
                     if ex.args[0] != ER_MASTER_INFO:
                         raise ex
                     # In some situations the MySQL SQL threads go into a bad state and always fail when doing

@@ -1,23 +1,23 @@
-[MASTER]
-
 [MESSAGES CONTROL]
 disable=
-    abstract-method,
-    bad-continuation,
-    chained-comparison,  # R1716: Simplify chained comparison between the operands
+    bad-option-value,
     duplicate-code,
     fixme,
+    import-outside-toplevel,
     invalid-name,
     len-as-condition,
+    locally-disabled,
     missing-docstring,
+    no-else-raise,
     no-else-return,
     no-self-use,
-    superfluous-parens,
+    raise-missing-from,
     too-few-public-methods,
     too-many-ancestors,
     too-many-arguments,
     too-many-boolean-expressions,
     too-many-branches,
+    too-many-function-args,
     too-many-instance-attributes,
     too-many-lines,
     too-many-locals,
@@ -25,9 +25,8 @@ disable=
     too-many-public-methods,
     too-many-statements,
     ungrouped-imports,
-    unused-argument,
     wrong-import-order,
-    line-too-long
+    wrong-import-position
 
 [FORMAT]
 max-line-length=125
@@ -35,7 +34,3 @@ max-line-length=125
 [REPORTS]
 output-format=text
 reports=no
-score=no
-
-[TYPECHECK]
-ignored-classes=PurePath,responses
