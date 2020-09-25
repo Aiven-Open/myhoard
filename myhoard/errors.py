@@ -3,3 +3,7 @@
 
 class BadRequest(Exception):
     pass
+
+
+class XtraBackupError(Exception):
+    """Raised when the backup operation fails."""

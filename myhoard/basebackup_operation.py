@@ -12,6 +12,8 @@ from contextlib import suppress
 
 from pghoard.common import increase_pipe_capacity, set_stream_nonblocking
 
+from myhoard.errors import XtraBackupError
+
 
 class BasebackupOperation:
     """Creates a new basebackup. Provides callback for getting progress info, extracts
@@ -197,7 +199,7 @@ class BasebackupOperation:
 
         if exit_code != 0:
             self.log.error("xtrabackup exited with non-zero exit code %s: %r", exit_code, pending_output)
-            raise Exception(f"xtrabackup failed with code {exit_code}")
+            raise XtraBackupError(f"xtrabackup failed with code {exit_code}")
 
         # Reader thread might have encountered an exception after xtrabackup exited if it hadn't
         # yet finished storing data to backup location
