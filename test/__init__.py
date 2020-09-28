@@ -21,7 +21,38 @@ from myhoard.controller import Controller
 from myhoard.statsd import StatsClient
 
 
-def build_controller(*, cls=None, default_backup_site, mysql_config, session_tmpdir, state_dir=None, temp_dir=None):
+class MySQLConfig:
+    def __init__(
+        self,
+        *,
+        base_dir=None,
+        config=None,
+        config_name=None,
+        config_options=None,
+        connect_options=None,
+        password=None,
+        port=None,
+        proc=None,
+        server_id=None,
+        startup_command=None,
+        user=None
+    ):
+        self.base_dir = base_dir
+        self.config = config
+        self.config_name = config_name
+        self.config_options = config_options
+        self.connect_options = connect_options
+        self.password = password
+        self.port = port
+        self.proc = proc
+        self.server_id = server_id
+        self.startup_command = startup_command
+        self.user = user
+
+
+def build_controller(
+    *, cls=None, default_backup_site, mysql_config: MySQLConfig, session_tmpdir, state_dir=None, temp_dir=None
+):
     Controller.ITERATION_SLEEP = 0.1
     Controller.BACKUP_REFRESH_INTERVAL_BASE = 0.1
     Controller.BACKUP_REFRESH_ACTIVE_MULTIPLIER = 1
@@ -51,15 +82,15 @@ def build_controller(*, cls=None, default_backup_site, mysql_config, session_tmp
             "purge_interval": 1,
             "purge_when_observe_no_streams": True,
         },
-        mysql_binlog_prefix=mysql_config["config_options"]["binlog_file_prefix"],
-        mysql_client_params=mysql_config["connect_options"],
-        mysql_config_file_name=mysql_config["config_name"],
-        mysql_data_directory=mysql_config["config_options"]["datadir"],
-        mysql_relay_log_index_file=mysql_config["config_options"]["relay_log_index_file"],
-        mysql_relay_log_prefix=mysql_config["config_options"]["relay_log_file_prefix"],
+        mysql_binlog_prefix=mysql_config.config_options.binlog_file_prefix,
+        mysql_client_params=mysql_config.connect_options,
+        mysql_config_file_name=mysql_config.config_name,
+        mysql_data_directory=mysql_config.config_options.datadir,
+        mysql_relay_log_index_file=mysql_config.config_options.relay_log_index_file,
+        mysql_relay_log_prefix=mysql_config.config_options.relay_log_file_prefix,
         restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_config, **kwargs),
         restore_max_binlog_bytes=2 * 1024 * 1024,
-        server_id=mysql_config["server_id"],
+        server_id=mysql_config.server_id,
         state_dir=state_dir,
         stats=build_statsd_client(),
         temp_dir=temp_dir,
@@ -71,7 +102,33 @@ def build_statsd_client():
     return StatsClient(host=None, port=None, tags=None)
 
 
-def get_mysql_config_options(*, config_path, name, server_id, test_base_dir):
+class MySQLConfigOptions:
+    def __init__(
+        self,
+        binlog_file_prefix,
+        binlog_index_file,
+        datadir,
+        parallel_workers,
+        pid_file,
+        port,
+        read_only,
+        relay_log_file_prefix,
+        relay_log_index_file,
+        server_id,
+    ):
+        self.binlog_file_prefix = binlog_file_prefix
+        self.binlog_index_file = binlog_index_file
+        self.datadir = datadir
+        self.parallel_workers = parallel_workers
+        self.pid_file = pid_file
+        self.port = port
+        self.read_only = read_only
+        self.relay_log_file_prefix = relay_log_file_prefix
+        self.relay_log_index_file = relay_log_index_file
+        self.server_id = server_id
+
+
+def get_mysql_config_options(*, config_path, name, server_id, test_base_dir) -> MySQLConfigOptions:
     os.makedirs(config_path)
     data_dir = os.path.join(test_base_dir, "data")
     os.makedirs(data_dir)
@@ -81,7 +138,7 @@ def get_mysql_config_options(*, config_path, name, server_id, test_base_dir):
     os.makedirs(relay_log_dir)
 
     port = get_random_port()
-    return dict(
+    return MySQLConfigOptions(
         binlog_file_prefix=os.path.join(binlog_dir, "bin"),
         binlog_index_file=os.path.join(test_base_dir, "binlog.index"),
         datadir=data_dir,
@@ -96,20 +153,20 @@ def get_mysql_config_options(*, config_path, name, server_id, test_base_dir):
 
 
 def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
-    if mysql_config["proc"]:
-        proc = mysql_config["proc"]
-        mysql_config["proc"] = None
+    if mysql_config.proc:
+        proc = mysql_config.proc
+        mysql_config.proc = None
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=20.0)
         print("Stopped mysqld with pid", proc.pid)
-    command = mysql_config["startup_command"]
+    command = mysql_config.startup_command
     if not with_binlog:
         command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
-    mysql_config["proc"] = subprocess.Popen(command)
-    print("Started mysqld with pid", mysql_config["proc"].pid)
-    wait_for_port(mysql_config["port"], wait_time=10)
+    mysql_config.proc = subprocess.Popen(command)
+    print("Started mysqld with pid", mysql_config.proc.pid)
+    wait_for_port(mysql_config.port, wait_time=10)
 
 
 def port_is_listening(hostname, port, ipv6):

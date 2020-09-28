@@ -1,20 +1,38 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 import contextlib
+import logging
 import os
 import shutil
 import signal
 import subprocess
+import sys
+from typing import Optional
 
 import pytest
+
 from myhoard.util import (atomic_create_file, change_master_to, mysql_cursor, wait_for_port)
 from myhoard.web_server import WebServer
 
 from . import (
-    build_controller, build_statsd_client, generate_rsa_key_pair, get_mysql_config_options, get_random_port,
+    MySQLConfig, build_controller, build_statsd_client, generate_rsa_key_pair, get_mysql_config_options, get_random_port,
     random_basic_string
 )
 
 pytest_plugins = "aiohttp.pytest_plugin"
+
+# Force logging to be configured verbose so we can debug tests easily.
+_log_level_str = os.getenv("MYHOARD_TEST_LOG_LEVEL", "WARNING")
+_test_log_level = logging._nameToLevel[_log_level_str]  # pylint: disable=protected-access
+_test_mysqld_log_level = int(os.getenv("MYHOARD_TEST_MYSQLD_LOG_LEVEL", "0"))
+
+root = logging.getLogger()
+root.setLevel(_test_log_level)
+
+handler = logging.StreamHandler(sys.stderr)
+handler.setLevel(_test_log_level)
+formatter = logging.Formatter("%(asctime)s:%(name)s:%(levelname)s:%(pathname)s:%(lineno)d:%(message)s")
+handler.setFormatter(formatter)
+root.addHandler(handler)
 
 
 @pytest.fixture(scope="session", name="session_tmpdir")
@@ -58,17 +76,19 @@ def fixture_mysql_empty(session_tmpdir):
 
 
 @contextlib.contextmanager
-def mysql_setup_teardown(session_tmpdir, *, empty=False, master=None, name, server_id):
+def mysql_setup_teardown(session_tmpdir, *, empty=False, master: Optional[MySQLConfig] = None, name, server_id):
     config = mysql_initialize_and_start(session_tmpdir, empty=empty, master=master, name=name, server_id=server_id)
     try:
         yield config
     finally:
-        if config["proc"]:
-            os.kill(config["proc"].pid, signal.SIGKILL)
-            config["proc"].wait(timeout=10.0)
+        if config.proc:
+            os.kill(config.proc.pid, signal.SIGKILL)
+            config.proc.wait(timeout=10.0)
 
 
-def mysql_initialize_and_start(session_tmpdir, *, empty=False, master=None, name, server_id):
+def mysql_initialize_and_start(
+    session_tmpdir, *, empty=False, master: Optional[MySQLConfig] = None, name, server_id
+) -> MySQLConfig:
     mysql_basedir = os.environ.get("MYHOARD_MYSQL_BASEDIR")
     if mysql_basedir is None and os.path.exists("/opt/mysql"):
         mysql_basedir = "/opt/mysql"
@@ -82,36 +102,36 @@ def mysql_initialize_and_start(session_tmpdir, *, empty=False, master=None, name
     config_options = get_mysql_config_options(
         config_path=config_path, name=name, server_id=server_id, test_base_dir=test_base_dir
     )
-    port = config_options["port"]
 
-    config = """
+    config = f"""
 [mysqld]
 binlog-transaction-dependency-tracking=WRITESET
 binlog-format=ROW
-datadir={datadir}
+datadir={config_options.datadir}
 enforce-gtid-consistency=ON
 gtid-mode=ON
-log-bin={binlog_file_prefix}
-log-bin-index={binlog_index_file}
+log-bin={config_options.binlog_file_prefix}
+log-bin-index={config_options.binlog_index_file}
+log_error_verbosity = {_test_mysqld_log_level}
 mysqlx=OFF
-pid-file={pid_file}
-port={port}
-read-only={read_only}
-relay-log={relay_log_file_prefix}
-relay-log-index={relay_log_index_file}
+pid-file={config_options.pid_file}
+port={config_options.port}
+read-only={config_options.read_only}
+relay-log={config_options.relay_log_file_prefix}
+relay-log-index={config_options.relay_log_index_file}
 server-id={server_id}
 skip-name-resolve=ON
 skip-slave-start=ON
 slave-parallel-type=LOGICAL_CLOCK
-slave-parallel-workers={parallel_workers}
+slave-parallel-workers={config_options.parallel_workers}
 slave-preserve-commit-order=ON
-socket={datadir}/mysql.sock
+socket={config_options.datadir}/mysql.sock
 sql-mode=ANSI,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
 transaction-write-set-extraction=XXHASH64
 
 [validate_password]
 policy=LOW
-""".format(**config_options)
+"""
 
     config_file = os.path.join(config_path, "my.cnf")
     with atomic_create_file(config_file, perm=0o644) as f:
@@ -120,12 +140,12 @@ policy=LOW
     password = random_basic_string()
     init_file = os.path.join(config_path, "init_file.sql")
 
-    init_config = """
+    init_config = f"""
 DROP USER IF EXISTS 'root'@'localhost';
 CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '{password}';
 GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
-""".format(password=password)
+"""
 
     with atomic_create_file(init_file, perm=0o644) as f:
         f.write(init_config)
@@ -154,7 +174,7 @@ FLUSH PRIVILEGES;
     connect_options = {
         "host": "127.0.0.1",
         "password": password,
-        "port": port,
+        "port": config_options.port,
         "timeout": 10,
         "user": "root",
     }
@@ -164,11 +184,11 @@ FLUSH PRIVILEGES;
         cmd.append(f"--basedir={mysql_basedir}")
     if empty:
         # Empty server is used for restoring data. Wipe data directory and don't start the server
-        shutil.rmtree(config_options["datadir"])
+        shutil.rmtree(config_options.datadir)
         proc = None
     else:
         proc = subprocess.Popen(cmd)
-        wait_for_port(host="127.0.0.1", port=port, timeout=30.0)
+        wait_for_port(host="127.0.0.1", port=config_options.port, timeout=30.0)
         # Ensure connecting to the newly started server works and if this is standby also start replication
         with mysql_cursor(**connect_options) as cursor:
             if master:
@@ -178,29 +198,29 @@ FLUSH PRIVILEGES;
                         "MASTER_AUTO_POSITION": 1,
                         "MASTER_CONNECT_RETRY": 0.1,
                         "MASTER_HOST": "127.0.0.1",
-                        "MASTER_PORT": master["port"],
-                        "MASTER_PASSWORD": master["password"],
+                        "MASTER_PORT": master.port,
+                        "MASTER_PASSWORD": master.password,
                         "MASTER_SSL": 0,
-                        "MASTER_USER": master["user"],
+                        "MASTER_USER": master.user,
                     }
                 )
                 cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
             else:
                 cursor.execute("SELECT 1")
 
-    return {
-        "base_dir": test_base_dir,
-        "config": config,
-        "config_name": config_file,
-        "config_options": config_options,
-        "connect_options": connect_options,
-        "password": password,
-        "port": port,
-        "proc": proc,
-        "server_id": server_id,
-        "startup_command": cmd,
-        "user": "root",
-    }
+    return MySQLConfig(
+        base_dir=test_base_dir,
+        config=config,
+        config_name=config_file,
+        config_options=config_options,
+        connect_options=connect_options,
+        password=password,
+        port=config_options.port,
+        proc=proc,
+        server_id=server_id,
+        startup_command=cmd,
+        user="root",
+    )
 
 
 @pytest.fixture(scope="function", name="encryption_keys")
@@ -298,22 +318,22 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
         "http_address": "127.0.0.1",
         "http_port": get_random_port(start=3000, end=30000),
         "mysql": {
-            "binlog_prefix": mysql_master["config_options"]["binlog_file_prefix"],
+            "binlog_prefix": mysql_master.config_options.binlog_file_prefix,
             "client_params": {
                 "host": "127.0.0.1",
                 "password": "NgLqvU8gbWCtfJWJPy",
                 "port": 3306,
                 "user": "root"
             },
-            "config_file_name": mysql_master["config_name"],
-            "data_directory": mysql_master["config_options"]["datadir"],
-            "relay_log_index_file": mysql_master["config_options"]["relay_log_index_file"],
-            "relay_log_prefix": mysql_master["config_options"]["relay_log_file_prefix"],
+            "config_file_name": mysql_master.config_name,
+            "data_directory": mysql_master.config_options.datadir,
+            "relay_log_index_file": mysql_master.config_options.relay_log_index_file,
+            "relay_log_prefix": mysql_master.config_options.relay_log_file_prefix,
         },
         "restore_max_binlog_bytes": 4294967296,
         "sentry_dsn": None,
-        "server_id": mysql_master["server_id"],
-        "start_command": mysql_master["startup_command"],
+        "server_id": mysql_master.server_id,
+        "start_command": mysql_master.startup_command,
         "state_directory": state_dir,
         "statsd": {
             "host": None,

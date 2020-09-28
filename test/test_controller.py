@@ -12,7 +12,7 @@ from myhoard.controller import Controller
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges)
 
-from . import (DataGenerator, build_controller, get_mysql_config_options, wait_for_condition, while_asserts)
+from . import (DataGenerator, MySQLConfig, build_controller, get_mysql_config_options, wait_for_condition, while_asserts)
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -22,10 +22,10 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
     and restore that from backup and promote as new master immediate to simulate scenario where old
     master without standbys has failed and is replaced by new server."""
     mcontroller, master = master_controller
-    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
 
     new_master_controller = None
-    master_dg = DataGenerator(connect_info=master["connect_options"], make_temp_tables=False)
+    master_dg = DataGenerator(connect_info=master.connect_options, make_temp_tables=False)
     try:
         master_dg.start()
 
@@ -86,7 +86,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         mcontroller.start()
 
         binlogs = set()
-        with mysql_cursor(**master["connect_options"]) as cursor:
+        with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("SHOW BINARY LOGS")
             for binlog in cursor.fetchall():
                 binlogs.add(binlog["Log_name"])
@@ -109,7 +109,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         wait_for_condition(lambda: new_master_controller.mode == Controller.Mode.active, timeout=15)
 
         def new_master_has_all_data():
-            with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+            with mysql_cursor(**mysql_empty.connect_options) as cursor:
                 cursor.execute(
                     "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed, @@GLOBAL.gtid_executed AS gtid_executed",
                     [old_master_gtid_executed]
@@ -133,7 +133,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
     applied (simulating a scenario where old master has failed but binary logs cannot be applied in
     reasonable amount of time and some data loss is preferable over very long wait)."""
     mcontroller, master = master_controller
-    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
 
     new_master_controller = None
     try:
@@ -151,7 +151,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
 
         # Create table with large number of rows and no primary key; updated and deletes from this
         # are very slow to replicate
-        with mysql_cursor(**master["connect_options"]) as cursor:
+        with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("CREATE TABLE large_no_pk (id INTEGER);")
             iteration_entries = 5000
             cursor.execute(f"SET cte_max_recursion_depth = {iteration_entries}")
@@ -214,7 +214,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         new_master_controller.switch_to_active_mode(force=True)
         wait_for_condition(lambda: new_master_controller.mode == Controller.Mode.active, timeout=15)
 
-        with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+        with mysql_cursor(**mysql_empty.connect_options) as cursor:
             cursor.execute("SELECT COUNT(*) AS count FROM large_no_pk WHERE id = 1")
             result = cursor.fetchone()
             # This particular row is expected to be deleted
@@ -247,9 +247,9 @@ def test_3_node_service_failover_and_restore(
 
     # Empty server will be initialized from backup that has been created from master so it'll use the same password
     # (normally all servers should be restored from same backup but we're not simulating that here now)
-    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
 
-    with mysql_cursor(**master["connect_options"]) as cursor:
+    with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("SELECT @@GLOBAL.server_uuid AS server_uuid")
         original_server_uuid = cursor.fetchone()["server_uuid"]
 
@@ -259,7 +259,7 @@ def test_3_node_service_failover_and_restore(
         controller.binlog_purge_settings["min_binlog_age_before_purge"] = 1
         controller.binlog_purge_settings["purge_interval"] = 0.1
 
-    master_dg = DataGenerator(connect_info=master["connect_options"], make_temp_tables=False)
+    master_dg = DataGenerator(connect_info=master.connect_options, make_temp_tables=False)
     new_master_dg = None
     try:
         master_dg.start()
@@ -284,7 +284,7 @@ def test_3_node_service_failover_and_restore(
             # Flush binlogs on standbys so that we get to test that new master doesn't upload binlog that
             # only has GTIDs that have already been backed up
             for idx, standby in enumerate([standby1, standby2]):
-                with mysql_cursor(**standby["connect_options"]) as cursor:
+                with mysql_cursor(**standby.connect_options) as cursor:
                     cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
                     gtid_executed = cursor.fetchone()["gtid_executed"]
                     if gtid_executed != last_gtid_executeds[idx]:
@@ -292,7 +292,7 @@ def test_3_node_service_failover_and_restore(
                         last_gtid_executeds[idx] = gtid_executed
             if backup_count > 1:
                 # Do some flushes on master to ensure there are simultaneous binlog uploads and existing ones get reused
-                with mysql_cursor(**master["connect_options"]) as cursor:
+                with mysql_cursor(**master.connect_options) as cursor:
                     cursor.execute("CREATE TABLE foo_{} (id INTEGER)".format(str(time.time()).replace(".", "_")))
                     cursor.execute("COMMIT")
                     cursor.execute("FLUSH BINARY LOGS")
@@ -313,7 +313,7 @@ def test_3_node_service_failover_and_restore(
         for _ in range(5):
             time.sleep(phase_duration / 5)
             for standby in [standby1, standby2]:
-                with mysql_cursor(**standby["connect_options"]) as cursor:
+                with mysql_cursor(**standby.connect_options) as cursor:
                     cursor.execute("FLUSH BINARY LOGS")
 
         assert mcontroller.backup_streams[0].remote_binlogs
@@ -331,8 +331,8 @@ def test_3_node_service_failover_and_restore(
         # Do what would happen during normal promotion; all standbys stop reading from master to ensure they can
         # get to a consistent state, then we pick the standby that is furthest in replication as the new master.
         # Note that we're not stopping master or data generation to master here to ensure rogue master case works.
-        with mysql_cursor(**standby1["connect_options"]) as cursor1:
-            with mysql_cursor(**standby2["connect_options"]) as cursor2:
+        with mysql_cursor(**standby1.connect_options) as cursor1:
+            with mysql_cursor(**standby2.connect_options) as cursor2:
                 cursor1.execute("STOP SLAVE IO_THREAD")
                 cursor2.execute("STOP SLAVE IO_THREAD")
 
@@ -386,10 +386,10 @@ def test_3_node_service_failover_and_restore(
                     "MASTER_AUTO_POSITION": 1,
                     "MASTER_CONNECT_RETRY": 0.1,
                     "MASTER_HOST": "127.0.0.1",
-                    "MASTER_PASSWORD": new_master["password"],
-                    "MASTER_PORT": new_master["port"],
+                    "MASTER_PASSWORD": new_master.password,
+                    "MASTER_PORT": new_master.port,
                     "MASTER_SSL": 0,
-                    "MASTER_USER": master["user"],
+                    "MASTER_USER": master.user,
                 }
                 new_mcontroller.switch_to_active_mode()
                 change_master_to(cursor=standby_cursor, options=master_options)
@@ -405,7 +405,7 @@ def test_3_node_service_failover_and_restore(
                 new_master_cursor.execute("SET @@GLOBAL.read_only = 0")
 
                 new_master_dg = DataGenerator(
-                    connect_info=new_master["connect_options"],
+                    connect_info=new_master.connect_options,
                     index_offset=master_dg.row_count + 1,
                     make_temp_tables=False,
                 )
@@ -438,7 +438,7 @@ def test_3_node_service_failover_and_restore(
                 # when basebackup restoration finished
                 wait_for_condition(restore_complete, timeout=120)
 
-                with mysql_cursor(**mysql_empty["connect_options"]) as standby3_cursor:
+                with mysql_cursor(**mysql_empty.connect_options) as standby3_cursor:
                     change_master_to(cursor=standby3_cursor, options=master_options)
                     standby3_cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
                     s3controller[0].switch_to_observe_mode()
@@ -552,7 +552,7 @@ def test_empty_server_backup_and_restore(
     mcontroller, master = master_controller
     s3controller = None
 
-    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
 
     try:
         mcontroller.switch_to_active_mode()
@@ -585,7 +585,7 @@ def test_empty_server_backup_and_restore(
             timeout=20,
         )
 
-        with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+        with mysql_cursor(**mysql_empty.connect_options) as cursor:
             cursor.execute("SELECT 1 AS result")
             assert cursor.fetchone()["result"] == 1
 
@@ -627,14 +627,14 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     controller = build_controller(
         cls=DummyController,
         default_backup_site=default_backup_site,
-        mysql_config={
-            "config_options": get_mysql_config_options(
+        mysql_config=MySQLConfig(
+            config_options=get_mysql_config_options(
                 config_path=config_path, name=name, server_id=1, test_base_dir=test_base_dir
             ),
-            "config_name": os.path.join(config_path, "my.cnf"),
-            "connect_options": {},
-            "server_id": 1,
-        },
+            config_name=os.path.join(config_path, "my.cnf"),
+            connect_options={},
+            server_id=1,
+        ),
         session_tmpdir=session_tmpdir,
         state_dir=state_dir,
         temp_dir=temp_dir,
@@ -757,7 +757,7 @@ def test_multiple_backup_management(master_controller):
 
     def maybe_flush_binlog():
         if time.monotonic() - last_flush[0] > 0.2:
-            with mysql_cursor(**master["connect_options"]) as cursor:
+            with mysql_cursor(**master.connect_options) as cursor:
                 cursor.execute("FLUSH BINARY LOGS")
             last_flush[0] = time.monotonic()
 
@@ -819,7 +819,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
 
     # Empty server will be initialized from backup that has been created from master so it'll use the same password
     # (normally all servers should be restored from same backup but we're not simulating that here now)
-    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
 
     mcontroller.switch_to_active_mode()
     mcontroller.start()
@@ -831,7 +831,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
     while_asserts(streaming_binlogs, timeout=10)
 
     # Write some data to database that predates second backup
-    with mysql_cursor(**master["connect_options"]) as cursor:
+    with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("CREATE TABLE foo (id INTEGER)")
         cursor.execute("INSERT INTO foo VALUES (1)")
         cursor.execute("COMMIT")
@@ -851,7 +851,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
     while_asserts(has_single_stream, timeout=10)
 
     # Insert something that is only included in the second backup
-    with mysql_cursor(**master["connect_options"]) as cursor:
+    with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("INSERT INTO foo VALUES (2)")
         cursor.execute("COMMIT")
         cursor.execute("FLUSH BINARY LOGS")
@@ -884,7 +884,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
         new_controller.stop()
 
     # Check we have all the expected data available
-    with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+    with mysql_cursor(**mysql_empty.connect_options) as cursor:
         cursor.execute("SELECT id FROM foo")
         results = cursor.fetchall()
         assert len(results) == 2
@@ -900,14 +900,14 @@ def test_new_binlog_stream_while_restoring(
     mcontroller, master = master_controller
     s3controller = None
 
-    mysql_empty["connect_options"]["password"] = master["connect_options"]["password"]
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
 
     try:
         mcontroller.switch_to_active_mode()
         mcontroller.start()
 
         # Write some data that gets included in the first backup
-        with mysql_cursor(**master["connect_options"]) as cursor:
+        with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("CREATE TABLE foo (id INTEGER)")
             cursor.execute("INSERT INTO foo VALUES (1)")
             cursor.execute("COMMIT")
@@ -953,7 +953,7 @@ def test_new_binlog_stream_while_restoring(
         )
 
         # Write something that gets included in the second backup
-        with mysql_cursor(**master["connect_options"]) as cursor:
+        with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("INSERT INTO foo VALUES (2)")
             cursor.execute("COMMIT")
             cursor.execute("FLUSH BINARY LOGS")
@@ -973,7 +973,7 @@ def test_new_binlog_stream_while_restoring(
 
         # Restored data should contain changes from first backup that we originally restored plus the binlog
         # from second backup that was created while the first one was restoring
-        with mysql_cursor(**mysql_empty["connect_options"]) as cursor:
+        with mysql_cursor(**mysql_empty.connect_options) as cursor:
             cursor.execute("SELECT id FROM foo ORDER BY id")
             results = cursor.fetchall()
             assert len(results) == 2
@@ -1001,7 +1001,7 @@ def test_binlog_auto_rotation(master_controller):
 
     final_binlogs = set()
     initial_binlogs = set()
-    with mysql_cursor(**master["connect_options"]) as cursor:
+    with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("CREATE TABLE test_data (value TEXT)")
         cursor.execute("SHOW BINARY LOGS")
         for binlog in cursor.fetchall():
@@ -1009,7 +1009,7 @@ def test_binlog_auto_rotation(master_controller):
 
     start_time = time.monotonic()
     while time.monotonic() - start_time < 3.5:
-        with mysql_cursor(**master["connect_options"]) as cursor:
+        with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("INSERT INTO test_data (value) VALUES (%s)", [str(time.time())])
             cursor.execute("COMMIT")
             cursor.execute("SHOW BINARY LOGS")
@@ -1024,7 +1024,7 @@ def test_binlog_auto_rotation(master_controller):
 
     # Ensure one more rotation is done (we previously wrote some data that was not included in latest rotation)
     mcontroller.rotate_and_back_up_binlog()
-    with mysql_cursor(**master["connect_options"]) as cursor:
+    with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("SHOW BINARY LOGS")
         final_binlogs = set(binlog["Log_name"] for binlog in cursor.fetchall())
 
@@ -1033,7 +1033,7 @@ def test_binlog_auto_rotation(master_controller):
 
     # Binlog rotation will happen even if there are no changes
     time.sleep(1.5)
-    with mysql_cursor(**master["connect_options"]) as cursor:
+    with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("SHOW BINARY LOGS")
         final_binlogs = set(binlog["Log_name"] for binlog in cursor.fetchall())
         cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
