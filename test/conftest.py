@@ -90,8 +90,8 @@ def mysql_initialize_and_start(
     session_tmpdir, *, empty=False, master: Optional[MySQLConfig] = None, name, server_id
 ) -> MySQLConfig:
     mysql_basedir = os.environ.get("MYHOARD_MYSQL_BASEDIR")
-    if mysql_basedir is None and os.path.exists("/opt/mysql"):
-        mysql_basedir = "/opt/mysql"
+    # if mysql_basedir is None and os.path.exists("/opt/mysql"):
+    #     mysql_basedir = "/opt/mysql"
 
     mysqld_bin = "/usr/sbin/mysqld"
     if not os.path.exists(mysqld_bin):
@@ -113,7 +113,7 @@ gtid-mode=ON
 log-bin={config_options.binlog_file_prefix}
 log-bin-index={config_options.binlog_index_file}
 log_error_verbosity = {_test_mysqld_log_level}
-mysqlx=OFF
+log-slave-updates=ON
 pid-file={config_options.pid_file}
 port={config_options.port}
 read-only={config_options.read_only}

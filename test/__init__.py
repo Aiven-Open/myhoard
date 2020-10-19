@@ -281,7 +281,7 @@ class DataGenerator(threading.Thread):
         self.generate_data_event.set()
         self.index_offset = index_offset
         self.is_running = True
-        self.make_temp_tables = make_temp_tables
+        self.make_temp_tables = False  # make_temp_tables
         self.paused = False
         self.pending_row_count = 0
         self.row_count = 0

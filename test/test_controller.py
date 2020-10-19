@@ -154,23 +154,15 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("CREATE TABLE large_no_pk (id INTEGER);")
             iteration_entries = 5000
-            cursor.execute(f"SET cte_max_recursion_depth = {iteration_entries}")
-            current_index = 0
+            # cursor.execute(f"SET cte_max_recursion_depth = {iteration_entries}")
             batches = 40
+            current_index = 0
             while current_index < batches * iteration_entries:
                 end = current_index + iteration_entries
-                cursor.execute(
-                    f"""
-                    INSERT INTO large_no_pk (id)
-                       SELECT sq.value + {current_index}
-                       FROM (WITH RECURSIVE nums AS (
-                                SELECT 1 AS value UNION ALL SELECT value + 1 AS value
-                                    FROM nums WHERE nums.value < {iteration_entries})
-                                SELECT * FROM nums) sq
-                    """
-                )
+                for idx in range(current_index, end):
+                    cursor.execute("INSERT INTO large_no_pk (id) VALUES (%s)", [idx])
                 current_index = end
-            cursor.execute("COMMIT")
+                cursor.execute("COMMIT")
             cursor.execute("DELETE FROM large_no_pk WHERE id = 1")
             cursor.execute("COMMIT")
             max_id = 0

@@ -470,15 +470,13 @@ class Controller(threading.Thread):
             cursor.execute("STOP SLAVE")
             # Get current slave status so that we know which relay logs to reuse
             cursor.execute("SHOW SLAVE STATUS")
-            slave_status = cursor.fetchone()
-            first_name = slave_status["Relay_Log_File"]
-            if not first_name:
-                first_name = "relay.000001"
+            slave_status = cursor.fetchone() or {}
+            first_name = slave_status.get("Relay_Log_File") or "relay.000001"
             if not self.state["promote_details"].get("relay_index_updated"):
                 first_index = int(first_name.split(".")[-1])
                 if (
-                    first_index == 1 and not slave_status["Relay_Master_Log_File"]
-                    and not slave_status["Exec_Master_Log_Pos"] and not slave_status["Retrieved_Gtid_Set"]
+                    first_index == 1 and not slave_status.get("Relay_Master_Log_File")
+                    and not slave_status.get("Exec_Master_Log_Pos") and not slave_status.get("Retrieved_Gtid_Set")
                 ):
                     # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
                     self.log.info(

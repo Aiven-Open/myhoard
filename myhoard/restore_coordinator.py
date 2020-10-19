@@ -21,8 +21,8 @@ from .binlog_downloader import download_binlog
 from .errors import BadRequest
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, make_gtid_range_string, mysql_cursor,
-    parse_fs_metadata, parse_gtid_range_string, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes,
+    add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, ERR_TIMEOUT, make_gtid_range_string,
+    mysql_cursor, parse_fs_metadata, parse_gtid_range_string, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes,
     sort_and_filter_binlogs, track_rate
 )
 
@@ -579,12 +579,23 @@ class RestoreCoordinator(threading.Thread):
         # to connect to it would fail. If it hasn't been started (no mysql_params specified) it also
         # doesn't have slave configured or running so we can just skip the calls below.
         if self.state["mysql_params"]:
-            with self._mysql_cursor() as cursor:
-                cursor.execute("STOP SLAVE")
-                # Do RESET SLAVE to ensure next CHANGE MASTER TO will work normally and also to get rid
-                # of any possible leftover relay logs (if we did PITR there could be relay log with some
-                # transactions that haven't been applied)
-                cursor.execute("RESET SLAVE")
+            try:
+                with self._mysql_cursor() as cursor:
+                    cursor.execute("STOP SLAVE")
+                    # Do RESET SLAVE to ensure next CHANGE MASTER TO will work normally and also to get rid
+                    # of any possible leftover relay logs (if we did PITR there could be relay log with some
+                    # transactions that haven't been applied)
+                    cursor.execute("RESET SLAVE")
+            except pymysql.err.OperationalError as ex:
+                # Force completion may have been requested because SQL thread is stuck trying to apply
+                # "impossibly heavy" transaction and it refuses to stop.
+                if ex.args[0] == ERR_TIMEOUT and self.state["force_complete"]:
+                    self.restart_mysqld_callback(with_binlog=True, with_gtids=True)
+                    with self._mysql_cursor() as cursor:
+                        cursor.execute("STOP SLAVE")
+                        cursor.execute("RESET SLAVE")
+                else:
+                    raise ex
         self._ensure_mysql_server_is_started(with_binlog=True, with_gtids=True)
         self.update_state(phase=self.Phase.completed)
         self.log.info("Backup restoration completed")
