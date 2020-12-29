@@ -6,20 +6,35 @@ import pytest
 import myhoard.util as myhoard_util
 from myhoard.basebackup_operation import BasebackupOperation
 
-from . import build_statsd_client
+from . import build_statsd_client, restart_mysql
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
-def test_basic_backup(mysql_master):
+@pytest.mark.parametrize("extra_uuid", [None, "daf0a972-acd8-44b4-941e-42cbbb43a593"])
+def test_basic_backup(mysql_master, extra_uuid):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         for db_index in range(15):
             cursor.execute(f"CREATE DATABASE test{db_index}")
             cursor.execute(f"CREATE TABLE test{db_index}.foo{db_index} (id integer primary key)")
             for value in range(15):
                 cursor.execute(f"INSERT INTO test{db_index}.foo{db_index} (id) VALUES ({value})")
-        cursor.execute("show master status")
+        cursor.execute("COMMIT")
+        # Insert second source_uuid into gtid_executed to test that this is parsed correctly
+        if extra_uuid:
+            cursor.execute("INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
+                           "VALUES ('{}', 1, 1)".format(extra_uuid))
+            cursor.execute("COMMIT")
+
+    if extra_uuid:
+        restart_mysql(mysql_master)
+
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        cursor.execute("SHOW MASTER STATUS")
         master_status = cursor.fetchone()
+
+    # Executed_Gtid_Set has linefeeds in it but XtraBackup (8.0) strips those away, do the same here
+    master_status["Executed_Gtid_Set"] = master_status["Executed_Gtid_Set"].replace("\n", "")
 
     backed_up_files = set()
 
