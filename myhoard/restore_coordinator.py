@@ -408,6 +408,9 @@ class RestoreCoordinator(threading.Thread):
                 self.log.info("No GTID ranges found in last file with given target timestamp, finalizing restore")
                 all_gtids_applied = True
 
+        if initial_round and not mysql_started:
+            self._purge_old_slave_data()
+
         self._ensure_mysql_server_is_started(**mysql_params)
 
         if not all_gtids_applied:
@@ -1097,6 +1100,19 @@ class RestoreCoordinator(threading.Thread):
                 self.log.info("Renamed %s to %s", local_prefetch_name, local_name)
                 last_renamed_index = remote_index
         self.update_state(last_renamed_index=last_renamed_index)
+
+    def _purge_old_slave_data(self):
+        # Remove potentially conflicting slave data from backup (unfortunately it's not possible to exclude these tables
+        # from the backup using xtrabackup at the moment). In some cases, e.g. when rotate event appears in the relay
+        # log (coming from master binlog) and mysql has some information about non-existing replication in these tables,
+        # it tries to read previous relays logs in order to find last rotate event, but those relay logs do not exist
+        # anymore.
+        self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
+        with self._mysql_cursor() as cursor:
+            cursor.execute("DELETE FROM mysql.slave_master_info")
+            cursor.execute("DELETE FROM mysql.slave_relay_log_info")
+            cursor.execute("DELETE FROM mysql.slave_worker_info")
+            cursor.execute("COMMIT")
 
     def _rename_prefetched_binlogs_back(self, binlogs):
         last_renamed_index = self.state["last_renamed_index"]
