@@ -1283,6 +1283,7 @@ class Controller(threading.Thread):
                 if not retry:
                     raise ex
                 self.log.error("Failed to flush binary logs due to %s, retrying: %r", due_to, ex)
+        return None
 
     def _rotate_binlog_if_threshold_exceeded(self):
         # If we haven't seen new binlogs in a while, forcibly flush binlogs so that we upload latest
