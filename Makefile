@@ -1,4 +1,4 @@
-short_ver = 1.0.0
+short_ver = $(shell git describe --abbrev=0)
 long_ver = $(shell git describe --long 2>/dev/null || echo $(short_ver)-0-unknown-g`git describe --always`)
 generated = myhoard/version.py
 
