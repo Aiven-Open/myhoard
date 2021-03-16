@@ -1,0 +1,136 @@
+name: Build MyHoard
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - '**'
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # only use one version for the lint step
+        python-version: [3.6]
+    env:
+      MYSQL_VERSION: mysql-8.0
+
+    steps:
+
+      - id: checkout-code
+        uses: actions/checkout@v2
+
+      - id: prepare-python
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - id: mysql-repos
+        run: |
+          wget -c 'https://repo.mysql.com/mysql-apt-config_0.8.13-1_all.deb'
+          echo "mysql-apt-config mysql-apt-config/select-server select $MYSQL_VERSION" | sudo debconf-set-selections
+          echo "mysql-apt-config mysql-apt-config/select-tools select Enabled" | sudo debconf-set-selections
+          echo "mysql-apt-config mysql-apt-config/select-product select Ok" | sudo debconf-set-selections
+          echo "mysql-apt-config mysql-apt-config/tools-component string mysql-tools" | sudo debconf-set-selections
+          sudo dpkg -i mysql-apt-config_0.8.13-1_all.deb
+
+      - id: percona-tools
+        run: |
+          wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
+          sudo dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
+          sudo percona-release enable-only tools
+          sudo apt update
+
+      - id: build-deps
+        run: |
+          sudo apt install -y libsnappy-dev
+          sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew mysql-server percona-xtrabackup-80
+          mysqld --version
+
+      - id: python-deps
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements.dev.txt
+          pip install -e .
+
+      - id: fmt
+        continue-on-error: true
+        run: |
+          make fmt
+          if [ $(git diff --name-only --diff-filter=ACMR | wc -l ) != 0 ]; then
+          echo "Reformatting failed! Please run make fmt on your commits and resubmit!" 1>&2 ;
+          git diff ;
+          exit 1 ;
+          fi
+
+      - id: typecheck
+        continue-on-error: true
+        run: make typecheck
+
+      - id: copyright
+        run: make copyright
+
+      - id: lint
+        run: make lint
+
+
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.6, 3.7, 3.8]
+    env:
+      MYSQL_VERSION: 8.0.22
+
+    steps:
+
+      - id: checkout-code
+        uses: actions/checkout@v2
+
+      - id: prepare-python
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - id: remove-default-mysql
+        run: |
+          sudo apt purge mysql-server mysql-client mysql-common mysql-server-core-* mysql-client-core-*
+
+      - id: mysql-repos
+        run: |
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-plugins_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-common_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-server-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-plugins_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+
+          sudo dpkg -i mysql-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-common_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-server-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-client-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-client-plugins_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+
+      - id: percona-tools
+        run: |
+          wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
+          sudo dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
+          sudo percona-release enable-only tools
+          sudo apt update
+
+      - id: build-deps
+        run: |
+          sudo apt install -y libsnappy-dev
+          sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew percona-xtrabackup-80
+          mysqld --version
+
+      - id: python-deps
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements.dev.txt
+          pip install -e .
+
+      - id: unittest
+        run: make unittest
