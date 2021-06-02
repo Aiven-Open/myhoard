@@ -160,3 +160,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
 
     bs.state_manager.update_state(initial_latest_complete_binlog_index=new_binlogs[0]["local_index"])
     assert bs.is_binlog_safe_to_delete(new_binlogs[0])
+
+    bs.delete_state()
+    assert not os.path.exists(bs.state_manager.state_file)
+    assert not os.path.exists(bs.remote_binlog_manager.state_file)

@@ -1171,6 +1171,10 @@ class Controller(threading.Thread):
         backups = self.get_backup_list(
             self.backup_sites, seen_basebackup_infos=self.seen_basebackup_infos, site_transfers=self.site_transfers
         )
+        new_backups_ids = {backup["stream_id"] for backup in backups}
+        for backup in self.state["backups"]:
+            if backup["stream_id"] not in new_backups_ids:
+                self._build_backup_stream(backup).delete_state()
         self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
