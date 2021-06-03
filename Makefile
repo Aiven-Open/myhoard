@@ -68,11 +68,3 @@ build-dep-fedora:
 	sudo dnf -y install --best --allowerasing --setopt=install_weak_deps=False \
 		--exclude=mariadb-server "$(MYSQL_SERVER_PACKAGE)"
 
-.PHONY: copyright
-copyright:
-	grep -EL "Copyright \(c\) 20.* Aiven" $(shell git ls-files "*.py" | grep -v __init__.py)
-
-.PHONY: coverage
-coverage: $(generated)
-	$(PYTHON) -m coverage run --source myhoard -m pytest $(PYTEST_ARG) test/
-	$(PYTHON) -m coverage report --show-missing
