@@ -77,3 +77,6 @@ def test_basic_operations(session_tmpdir):
     entries2 = []
     AppendOnlyStateManager(entries=entries2, state_file=state_file_name)
     assert set(entry["foo"] for entry in entries2) == {f"bar{index}" for index in range(1005, 1013)}
+
+    AppendOnlyStateManager(entries=[], state_file=state_file_name).delete_state()
+    assert not os.path.exists(state_file_name)

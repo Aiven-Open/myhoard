@@ -127,3 +127,7 @@ class AppendOnlyStateManager:
         full_data = self._encode_entries(entries)
         with atomic_create_file(self.state_file, binary=True) as f:
             f.write(full_data)
+
+    def delete_state(self):
+        if os.path.exists(self.state_file):
+            os.remove(self.state_file)
