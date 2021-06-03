@@ -168,8 +168,7 @@ FLUSH PRIVILEGES;
             "--init-file",
             init_file,
         ])
-        proc = subprocess.Popen(cmd)
-        proc.wait(timeout=30)
+        subprocess.run(cmd, check=True, timeout=30)
 
     connect_options = {
         "host": "127.0.0.1",
@@ -187,7 +186,7 @@ FLUSH PRIVILEGES;
         shutil.rmtree(config_options.datadir)
         proc = None
     else:
-        proc = subprocess.Popen(cmd)
+        proc = subprocess.Popen(cmd)  # pylint: disable=consider-using-with
         wait_for_port(host="127.0.0.1", port=config_options.port, timeout=30.0)
         # Ensure connecting to the newly started server works and if this is standby also start replication
         with mysql_cursor(**connect_options) as cursor:

@@ -146,7 +146,9 @@ class MyHoard:
 
         full_command = self.config["start_command"] + mysqld_options
         self.log.info("Starting process %r", full_command)
-        proc = subprocess.Popen(full_command, env={"MYSQLD_OPTS": " ".join(mysqld_options)})
+        proc = subprocess.Popen(  # pylint: disable=consider-using-with
+            full_command, env={"MYSQLD_OPTS": " ".join(mysqld_options)}
+        )
         self.mysqld_pid = proc.pid
         self.log.info("Process %r started, pid %s", full_command, proc.pid)
 
@@ -154,24 +156,24 @@ class MyHoard:
         self.log.info("Restarting service %r", service)
 
         command = self.config["systemd_env_update_command"] + [mysqld_options or ""]
-        proc = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-        stdout, stderr = proc.communicate()
-        if proc.returncode != 0:
+        try:
+            subprocess.run(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
             self.log.error(
-                "Failed to update MySQL config, %r exited with code %s. Output: %r / %r", command, proc.returncode, stdout,
-                stderr
+                "Failed to update MySQL config, %r exited with code %s. Output: %r / %r", command, e.returncode, e.output,
+                e.stderr
             )
-            raise Exception(f"Reconfiguring {service!r} failed. Code {proc.returncode}")
+            raise Exception(f"Reconfiguring {service!r} failed. Code {e.returncode}") from e
 
         systemctl = self.config["systemctl_command"]
-        proc = subprocess.Popen(systemctl + ["restart", service], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-        stdout, stderr = proc.communicate()
-        if proc.returncode != 0:
+        try:
+            subprocess.run(systemctl + ["restart", service], stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
             self.log.error(
-                "Failed to restart %r, systemctl exited with code %s. Output: %r / %r", service, proc.returncode, stdout,
-                stderr
+                "Failed to restart %r, systemctl exited with code %s. Output: %r / %r", service, e.returncode, e.output,
+                e.stderr
             )
-            raise Exception(f"Restarting {service!r} failed. Code {proc.returncode}")
+            raise Exception(f"Restarting {service!r} failed. Code {e.returncode}") from e
         self.log.info("Restarting %r completed successfully", service)
 
     async def _start(self):
