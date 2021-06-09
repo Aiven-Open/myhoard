@@ -38,35 +38,35 @@ def test_basic_daemon_execution(myhoard_config):
     python3 = sys.executable or os.environ.get("PYTHON", "python3")
     cmd = [python3, "-c", "from myhoard.myhoard import main; main()", "--config", config_name, "--log-level", "DEBUG"]
     print("Running command", cmd)
-    proc = subprocess.Popen(cmd, env={"PYTHONPATH": ROOT_DIR})
-    try:
-        http_address = myhoard_config["http_address"]
-        http_port = myhoard_config["http_port"]
-        wait_for_port(http_port, hostname=http_address, wait_time=5)
+    with subprocess.Popen(cmd, env={"PYTHONPATH": ROOT_DIR}) as proc:
+        try:
+            http_address = myhoard_config["http_address"]
+            http_port = myhoard_config["http_port"]
+            wait_for_port(http_port, hostname=http_address, wait_time=5)
 
-        def backups_not_none():
-            response = requests.get(f"http://{http_address}:{http_port}/backup", timeout=1)
-            assert response.status_code == 200
+            def backups_not_none():
+                response = requests.get(f"http://{http_address}:{http_port}/backup", timeout=1)
+                assert response.status_code == 200
+                assert response.json()["backups"] is not None
+
+            while_asserts(backups_not_none)
+
+            # Update config and see the new config gets applied
+            new_http_port = get_random_port(start=3000, end=30000)
+            assert new_http_port != http_port
+            myhoard_config["http_port"] = new_http_port
+            with open(config_name, "w") as f:
+                json.dump(myhoard_config, f)
+
+            os.kill(proc.pid, signal.SIGHUP)
+            wait_for_port(new_http_port, hostname=http_address, wait_time=2)
+            response = requests.get(f"http://{http_address}:{new_http_port}/backup", timeout=1)
+            response.raise_for_status()
             assert response.json()["backups"] is not None
 
-        while_asserts(backups_not_none)
-
-        # Update config and see the new config gets applied
-        new_http_port = get_random_port(start=3000, end=30000)
-        assert new_http_port != http_port
-        myhoard_config["http_port"] = new_http_port
-        with open(config_name, "w") as f:
-            json.dump(myhoard_config, f)
-
-        os.kill(proc.pid, signal.SIGHUP)
-        wait_for_port(new_http_port, hostname=http_address, wait_time=2)
-        response = requests.get(f"http://{http_address}:{new_http_port}/backup", timeout=1)
-        response.raise_for_status()
-        assert response.json()["backups"] is not None
-
-        os.kill(proc.pid, signal.SIGINT)
-        proc.communicate(input=None, timeout=2)
-        assert proc.returncode == 0
-    finally:
-        with contextlib.suppress(Exception):
-            os.kill(proc.pid, signal.SIGKILL)
+            os.kill(proc.pid, signal.SIGINT)
+            proc.communicate(input=None, timeout=2)
+            assert proc.returncode == 0
+        finally:
+            with contextlib.suppress(Exception):
+                os.kill(proc.pid, signal.SIGKILL)

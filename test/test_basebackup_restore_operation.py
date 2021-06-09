@@ -64,7 +64,7 @@ def test_basic_restore(mysql_master, mysql_empty):
 
         assert restore_op.number_of_files >= backup_op.number_of_files
 
-    mysql_empty.proc = subprocess.Popen(mysql_empty.startup_command)
+    mysql_empty.proc = subprocess.Popen(mysql_empty.startup_command)  # pylint: disable=consider-using-with
     wait_for_port(mysql_empty.port)
 
     with myhoard_util.mysql_cursor(
