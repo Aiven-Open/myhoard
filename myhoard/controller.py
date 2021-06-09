@@ -565,6 +565,7 @@ class Controller(threading.Thread):
             mysql_data_directory=self.mysql_data_directory,
             normalized_backup_time=None,
             rsa_public_key_pem=backup_site["encryption_keys"]["public"],
+            remote_binlogs_state_file=self._remote_binlogs_state_file_from_stream_id(stream_id),
             server_id=self.server_id,
             state_file=self._state_file_from_stream_id(stream_id),
             site=backup["site"],
@@ -572,6 +573,14 @@ class Controller(threading.Thread):
             stream_id=stream_id,
             temp_dir=self.temp_dir,
         )
+
+    def _delete_backup_stream_state(self, stream_id):
+        state_file = self._state_file_from_stream_id(stream_id)
+        if os.path.exists(state_file):
+            os.remove(state_file)
+        remote_binlogs_state_file = self._remote_binlogs_state_file_from_stream_id(stream_id)
+        if os.path.exists(remote_binlogs_state_file):
+            os.remove(remote_binlogs_state_file)
 
     def _cache_server_uuid_if_missing(self):
         if self.state["server_uuid"]:
@@ -1173,8 +1182,8 @@ class Controller(threading.Thread):
         )
         new_backups_ids = {backup["stream_id"] for backup in backups}
         for backup in self.state["backups"]:
-            if backup["stream_id"] not in new_backups_ids and backup["site"] in self.backup_sites:
-                self._build_backup_stream(backup).delete_state()
+            if backup["stream_id"] not in new_backups_ids:
+                self._delete_backup_stream_state(backup["stream_id"])
         self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
@@ -1388,6 +1397,7 @@ class Controller(threading.Thread):
             mysql_data_directory=self.mysql_data_directory,
             normalized_backup_time=normalized_backup_time,
             rsa_public_key_pem=backup_site["encryption_keys"]["public"],
+            remote_binlogs_state_file=self._remote_binlogs_state_file_from_stream_id(stream_id),
             server_id=self.server_id,
             site=site_id,
             state_file=self._state_file_from_stream_id(stream_id),
@@ -1405,6 +1415,10 @@ class Controller(threading.Thread):
     def _state_file_from_stream_id(self, stream_id):
         safe_stream_id = stream_id.replace(":", "_").replace(".", "_")
         return os.path.join(self.state_dir, f"{safe_stream_id}.json")
+
+    def _remote_binlogs_state_file_from_stream_id(self, stream_id):
+        safe_stream_id = stream_id.replace(":", "_").replace(".", "_")
+        return os.path.join(self.state_dir, f"{safe_stream_id}.remote_binlogs")
 
     def _switch_basebackup_if_possible(self):
         # We're trying to restore a backup but that keeps on failing in the basebackup restoration phase.
