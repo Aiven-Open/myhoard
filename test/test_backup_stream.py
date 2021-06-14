@@ -38,7 +38,9 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
     BackupStream.REMOTE_POLL_INTERVAL = 0.1
 
     backup_target_location = session_tmpdir().strpath
-    state_file_name = os.path.join(session_tmpdir().strpath, "backup_stream.json")
+    state_dir = session_tmpdir().strpath
+    state_file = os.path.join(state_dir, "backup_stream.json")
+    remote_binlogs_state_file = os.path.join(state_dir, "backup_stream.remote_binlogs")
     private_key_pem, public_key_pem = generate_rsa_key_pair()  # pylint: disable=unused-variable
     bs = backup_stream_class(
         backup_reason=BackupStream.BackupReason.requested,
@@ -53,9 +55,10 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         mysql_data_directory=mysql_master.config_options.datadir,
         normalized_backup_time="2019-02-25T08:20",
         rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=remote_binlogs_state_file,
         server_id=mysql_master.server_id,
         site="default",
-        state_file=state_file_name,
+        state_file=state_file,
         stats=build_statsd_client(),
         temp_dir=mysql_master.base_dir,
     )
@@ -68,6 +71,9 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
     )
     bs.add_binlogs(scanner.scan_new(None))
 
+    observer_dir = session_tmpdir().strpath
+    observer_state_file = os.path.join(observer_dir, "backup_stream_observer.json")
+    observer_remote_binlogs_state_file = os.path.join(observer_dir, "backup_stream_observer.remote_binlogs")
     _private_key_pem, public_key_pem = generate_rsa_key_pair()
     bs_observer = backup_stream_class(
         backup_reason=None,
@@ -78,9 +84,10 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         mysql_data_directory=mysql_master.config_options.datadir,
         normalized_backup_time="2019-02-25T08:20",
         rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=observer_remote_binlogs_state_file,
         server_id=mysql_master.server_id,
         site="default",
-        state_file=os.path.join(session_tmpdir().strpath, "backup_stream_observer.json"),
+        state_file=observer_state_file,
         stats=build_statsd_client(),
         stream_id=bs.stream_id,
         temp_dir=mysql_master.base_dir,
@@ -121,7 +128,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         assert bs.state["basebackup_errors"] == 0
         assert bs.state["remote_read_errors"] == 0
         assert bs.state["remote_write_errors"] == 0
-        with open(state_file_name) as f:
+        with open(state_file) as f:
             assert bs.state == json.load(f)
 
         backup_sites = {

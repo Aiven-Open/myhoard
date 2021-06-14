@@ -34,6 +34,8 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     backup_target_location = session_tmpdir().strpath
     state_file_name1 = os.path.join(session_tmpdir().strpath, "backup_stream1.json")
     state_file_name2 = os.path.join(session_tmpdir().strpath, "backup_stream2.json")
+    remote_binlogs_state_file_name1 = os.path.join(session_tmpdir().strpath, "backup_stream1.remote_binlogs")
+    remote_binlogs_state_file_name2 = os.path.join(session_tmpdir().strpath, "backup_stream2.remote_binlogs")
     bs1 = BackupStream(
         backup_reason=BackupStream.BackupReason.requested,
         file_storage_setup_fn=lambda: LocalTransfer(backup_target_location),
@@ -43,6 +45,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         mysql_data_directory=mysql_master.config_options.datadir,
         normalized_backup_time="2019-02-25T08:20",
         rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=remote_binlogs_state_file_name1,
         server_id=mysql_master.server_id,
         site="default",
         state_file=state_file_name1,
@@ -60,6 +63,7 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         mysql_data_directory=mysql_master.config_options.datadir,
         normalized_backup_time="2019-02-26T08:20",
         rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=remote_binlogs_state_file_name2,
         server_id=mysql_master.server_id,
         site="default",
         state_file=state_file_name2,

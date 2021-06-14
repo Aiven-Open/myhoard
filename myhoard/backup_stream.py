@@ -85,6 +85,7 @@ class BackupStream(threading.Thread):
         mysql_data_directory,
         normalized_backup_time,
         rsa_public_key_pem,
+        remote_binlogs_state_file,
         server_id,
         site,
         state_file,
@@ -115,10 +116,9 @@ class BackupStream(threading.Thread):
         self.mysql_data_directory = mysql_data_directory
         # Keep track of remote binlogs so that we can drop binlogs containing only GTID
         # ranges that have already been backed up from our list of pending binlogs
-        remote_binlog_state_name = state_file.replace(".json", "") + ".remote_binlogs"
         remote_binlogs = []
         self.remote_binlog_manager = AppendOnlyStateManager(
-            entries=remote_binlogs, lock=self.lock, state_file=remote_binlog_state_name
+            entries=remote_binlogs, lock=self.lock, state_file=remote_binlogs_state_file
         )
         self.remote_binlogs = remote_binlogs
         self.known_remote_binlogs = {binlog["remote_index"] for binlog in self.remote_binlogs}

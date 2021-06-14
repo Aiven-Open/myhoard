@@ -3,6 +3,7 @@ import contextlib
 import os
 import random
 import time
+from typing import List
 from unittest.mock import MagicMock
 
 import pytest
@@ -228,6 +229,60 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         mcontroller.stop()
         if new_master_controller:
             new_master_controller.stop()
+
+
+def create_fake_state_files(controller: Controller) -> List[str]:
+    # pylint: disable=protected-access
+    state_file_name = controller._state_file_from_stream_id("1234")
+    # pylint: disable=protected-access
+    remote_binlogs_state_file_name = controller._remote_binlogs_state_file_from_stream_id("1234")
+    with open(state_file_name, "w") as state_file:
+        state_file.write(".")
+    with open(remote_binlogs_state_file_name, "w") as remote_binlogs_state_file:
+        remote_binlogs_state_file.write(".")
+    return [state_file_name, remote_binlogs_state_file_name]
+
+
+def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_empty, session_tmpdir):
+    controller = build_controller(
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    fake_file_names = create_fake_state_files(controller)
+    controller.state["backups"] = [{
+        "basebackup_info": {},
+        "closed_at": None,
+        "completed_at": None,
+        "recovery_site": False,
+        "stream_id": "1234",
+        "resumable": False,
+        "site": "default",
+    }]
+    controller._refresh_backups_list()  # pylint: disable=protected-access
+    for file_name in fake_file_names:
+        assert not os.path.exists(file_name)
+
+
+def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_empty, session_tmpdir):
+    controller = build_controller(
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    fake_file_names = create_fake_state_files(controller)
+    controller.state["backups"] = [{
+        "basebackup_info": {},
+        "closed_at": None,
+        "completed_at": None,
+        "recovery_site": False,
+        "stream_id": "1234",
+        "resumable": False,
+        "site": "not_default_site",
+    }]
+    controller._refresh_backups_list()  # pylint: disable=protected-access
+    for file_name in fake_file_names:
+        assert not os.path.exists(file_name)
 
 
 def test_3_node_service_failover_and_restore(
