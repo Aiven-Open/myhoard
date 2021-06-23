@@ -245,6 +245,10 @@ class Controller(threading.Thread):
                     assert False, "Invalid mode {}".format(self.mode)
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
+                if self.mode == self.Mode.active and not self.is_running:
+                    # Update stream statuses before closing controller in case some of the
+                    # streams has just completed so that list of active backups is refreshed
+                    self._update_stream_completed_and_closed_statuses()
             except Exception as ex:  # pylint: disable=broad-except
                 self.log.exception("Unexpected exception in mode %s", self.mode)
                 self.stats.unexpected_exception(ex=ex, where="Controller.run")
