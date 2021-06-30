@@ -1071,6 +1071,7 @@ class Controller(threading.Thread):
         # This shouldn't happen but better not drop backup that is active
         if any(stream.stream_id == backup["stream_id"] for stream in self.backup_streams):
             self.log.warning("Backup %r to drop is one of active streams, not dropping", backup["stream_id"])
+            return
 
         self._build_backup_stream(backup).remove()
         with self.lock:
