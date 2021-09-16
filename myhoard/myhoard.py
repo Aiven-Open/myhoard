@@ -229,7 +229,7 @@ def main(args=None):
 
     parser = argparse.ArgumentParser(prog="myhoard", description="MySQL backup and restore daemon")
     parser.add_argument("--version", action="version", help="show program version", version=version.__version__)
-    parser.add_argument("--log-level", help="Log level", default="INFO", choices=("ERROR, WARNING", "INFO", "DEBUG"))
+    parser.add_argument("--log-level", help="Log level", default="INFO", choices=("ERROR", "WARNING", "INFO", "DEBUG"))
     parser.add_argument("--config", help="Configuration file path", default=os.environ.get("MYHOARD_CONFIG"))
     arg = parser.parse_args(args)
 
