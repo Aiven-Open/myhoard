@@ -41,8 +41,8 @@ class BackupStream(threading.Thread):
     state they are switched to active mode on master (& read-only replicate) or kept in observer mode on
     standbys. When a node is promoted it goes via prepare_promotion and promoted modes to active mode."""
 
-    ITERATION_SLEEP = 10
-    REMOTE_POLL_INTERVAL = 240
+    ITERATION_SLEEP = 10.0
+    REMOTE_POLL_INTERVAL = 240.0
 
     @enum.unique
     class Mode(str, enum.Enum):

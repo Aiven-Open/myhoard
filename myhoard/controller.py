@@ -51,11 +51,11 @@ class Controller(threading.Thread):
         # Restore system to given backup
         restore = "restore"
 
-    BACKUP_REFRESH_INTERVAL_BASE = 120
+    BACKUP_REFRESH_INTERVAL_BASE = 120.0
     # We don't expect anyone but the single active MyHoard to make any changes to backups but we still want
     # to sometimes check there aren't some unexpected changes. The "sometimes" can be pretty infrequently
-    BACKUP_REFRESH_ACTIVE_MULTIPLIER = 10
-    ITERATION_SLEEP = 1
+    BACKUP_REFRESH_ACTIVE_MULTIPLIER = 10.0
+    ITERATION_SLEEP = 1.0
 
     def __init__(
         self,
