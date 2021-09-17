@@ -54,6 +54,13 @@ class RestoreCoordinator(threading.Thread):
     # if available (plus binlogs from the backup we were trying to restore) when this happens.
     MAX_BASEBACKUP_ERRORS = 4
 
+    # In rare cases when SQL thread needs to be restarted (mysql OOM-ed during restoration),
+    # attempts to do that should be performed with an exponential delay.
+    # The following constand defines the initial delay for the second attempt and then will be
+    # increased with a factor of 1.5 up to SQL_TREAD_RESTART_MAX_INTERVAL.
+    SQL_THREAD_RESTART_INIT_INTERVAL = 600  # 10 minutes
+    SQL_THREAD_RESTART_MAX_INTERVAL = 7200  # 2 hours
+
     @enum.unique
     class Phase(str, enum.Enum):
         getting_backup_info = "getting_backup_info"
@@ -180,6 +187,8 @@ class RestoreCoordinator(threading.Thread):
         self.target_time_approximate_ok = target_time_approximate_ok
         self.temp_dir = temp_dir
         self.worker_processes = []
+        self.sql_thread_restart_count = 0
+        self.sql_thread_restart_time = None
 
     def add_new_binlog_streams(self, new_binlog_streams):
         if not self.can_add_binlog_streams():
@@ -1128,6 +1137,27 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index - 1
         self.update_state(last_flushed_index=last_renamed_index, last_renamed_index=last_renamed_index)
 
+    def _start_sql_thread_if_not_running(self, slave_status):
+        # Sometimes mysqld can be OOM-killed during the backup restoration.
+        # In that case we should check if SQL thread is running and try restarting it if it is not.
+        if slave_status["Slave_SQL_Running"] == "Yes":
+            return
+
+        # Try to start SQL thread with an incremental delay
+        if self.sql_thread_restart_count > 0:
+            factor = 1.5 ** self.sql_thread_restart_count
+            iteration_delay = min(self.SQL_THREAD_RESTART_INIT_INTERVAL * factor, self.SQL_THREAD_RESTART_MAX_INTERVAL)
+            if self.sql_thread_restart_time is not None:
+                time_passed = time.monotonic() - self.sql_thread_restart_time
+                if time_passed < iteration_delay:
+                    return
+
+        self.sql_thread_restart_time = time.monotonic()
+        self.log.warning("SQL thread is not running. Running 'START SLAVE SQL_THREAD'")
+        self.sql_thread_restart_count += 1
+        with self._mysql_cursor() as cursor:
+            cursor.execute("START SLAVE SQL_THREAD")
+
     def _check_sql_slave_status(self):
         expected_range = self.state["current_executed_gtid_target"]
         expected_index = self.state["current_relay_log_target"]
@@ -1159,7 +1189,9 @@ class RestoreCoordinator(threading.Thread):
                         )
                         return True, expected_index
                 else:
+                    self._start_sql_thread_if_not_running(slave_status)
                     return False, current_index
+
             # The batch we're applying might not have contained any GTIDs
             if not expected_range:
                 self.log.info(
@@ -1185,6 +1217,9 @@ class RestoreCoordinator(threading.Thread):
                     # did not say so.
                     if expected_index is not None and current_index < expected_index:
                         current_index = expected_index
+                else:
+                    self._start_sql_thread_if_not_running(slave_status)
+
             if found:
                 cursor.execute("STOP SLAVE")
                 # Current file could've been updated since we checked it the first time before slave was stopped.
