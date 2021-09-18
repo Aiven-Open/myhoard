@@ -222,7 +222,7 @@ class BasebackupOperation:
             not self._process_output_line_binlog_info(line) and
             not self._process_output_line_lsn_info(line)
         ):
-            if any(key in line for key in {"[ERROR]", " Failed ", " failed ", " Invalid "}):
+            if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
                 self.log.error("xtrabackup: %r", line)
             else:
                 self.log.info("xtrabackup: %r", line)
