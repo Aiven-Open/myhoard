@@ -1,14 +1,17 @@
 # Use pip for build requirements to harmonize between OS versions
+coverage
+coveralls
+isort==4.3.21
 mock
-pylint>=2.4.3
+mypy
 pylint-quotes
+pylint>=2.4.3
 pytest
 pytest-mock
 pytest-timeout
 pytest-xdist
-yapf==0.27.0
-isort==4.3.21
-coverage
-coveralls
 responses
+types-PyMySQL
+types-requests
 unify
+yapf==0.27.0

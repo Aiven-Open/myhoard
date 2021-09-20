@@ -397,7 +397,7 @@ class RestoreCoordinator(threading.Thread):
             ranges = list(build_gtid_ranges(read_gtids_from_log(file_name, read_until_time=self.target_time)))
             if ranges:
                 last_range = ranges[-1]
-                until_after_gtids = f"""{last_range["server_uuid"]}:{last_range["end"]}"""
+                until_after_gtids = f'{last_range["server_uuid"]}:{last_range["end"]}'
                 # Don't expect any specific file because if the GTID we're including is the very last entry
                 # in the file the SQL thread might switch to next file and if it is earlier then it won't
                 # so we'd need to be watching for two file names. Because execution is always single threaded

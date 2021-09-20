@@ -348,8 +348,8 @@ def test_3_node_service_failover_and_restore(
             if backup_count > 1:
                 # Do some flushes on master to ensure there are simultaneous binlog uploads and existing ones get reused
                 with mysql_cursor(**master.connect_options) as cursor:
-                    foo_prefix = str(time.time()).replace(".", "_")
-                    cursor.execute(f"CREATE TABLE foo_{foo_prefix} (id INTEGER)")
+                    foo_suffix = str(time.time()).replace(".", "_")
+                    cursor.execute(f"CREATE TABLE foo_{foo_suffix} (id INTEGER)")
                     cursor.execute("COMMIT")
                     cursor.execute("FLUSH BINARY LOGS")
             assert s1controller.backup_streams
