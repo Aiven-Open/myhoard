@@ -205,12 +205,12 @@ def random_basic_string(length=16, *, prefix=None, digit_spacing=None):
         prefix = random.choice(string.ascii_lowercase)
     random_length = length - len(prefix)
     if digit_spacing is None:
-        chars = "".join([random.choice(string.ascii_lowercase + string.digits) for _ in range(random_length)])
+        chars = "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(random_length))
     else:
-        chars = "".join([
+        chars = "".join(
             random.choice(string.ascii_lowercase if (n % (digit_spacing + 1)) > 0 else string.digits)
             for n in range(random_length)
-        ])
+        )
     return f"{prefix}{chars}"
 
 
