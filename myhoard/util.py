@@ -61,7 +61,8 @@ def atomic_create_file(file_path, *, binary=False, perm=None, uidgid=None, inher
 
 def change_master_to(*, cursor, options):
     """Constructs and executes CHANGE MASTER TO command based on given options"""
-    sql = "CHANGE MASTER TO {}".format(", ".join(f"{k}={v!r}" for k, v in options.items()))
+    option_items = ", ".join(f"{k}={v!r}" for k, v in options.items())
+    sql = f"CHANGE MASTER TO {option_items}"
     cursor.execute(sql)
 
 
@@ -236,8 +237,8 @@ def make_gtid_range_string(ranges):
             if rng[0] == rng[1]:
                 range_strs.append(str(rng[0]))
             else:
-                range_strs.append("{}-{}".format(rng[0], rng[1]))
-        uuid_gnos.append("{}:{}".format(server_uuid, ":".join(range_strs)))
+                range_strs.append(f"{rng[0]}-{rng[1]}")
+        uuid_gnos.append(":".join([server_uuid] + range_strs))
     return ",".join(uuid_gnos)
 
 
@@ -419,7 +420,7 @@ def detect_running_process_id(command):
     output = subprocess.check_output(["ps", "-x", "--cols", "1000", "-o", "pid,command"])
     # We don't expect to have non-ASCII characters, convert using ISO-8859-1, which should always work without raising
     output = output.decode("ISO-8859-1")
-    regex = re.compile(r"^\s*\d+\s+{}".format(re.escape(command)))
+    regex = re.compile(r"^\s*\d+\s+{}".format(re.escape(command)))  # pylint: disable=consider-using-f-string
     ids = [int(line.strip().split()[0]) for line in output.splitlines() if regex.match(line)]
     if not ids or len(ids) > 1:
         return None

@@ -178,23 +178,21 @@ class Controller(threading.Thread):
         with self.lock:
             if self.mode != self.Mode.idle:
                 # Could consider allowing restore request also when mode is `restore`
-                raise ValueError("Current mode is {}, restore only allowed while in idle mode".format(self.mode))
+                raise ValueError(f"Current mode is {self.mode}, restore only allowed while in idle mode")
 
             for backup in list(self.state["backups"]):
                 if backup["stream_id"] != stream_id or backup["site"] != site:
                     continue
                 if not backup["basebackup_info"]:
-                    raise ValueError("Backup {!r} cannot be restored".format(backup))
+                    raise ValueError(f"Backup {backup!r} cannot be restored")
                 if target_time:
                     if target_time < backup["basebackup_info"]["end_ts"]:
-                        raise ValueError(
-                            "Requested target time {} predates backup completion: {!r}".format(target_time, backup)
-                        )
+                        raise ValueError(f"Requested target time {target_time} predates backup completion: {backup!r}")
                     # Caller must make sure they pick a backup that contains the requested target time. If this backup
                     # has been closed (will not get any further updates) at a time that is before the requested target
                     # time it is not possible to satisfy the request
                     if backup["closed_at"] and target_time > backup["closed_at"]:
-                        raise ValueError("Requested target time {} is after backup close: {!r}".format(target_time, backup))
+                        raise ValueError(f"Requested target time {target_time} is after backup close: {backup!r}")
                 break
             else:
                 raise ValueError(f"Requested backup {stream_id!r} for site {site!r} not found")
@@ -242,7 +240,7 @@ class Controller(threading.Thread):
                 elif self.mode == self.Mode.promote:
                     self._handle_mode_promote()
                 else:
-                    assert False, "Invalid mode {}".format(self.mode)
+                    assert False, f"Invalid mode {self.mode}"
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
             except Exception as ex:  # pylint: disable=broad-except
@@ -707,7 +705,7 @@ class Controller(threading.Thread):
             return
 
         already_processed_remote_indexes = set()
-        for key in {"binlogs_to_fetch", "binlogs_to_apply", "binlogs_applying"}:
+        for key in ["binlogs_to_fetch", "binlogs_to_apply", "binlogs_applying"]:
             for binlog in self.state["promote_details"].get(key, []):
                 already_processed_remote_indexes.add(binlog["remote_index"])
 
@@ -954,7 +952,7 @@ class Controller(threading.Thread):
         self._check_binlog_apply_status()
 
         has_pending = any(
-            self.state["promote_details"].get(key) for key in {"binlogs_to_fetch", "binlogs_to_apply", "binlogs_applying"}
+            self.state["promote_details"].get(key) for key in ["binlogs_to_fetch", "binlogs_to_apply", "binlogs_applying"]
         )
         if not has_pending:
             for stream in self.backup_streams:

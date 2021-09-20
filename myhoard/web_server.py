@@ -122,17 +122,18 @@ class WebServer:
     async def status_update(self, request):
         with self._handle_request(name="status_update"):
             body = await self._get_request_json(request)
-            if body.get("mode") == Controller.Mode.active:
+            body_mode = body.get("mode")
+            if body_mode == Controller.Mode.active:
                 force = body.get("force")
                 if not isinstance(force, bool):
                     force = False
                 if force:
                     self.log.info("Switch to active mode with force flag requested")
                 self.controller.switch_to_active_mode(force=force)
-            elif body.get("mode") == Controller.Mode.observe:
+            elif body_mode == Controller.Mode.observe:
                 self.controller.switch_to_observe_mode()
-            elif body.get("mode") == Controller.Mode.restore:
-                for key in {"site", "stream_id"}:
+            elif body_mode == Controller.Mode.restore:
+                for key in ["site", "stream_id"]:
                     if not isinstance(body.get(key), str):
                         raise BadRequest(f"Field {key!r} must be given and a string")
                 if not isinstance(body.get("target_time"), (int, type(None))):
@@ -146,7 +147,7 @@ class WebServer:
                     target_time_approximate_ok=body.get("target_time_approximate_ok"),
                 )
             else:
-                raise BadRequest("Unexpected value {!r} for field 'mode'".format(body.get("mode")))
+                raise BadRequest(f"Unexpected value {body_mode!r} for field 'mode'")
 
             return json_response({"mode": self.controller.mode})
 

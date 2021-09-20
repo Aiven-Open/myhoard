@@ -23,7 +23,7 @@ def test_basic_backup(mysql_master, extra_uuid):
         # Insert second source_uuid into gtid_executed to test that this is parsed correctly
         if extra_uuid:
             cursor.execute("INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
-                           "VALUES ('{}', 1, 1)".format(extra_uuid))
+                           f"VALUES ('{extra_uuid}', 1, 1)")
             cursor.execute("COMMIT")
 
     if extra_uuid:

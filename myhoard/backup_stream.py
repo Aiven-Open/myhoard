@@ -460,7 +460,7 @@ class BackupStream(threading.Thread):
     def start_preparing_for_promotion(self):
         with self.lock:
             if self.mode != BackupStream.Mode.observe:
-                raise ValueError("Invalid request to prepare promotion while in mode {}".format(self.mode))
+                raise ValueError(f"Invalid request to prepare promotion while in mode {self.mode}")
 
             self.state_manager.update_state(mode=self.Mode.prepare_promotion)
             self.wakeup_event.set()
