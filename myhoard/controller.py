@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 
@@ -850,7 +851,8 @@ class Controller(threading.Thread):
             if info["Slave_IO_Running"] == "Yes":
                 raise Exception("Slave IO thread expected to be stopped but is running")
             if info["Slave_SQL_Running"] == "Yes":
-                if info["Slave_SQL_Running_State"] != "Slave has read all relay log; waiting for more updates":
+                if not re.match("(Slave|Replica) has read all relay log; waiting for more updates",
+                                info["Slave_SQL_Running_State"]):
                     raise Exception("Expected SQL thread to be stopped or finished processing updates")
                 cursor.execute("STOP SLAVE SQL_THREAD")
 
