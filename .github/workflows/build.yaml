@@ -82,8 +82,7 @@ jobs:
     strategy:
       matrix:
         python-version: [3.6, 3.7, 3.8, 3.9]
-    env:
-      MYSQL_VERSION: 8.0.22
+        mysql-version: [8.0.22, 8.0.26]
 
     steps:
 
@@ -101,17 +100,17 @@ jobs:
 
       - id: mysql-repos
         run: |
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-plugins_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-common_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-server-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
-          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-plugins_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-plugins_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-common_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-client_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-server-core_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-server_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-server_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-core_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
+          wget http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/mysql-community-client-plugins_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
 
-          sudo dpkg -i mysql-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-common_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-server-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-server_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-client_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-client-core_$MYSQL_VERSION-1ubuntu18.04_amd64.deb mysql-community-client-plugins_$MYSQL_VERSION-1ubuntu18.04_amd64.deb
+          sudo dpkg -i mysql-client_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-common_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-community-server-core_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-community-server_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-server_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-community-client_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-community-client-core_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb mysql-community-client-plugins_${{ matrix.mysql-version }}-1ubuntu18.04_amd64.deb
 
       - id: percona-tools
         run: |

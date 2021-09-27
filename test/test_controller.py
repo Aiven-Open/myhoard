@@ -2,6 +2,7 @@
 import contextlib
 import os
 import random
+import re
 import time
 from typing import List
 from unittest.mock import MagicMock
@@ -397,7 +398,7 @@ def test_3_node_service_failover_and_restore(
                     for cursor in [cursor1, cursor2]:
                         cursor.execute("SHOW SLAVE STATUS")
                         status = cursor.fetchone()["Slave_SQL_Running_State"]
-                        assert status == "Slave has read all relay log; waiting for more updates"
+                        assert re.match("(Slave|Replica) has read all relay log; waiting for more updates", status)
 
                 while_asserts(relay_log_applied, timeout=30)
                 cursor1.execute("STOP SLAVE SQL_THREAD")
