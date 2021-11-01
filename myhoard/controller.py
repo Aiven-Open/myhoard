@@ -1168,8 +1168,13 @@ class Controller(threading.Thread):
                 last_binlog_purge=last_purge,
                 last_could_have_purged=last_could_have_purged,
             )
+
             self.stats.gauge_float("myhoard.binlog.time_since_any_purged", time.time() - last_purge)
             self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", time.time() - last_could_have_purged)
+            self.stats.gauge_float(
+                "myhoard.binlog.time_since_should_have_purged", 
+                time.time() - (last_could_have_purged + purge_settings["min_binlog_age_before_purge"])
+            )
 
     def _refresh_backups_list(self):
         interval = self.backup_refresh_interval_base
