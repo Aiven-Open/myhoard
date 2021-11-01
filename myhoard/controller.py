@@ -1188,7 +1188,8 @@ class Controller(threading.Thread):
             oldest_binlog_time = self._get_oldest_binlog_time()
             self.stats.gauge_float(
                 "myhoard.binlog.time_since_oldest_should_have_purged", 
-                current_time - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"])
+                current_time - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"]),
+                tags = { "support_oldest_should_have_purged" : 1 }
             )
 
     def _refresh_backups_list(self):
