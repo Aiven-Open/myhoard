@@ -1085,7 +1085,7 @@ class Controller(threading.Thread):
 
         for binlog in self.binlog_scanner.binlogs:
             if oldest_binlog < binlog["processed_at"]:
-                oldest_binlog = binlog
+                oldest_binlog = binlog["processed_at"]
 
         return oldest_binlog
 
@@ -1174,19 +1174,21 @@ class Controller(threading.Thread):
                 last_purge = time.time()
                 last_could_have_purged = last_purge
         finally:
+            current_time = time.time()
+            
             self.state_manager.update_state(
-                binlogs_purged_at=time.time(),
+                binlogs_purged_at=current_time,
                 last_binlog_purge=last_purge,
                 last_could_have_purged=last_could_have_purged,
             )
 
-            self.stats.gauge_float("myhoard.binlog.time_since_any_purged", time.time() - last_purge)
-            self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", time.time() - last_could_have_purged)
+            self.stats.gauge_float("myhoard.binlog.time_since_any_purged", current_time - last_purge)
+            self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", current_time - last_could_have_purged)
 
             oldest_binlog_time = self._get_oldest_binlog_time()
             self.stats.gauge_float(
                 "myhoard.binlog.time_since_oldest_should_have_purged", 
-                time.time() - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"])
+                current_time - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"])
             )
 
     def _refresh_backups_list(self):
