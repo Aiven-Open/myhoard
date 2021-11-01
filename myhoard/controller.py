@@ -1078,6 +1078,17 @@ class Controller(threading.Thread):
             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
 
+    def _get_oldest_binlog_time(self):
+        self._process_local_binlog_updates()
+
+        oldest_binlog = 0
+
+        for binlog in self.binlog_scanner.binlogs:
+            if oldest_binlog < binlog["processed_at"]:
+                oldest_binlog = binlog
+
+        return oldest_binlog
+
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
         if not purge_settings["enabled"] or time.time() - self.state["binlogs_purged_at"] < purge_settings["purge_interval"]:
@@ -1171,9 +1182,11 @@ class Controller(threading.Thread):
 
             self.stats.gauge_float("myhoard.binlog.time_since_any_purged", time.time() - last_purge)
             self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", time.time() - last_could_have_purged)
+
+            oldest_binlog_time = self._get_oldest_binlog_time()
             self.stats.gauge_float(
-                "myhoard.binlog.time_since_should_have_purged", 
-                time.time() - (last_could_have_purged + purge_settings["min_binlog_age_before_purge"])
+                "myhoard.binlog.time_since_oldest_should_have_purged", 
+                time.time() - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"])
             )
 
     def _refresh_backups_list(self):
