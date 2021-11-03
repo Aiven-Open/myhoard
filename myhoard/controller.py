@@ -801,7 +801,7 @@ class Controller(threading.Thread):
         )
         # If most recent current backup is not in the list of backups being restored then we're probably
         # restoring some old backup and don't want to automatically get latest changes
-        if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_streams):
+        if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_strenotams):
             return
 
         old_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
@@ -1079,8 +1079,6 @@ class Controller(threading.Thread):
             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
 
     def _get_oldest_binlog_time(self):
-        self._process_local_binlog_updates()
-
         oldest_binlog = 0
 
         for binlog in self.binlog_scanner.binlogs:
@@ -1183,13 +1181,18 @@ class Controller(threading.Thread):
             )
 
             self.stats.gauge_float("myhoard.binlog.time_since_any_purged", current_time - last_purge)
-            self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", current_time - last_could_have_purged)
+            self.stats.gauge_float(
+                "myhoard.binlog.time_since_could_have_purged", 
+                current_time - last_could_have_purged,
+                tags = { "support_oldest_should_have_purged" : "1" }
+            )
 
+            self._process_local_binlog_updates()
             oldest_binlog_time = self._get_oldest_binlog_time()
+            
             self.stats.gauge_float(
                 "myhoard.binlog.time_since_oldest_should_have_purged", 
                 current_time - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"]),
-                tags = { "support_oldest_should_have_purged" : 1 }
             )
 
     def _refresh_backups_list(self):
