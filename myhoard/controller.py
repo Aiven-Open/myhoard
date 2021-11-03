@@ -1184,7 +1184,7 @@ class Controller(threading.Thread):
             self.stats.gauge_float(
                 "myhoard.binlog.time_since_could_have_purged", 
                 current_time - last_could_have_purged,
-                tags = { "support_oldest_should_have_purged" : "1" }
+                tags={"support_oldest_should_have_purged": "1"}
             )
 
             self._process_local_binlog_updates()
