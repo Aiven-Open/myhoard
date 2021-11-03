@@ -801,7 +801,7 @@ class Controller(threading.Thread):
         )
         # If most recent current backup is not in the list of backups being restored then we're probably
         # restoring some old backup and don't want to automatically get latest changes
-        if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_streams
+        if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_streams):
             return
 
         old_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
@@ -844,7 +844,7 @@ class Controller(threading.Thread):
             cursor.execute("SHOW SLAVE STATUS")
             info = cursor.fetchone()
             if info is None:
-                # None happens if RESET SLAVE has been perfclusterormed or if the slave never was running, e.g.
+                # None happens if RESET SLAVE has been performed or if the slave never was running, e.g.
                 # because there were no binary logs to restore.
                 self.log.warning("SHOW SLAVE STATUS returned no results.")
                 return
