@@ -1078,6 +1078,15 @@ class Controller(threading.Thread):
             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
 
+    def _get_oldest_binlog_time(self):
+        oldest_binlog = 0
+
+        for binlog in self.binlog_scanner.binlogs:
+            if oldest_binlog < binlog["processed_at"]:
+                oldest_binlog = binlog["processed_at"]
+
+        return oldest_binlog
+
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
         if not purge_settings["enabled"] or time.time() - self.state["binlogs_purged_at"] < purge_settings["purge_interval"]:
@@ -1163,13 +1172,28 @@ class Controller(threading.Thread):
                 last_purge = time.time()
                 last_could_have_purged = last_purge
         finally:
+            current_time = time.time()
+            
             self.state_manager.update_state(
-                binlogs_purged_at=time.time(),
+                binlogs_purged_at=current_time,
                 last_binlog_purge=last_purge,
                 last_could_have_purged=last_could_have_purged,
             )
-            self.stats.gauge_float("myhoard.binlog.time_since_any_purged", time.time() - last_purge)
-            self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", time.time() - last_could_have_purged)
+
+            self.stats.gauge_float("myhoard.binlog.time_since_any_purged", current_time - last_purge)
+            self.stats.gauge_float(
+                "myhoard.binlog.time_since_could_have_purged", 
+                current_time - last_could_have_purged,
+                tags={"support_oldest_should_have_purged": "1"}
+            )
+
+            self._process_local_binlog_updates()
+            oldest_binlog_time = self._get_oldest_binlog_time()
+            
+            self.stats.gauge_float(
+                "myhoard.binlog.time_since_oldest_should_have_purged", 
+                current_time - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"]),
+            )
 
     def _refresh_backups_list(self):
         interval = self.backup_refresh_interval_base
