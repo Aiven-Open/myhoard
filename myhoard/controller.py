@@ -17,7 +17,7 @@ from pghoard.rohmu import get_transfer
 from pghoard.rohmu.compressor import DecompressSink
 from pghoard.rohmu.encryptor import DecryptSink
 from socket import gaierror
-from socks import ProxyConnectionError
+from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
 
 from .backup_stream import BackupStream
@@ -249,7 +249,9 @@ class Controller(threading.Thread):
                     assert False, f"Invalid mode {self.mode}"
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
-            except (gaierror, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError) as ex:
+            except (
+                gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+            ) as ex:
                 self.log.exception("Network error while in mode %s", self.mode)
                 self.state_manager.increment_counter(name="errors")
                 self.stats.increase("myhoard.network_error", tags={"ex": ex.__class__.__name__, "mode": self.mode})

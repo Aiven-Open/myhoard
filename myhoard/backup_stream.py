@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
 from socket import gaierror
-from socks import ProxyConnectionError
+from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
 
 from pghoard.rohmu import errors as rohmu_errors
@@ -872,7 +872,9 @@ class BackupStream(threading.Thread):
             self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
             if uncompressed_size and compressed_size:
                 self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
-        except (gaierror, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError) as ex:
+        except (
+            gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+        ) as ex:
             self.log.exception("Network error while taking basebackup")
             self.state_manager.increment_counter(name="basebackup_errors")
             self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__, "reason": "network_error"})
@@ -1019,7 +1021,9 @@ class BackupStream(threading.Thread):
                     binlog["remote_index"], elapsed
                 )
             return True
-        except (gaierror, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError) as ex:
+        except (
+            gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+        ) as ex:
             self.log.exception("Network error while uploading binlog %s", binlog)
             self.state_manager.increment_counter(name="remote_write_errors")
             self.stats.increase(
