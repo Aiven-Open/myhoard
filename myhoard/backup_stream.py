@@ -10,8 +10,10 @@ import time
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
+from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
 from socket import gaierror
+from socks import ProxyConnectionError
 from ssl import SSLEOFError
 
 from pghoard.rohmu import errors as rohmu_errors
@@ -1012,7 +1014,7 @@ class BackupStream(threading.Thread):
                     binlog["remote_index"], elapsed
                 )
             return True
-        except (gaierror, ServerNotFoundError, SSLEOFError) as ex:
+        except (gaierror, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError) as ex:
             self.log.exception("Network error while uploading binlog %s", binlog)
             self.state_manager.increment_counter(name="remote_write_errors")
             self.stats.increase(

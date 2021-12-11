@@ -12,6 +12,7 @@ pytest-mock
 pytest-timeout
 pytest-xdist
 responses
+PySocks
 types-PyMySQL
 types-requests
 unify
