@@ -10,6 +10,9 @@ import time
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
+from httplib2 import ServerNotFoundError
+from socket import gaierror
+from ssl import SSLEOFError
 
 from pghoard.rohmu import errors as rohmu_errors
 from pghoard.rohmu.compressor import CompressionStream
@@ -1009,11 +1012,18 @@ class BackupStream(threading.Thread):
                     binlog["remote_index"], elapsed
                 )
             return True
+        except (gaierror, ServerNotFoundError, SSLEOFError) as ex:
+            self.log.exception("Network error while uploading binlog %s", binlog)
+            self.state_manager.increment_counter(name="remote_write_errors")
+            self.stats.increase(
+                "myhoard.binlog.upload_errors", tags={"reason": "network_error", "ex": ex.__class__.__name__}
+            )
+            return False
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to upload binlog %r", binlog)
             self.stats.unexpected_exception(ex=ex, where="BackupStream._upload_binlog")
             self.state_manager.increment_counter(name="remote_write_errors")
-            self.stats.increase("myhoard.binlog.upload_errors")
+            self.stats.increase("myhoard.binlog.upload_errors", tags={"ex": ex.__class__.__name__})
             return False
         finally:
             self.current_upload_index = None

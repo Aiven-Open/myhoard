@@ -11,9 +11,12 @@ import threading
 import time
 
 import pymysql
+from httplib2 import ServerNotFoundError
 from pghoard.rohmu import get_transfer
 from pghoard.rohmu.compressor import DecompressSink
 from pghoard.rohmu.encryptor import DecryptSink
+from socket import gaierror
+from ssl import SSLEOFError
 
 from .backup_stream import BackupStream
 from .binlog_scanner import BinlogScanner
@@ -244,6 +247,11 @@ class Controller(threading.Thread):
                     assert False, f"Invalid mode {self.mode}"
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
+            except (gaierror, ServerNotFoundError, SSLEOFError) as ex:
+                self.log.exception("Network error while in mode %s", self.mode)
+                self.state_manager.increment_counter(name="errors")
+                self.stats.increase("myhoard.network_error", tags={"ex": ex.__class__.__name__, "mode": self.mode})
+                time.sleep(self.iteration_sleep)
             except Exception as ex:  # pylint: disable=broad-except
                 self.log.exception("Unexpected exception in mode %s", self.mode)
                 self.stats.unexpected_exception(ex=ex, where="Controller.run")

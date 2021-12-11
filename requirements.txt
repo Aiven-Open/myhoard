@@ -1,6 +1,7 @@
 aiohttp
 botocore
 cryptography >= 0.8
+httplib2
 paramiko
 pghoard >= 2.1.0
 PyMySQL >= 0.9.2

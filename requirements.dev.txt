@@ -1,6 +1,7 @@
 # Use pip for build requirements to harmonize between OS versions
 coverage
 coveralls
+httplib2
 isort==4.3.21
 mock
 mypy
