@@ -872,9 +872,14 @@ class BackupStream(threading.Thread):
             self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
             if uncompressed_size and compressed_size:
                 self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
+        except (gaierror, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError) as ex:
+            self.log.exception("Network error while taking basebackup")
+            self.state_manager.increment_counter(name="basebackup_errors")
+            self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__, "reason": "network_error"})
+            self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
-            self.stats.increase("myhoard.basebackup.errors")
+            self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__})
             self.state_manager.increment_counter(name="basebackup_errors")
             self.last_basebackup_attempt = time.monotonic()
             # If this is not a remote failure error (i.e. any type of error arising from programming
