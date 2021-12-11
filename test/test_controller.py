@@ -1139,7 +1139,7 @@ def test_collect_binlogs_to_purge():
     }
     log = MagicMock()
 
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=None,
         binlogs=binlogs,
         log=log,
@@ -1148,7 +1148,7 @@ def test_collect_binlogs_to_purge():
         replication_state={},
     )
     assert not binlogs_to_purge
-    assert only_binlogs_without_gtids is None
+    assert only_inapplicable_binlogs is True
     log.info.assert_called_with(
         "Binlog %s was processed %s seconds ago and min age before purging is %s seconds, not purging", 1, 21, 30
     )
@@ -1158,7 +1158,7 @@ def test_collect_binlogs_to_purge():
     bs1.is_binlog_safe_to_delete.return_value = False
     bs2 = MagicMock()
     bs2.is_binlog_safe_to_delete.return_value = True
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1167,10 +1167,10 @@ def test_collect_binlogs_to_purge():
         replication_state={},
     )
     assert not binlogs_to_purge
-    assert only_binlogs_without_gtids is None
+    assert only_inapplicable_binlogs is False
     log.info.assert_called_with("Binlog %s reported not safe to delete by some backup streams", 1)
 
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1179,7 +1179,7 @@ def test_collect_binlogs_to_purge():
         replication_state={},
     )
     assert not binlogs_to_purge
-    assert only_binlogs_without_gtids is None
+    assert only_inapplicable_binlogs is False
     log.info.assert_called_with(
         "Binlog %s either reported as unsafe to delete (%s) by some stream or not reported as safe to delete by any (%s)", 1,
         True, True
@@ -1187,7 +1187,7 @@ def test_collect_binlogs_to_purge():
 
     # No backup streams or replication state and observe node, should allow purging anything
     log = MagicMock()
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[],
         binlogs=binlogs,
         log=log,
@@ -1196,7 +1196,7 @@ def test_collect_binlogs_to_purge():
         replication_state={},
     )
     assert binlogs_to_purge == binlogs
-    assert only_binlogs_without_gtids is None
+    assert only_inapplicable_binlogs is False
     log.info.assert_any_call("No backup streams and purging is allowed, assuming purging %s is safe", 1)
     log.info.assert_any_call("No backup streams and purging is allowed, assuming purging %s is safe", 2)
     log.info.assert_any_call("No replication state set, assuming purging binlog %s is safe", 1)
@@ -1207,7 +1207,7 @@ def test_collect_binlogs_to_purge():
         "server1": {},
     }
     bs1.is_binlog_safe_to_delete.return_value = True
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1216,7 +1216,7 @@ def test_collect_binlogs_to_purge():
         replication_state=replication_state,
     )
     assert not binlogs_to_purge
-    assert only_binlogs_without_gtids is False
+    assert only_inapplicable_binlogs is False
     log.info.assert_called_with("Binlog %s not yet replicated to server %r, not purging", 1, "server1")
 
     log = MagicMock()
@@ -1225,7 +1225,7 @@ def test_collect_binlogs_to_purge():
             "uuid1": [[1, 7]]
         },
     }
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1234,7 +1234,7 @@ def test_collect_binlogs_to_purge():
         replication_state=replication_state,
     )
     assert binlogs_to_purge == binlogs[:1]
-    assert only_binlogs_without_gtids is False
+    assert only_inapplicable_binlogs is False
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 1)
     log.info.assert_any_call("Binlog %s not yet replicated to server %r, not purging", 2, "server1")
 
@@ -1244,7 +1244,7 @@ def test_collect_binlogs_to_purge():
             "uuid1": [[1, 8]]
         },
     }
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1253,14 +1253,14 @@ def test_collect_binlogs_to_purge():
         replication_state=replication_state,
     )
     assert binlogs_to_purge == binlogs
-    assert only_binlogs_without_gtids is False
+    assert only_inapplicable_binlogs is False
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 1)
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 2)
 
     log = MagicMock()
     binlogs[0]["gtid_ranges"] = []
     binlogs[1]["gtid_ranges"] = []
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1269,7 +1269,7 @@ def test_collect_binlogs_to_purge():
         replication_state=replication_state,
     )
     assert not binlogs_to_purge
-    assert only_binlogs_without_gtids is True
+    assert only_inapplicable_binlogs is True
 
     binlogs.append({
         "local_index": 3,
@@ -1281,7 +1281,7 @@ def test_collect_binlogs_to_purge():
         "processed_at": now - 10,
     })
     log = MagicMock()
-    binlogs_to_purge, only_binlogs_without_gtids = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1290,5 +1290,5 @@ def test_collect_binlogs_to_purge():
         replication_state=replication_state,
     )
     assert binlogs_to_purge == binlogs
-    assert only_binlogs_without_gtids is False
+    assert only_inapplicable_binlogs is False
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 3)
