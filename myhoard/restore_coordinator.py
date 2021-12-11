@@ -10,6 +10,7 @@ import pymysql
 import threading
 import time
 from contextlib import suppress
+from pymysql import OperationalError
 
 from pghoard.rohmu import errors as rohmu_errors
 from pghoard.rohmu import get_transfer
@@ -21,7 +22,7 @@ from .binlog_downloader import download_binlog
 from .errors import BadRequest
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, make_gtid_range_string, mysql_cursor,
+    add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, ERR_TIMEOUT, make_gtid_range_string, mysql_cursor,
     parse_fs_metadata, parse_gtid_range_string, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes,
     sort_and_filter_binlogs, track_rate
 )
@@ -270,7 +271,13 @@ class RestoreCoordinator(threading.Thread):
                 self.read_queue()
             except Exception as ex:  # pylint: disable=broad-except
                 self.log.exception("Unexpected exception while restoring backup")
-                self.stats.unexpected_exception(ex=ex, where="RestoreCoordinator.run")
+                report_unexpected_error = True
+                if isinstance(ex, OperationalError):
+                    # Timeouts sometimes happen, no point in reporting unexpected error for those
+                    if ex.args[0] == ERR_TIMEOUT:
+                        report_unexpected_error = False
+                if report_unexpected_error:
+                    self.stats.unexpected_exception(ex=ex, where="RestoreCoordinator.run")
                 self.state_manager.increment_counter(name="restore_errors")
                 self.stats.increase("myhoard.restore_errors")
                 time.sleep(min(self._get_iteration_sleep(), 2))
