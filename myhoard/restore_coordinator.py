@@ -339,10 +339,9 @@ class RestoreCoordinator(threading.Thread):
             )
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to restore basebackup: %r", ex)
-            self.stats.unexpected_exception(ex=ex, where="RestoreCoordinator.restore_basebackup")
             self.state_manager.increment_counter(name="basebackup_restore_errors")
             self.state_manager.increment_counter(name="restore_errors")
-            self.stats.increase("myhoard.restore_errors")
+            self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
             if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
                 self.log.error(
                     "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS

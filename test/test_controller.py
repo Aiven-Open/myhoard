@@ -935,7 +935,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
             return new_controller.restore_coordinator and new_controller.restore_coordinator.is_complete()
 
         wait_for_condition(restore_complete, timeout=40)
-        new_controller.stats.increase.assert_any_call("myhoard.restore_errors")
+        new_controller.stats.increase.assert_any_call("myhoard.restore_errors", tags={"ex": "Exception"})
         new_controller.stats.increase.assert_any_call("myhoard.basebackup_broken")
     finally:
         new_controller.stop()
