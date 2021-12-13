@@ -10,6 +10,11 @@ import time
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
+from http.client import RemoteDisconnected
+from httplib2 import ServerNotFoundError
+from socket import gaierror
+from socks import GeneralProxyError, ProxyConnectionError
+from ssl import SSLEOFError
 
 from pghoard.rohmu import errors as rohmu_errors
 from pghoard.rohmu.compressor import CompressionStream
@@ -867,9 +872,16 @@ class BackupStream(threading.Thread):
             self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
             if uncompressed_size and compressed_size:
                 self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
+        except (
+            gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+        ) as ex:
+            self.log.exception("Network error while taking basebackup")
+            self.state_manager.increment_counter(name="basebackup_errors")
+            self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__, "reason": "network_error"})
+            self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
-            self.stats.increase("myhoard.basebackup.errors")
+            self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__})
             self.state_manager.increment_counter(name="basebackup_errors")
             self.last_basebackup_attempt = time.monotonic()
             # If this is not a remote failure error (i.e. any type of error arising from programming
@@ -1009,11 +1021,20 @@ class BackupStream(threading.Thread):
                     binlog["remote_index"], elapsed
                 )
             return True
+        except (
+            gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+        ) as ex:
+            self.log.exception("Network error while uploading binlog %s", binlog)
+            self.state_manager.increment_counter(name="remote_write_errors")
+            self.stats.increase(
+                "myhoard.binlog.upload_errors", tags={"reason": "network_error", "ex": ex.__class__.__name__}
+            )
+            return False
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to upload binlog %r", binlog)
             self.stats.unexpected_exception(ex=ex, where="BackupStream._upload_binlog")
             self.state_manager.increment_counter(name="remote_write_errors")
-            self.stats.increase("myhoard.binlog.upload_errors")
+            self.stats.increase("myhoard.binlog.upload_errors", tags={"ex": ex.__class__.__name__})
             return False
         finally:
             self.current_upload_index = None

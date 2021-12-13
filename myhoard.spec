@@ -11,12 +11,14 @@ BuildRequires:  pghoard >= 2.0.0-115
 BuildRequires:  python3-aiohttp
 BuildRequires:  python3-devel
 BuildRequires:  python3-flake8
+BuildRequires:  python3-httplib2
 BuildRequires:  python3-isort
 BuildRequires:  python3-pylint
 BuildRequires:  python3-PyMySQL >= 0.9.2
 BuildRequires:  python3-pytest
 BuildRequires:  python3-pytest-cov
 BuildRequires:  python3-requests
+BuildRequires:  python3-socks
 BuildRequires:  python3-yapf
 BuildRequires:  rpm-build
 Requires:       percona-xtrabackup-80 >= 8.0

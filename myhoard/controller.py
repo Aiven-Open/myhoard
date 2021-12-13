@@ -11,9 +11,14 @@ import threading
 import time
 
 import pymysql
+from http.client import RemoteDisconnected
+from httplib2 import ServerNotFoundError
 from pghoard.rohmu import get_transfer
 from pghoard.rohmu.compressor import DecompressSink
 from pghoard.rohmu.encryptor import DecryptSink
+from socket import gaierror
+from socks import GeneralProxyError, ProxyConnectionError
+from ssl import SSLEOFError
 
 from .backup_stream import BackupStream
 from .binlog_scanner import BinlogScanner
@@ -244,6 +249,13 @@ class Controller(threading.Thread):
                     assert False, f"Invalid mode {self.mode}"
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
+            except (
+                gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+            ) as ex:
+                self.log.exception("Network error while in mode %s", self.mode)
+                self.state_manager.increment_counter(name="errors")
+                self.stats.increase("myhoard.network_error", tags={"ex": ex.__class__.__name__, "mode": self.mode})
+                time.sleep(self.iteration_sleep)
             except Exception as ex:  # pylint: disable=broad-except
                 self.log.exception("Unexpected exception in mode %s", self.mode)
                 self.stats.unexpected_exception(ex=ex, where="Controller.run")
@@ -324,6 +336,7 @@ class Controller(threading.Thread):
         cls, *, backup_streams, binlogs, exclude_uuid=None, log, mode, purge_settings, replication_state
     ):
         only_binlogs_without_gtids = None
+        only_binlogs_that_are_too_new = None
         binlogs_to_purge = []
         binlogs_to_maybe_purge = []
         for binlog in binlogs:
@@ -334,7 +347,10 @@ class Controller(threading.Thread):
                     "Binlog %s was processed %s seconds ago and min age before purging is %s seconds, not purging",
                     binlog["local_index"], math.ceil(binlog_age), min_age
                 )
+                if only_binlogs_that_are_too_new is None:
+                    only_binlogs_that_are_too_new = True
                 break
+            only_binlogs_that_are_too_new = False
             if mode == cls.Mode.active:
                 # In active mode we want all streams to say purging a binlog is safe
                 can_purge = all(
@@ -403,7 +419,7 @@ class Controller(threading.Thread):
                     binlogs_to_purge.append(binlog)
                 else:
                     break
-        return binlogs_to_purge, only_binlogs_without_gtids
+        return binlogs_to_purge, bool(only_binlogs_without_gtids or only_binlogs_that_are_too_new)
 
     @staticmethod
     def get_backup_list(backup_sites, *, seen_basebackup_infos=None, site_transfers=None):
@@ -1078,15 +1094,6 @@ class Controller(threading.Thread):
             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
 
-    def _get_oldest_binlog_time(self):
-        oldest_binlog = 0
-
-        for binlog in self.binlog_scanner.binlogs:
-            if oldest_binlog < binlog["processed_at"]:
-                oldest_binlog = binlog["processed_at"]
-
-        return oldest_binlog
-
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
         if not purge_settings["enabled"] or time.time() - self.state["binlogs_purged_at"] < purge_settings["purge_interval"]:
@@ -1130,7 +1137,7 @@ class Controller(threading.Thread):
                     last_could_have_purged = time.time()
                 return
 
-            binlogs_to_purge, only_binlogs_without_gtids = self.collect_binlogs_to_purge(
+            binlogs_to_purge, only_inapplicable_binlogs = self.collect_binlogs_to_purge(
                 backup_streams=backup_streams,
                 binlogs=binlogs,
                 exclude_uuid=exclude_uuid,
@@ -1141,10 +1148,10 @@ class Controller(threading.Thread):
             )
             if not binlogs_to_purge:
                 # If we only had binlogs for which we legitimately couldn't tell whether purging was safe or not,
-                # update the could have purged timestamp that gets reported as metric data point because for inactive
-                # server this is expected behavior and we don't want the metric value to indicate any abnormality
-                # in system behavior.
-                if only_binlogs_without_gtids:
+                # or which according to settings should not have been purged, update the could have purged timestamp
+                # that gets reported as metric data point because for inactive server this is expected behavior and
+                # we don't want the metric value to indicate any abnormality in system behavior.
+                if only_inapplicable_binlogs:
                     last_could_have_purged = time.time()
             else:
                 # PURGE BINARY LOGS TO 'name' does not delete the file identified by 'name' so we need to increase
@@ -1173,7 +1180,7 @@ class Controller(threading.Thread):
                 last_could_have_purged = last_purge
         finally:
             current_time = time.time()
-            
+
             self.state_manager.update_state(
                 binlogs_purged_at=current_time,
                 last_binlog_purge=last_purge,
@@ -1181,19 +1188,7 @@ class Controller(threading.Thread):
             )
 
             self.stats.gauge_float("myhoard.binlog.time_since_any_purged", current_time - last_purge)
-            self.stats.gauge_float(
-                "myhoard.binlog.time_since_could_have_purged", 
-                current_time - last_could_have_purged,
-                tags={"support_oldest_should_have_purged": "1"}
-            )
-
-            self._process_local_binlog_updates()
-            oldest_binlog_time = self._get_oldest_binlog_time()
-            
-            self.stats.gauge_float(
-                "myhoard.binlog.time_since_oldest_should_have_purged", 
-                current_time - (oldest_binlog_time + purge_settings["min_binlog_age_before_purge"]),
-            )
+            self.stats.gauge_float("myhoard.binlog.time_since_could_have_purged", current_time - last_could_have_purged)
 
     def _refresh_backups_list(self):
         interval = self.backup_refresh_interval_base

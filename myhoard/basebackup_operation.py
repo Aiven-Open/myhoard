@@ -309,5 +309,5 @@ class OutputReaderThread(threading.Thread):
             self.stream_handler(self.stream)
         except Exception as ex:  # pylint: disable=broad-except
             logging.getLogger(self.__class__.__name__).exception("Failure while processing backup output")
-            self.stats.unexpected_exception(ex=ex, where="BasebackupOutputReaderThread")
+            self.stats.increase("myhoard.basebackup_read_error", tags={"ex": ex.__class__.__name__})
             self.exception = ex
