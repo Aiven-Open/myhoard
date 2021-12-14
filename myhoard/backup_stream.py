@@ -1022,7 +1022,13 @@ class BackupStream(threading.Thread):
                 )
             return True
         except (
-            gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+            BrokenPipeError,
+            gaierror,
+            GeneralProxyError,
+            ProxyConnectionError,
+            RemoteDisconnected,
+            ServerNotFoundError,
+            SSLEOFError,
         ) as ex:
             self.log.exception("Network error while uploading binlog %s", binlog)
             self.state_manager.increment_counter(name="remote_write_errors")
