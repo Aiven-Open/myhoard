@@ -250,7 +250,13 @@ class Controller(threading.Thread):
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
             except (
-                gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+                BrokenPipeError,
+                gaierror,
+                GeneralProxyError,
+                ProxyConnectionError,
+                RemoteDisconnected,
+                ServerNotFoundError,
+                SSLEOFError,
             ) as ex:
                 self.log.exception("Network error while in mode %s", self.mode)
                 self.state_manager.increment_counter(name="errors")
