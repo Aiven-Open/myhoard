@@ -1,5 +1,5 @@
 [flake8]
-format = abspath
+format = default
 max-line-length = 125
 ignore =
   E123,  # Closing brackets indent

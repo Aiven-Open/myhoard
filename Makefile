@@ -23,6 +23,7 @@ typecheck: version
 .PHONY: lint
 lint: version
 	$(PYTHON) -m pylint --rcfile .pylintrc $(PYTHON_SOURCE_DIRS)
+	$(PYTHON) -m flake8 --config .flake8 $(PYTHON_SOURCE_DIRS)
 
 .PHONY: fmt
 fmt: version
