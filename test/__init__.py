@@ -164,7 +164,7 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
-    mysql_config.proc = subprocess.Popen(command)   # pylint: disable=consider-using-with
+    mysql_config.proc = subprocess.Popen(command)  # pylint: disable=consider-using-with
     print("Started mysqld with pid", mysql_config.proc.pid)
     wait_for_port(mysql_config.port, wait_time=10)
 

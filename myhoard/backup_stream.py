@@ -4,29 +4,29 @@ import enum
 import json
 import logging
 import os
-import pymysql
 import threading
 import time
 import uuid
 from contextlib import suppress
 from datetime import datetime, timezone
 from http.client import RemoteDisconnected
-from httplib2 import ServerNotFoundError
 from socket import gaierror
-from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
 
+import pymysql
+from httplib2 import ServerNotFoundError
 from pghoard.rohmu import errors as rohmu_errors
 from pghoard.rohmu.compressor import CompressionStream
 from pghoard.rohmu.encryptor import EncryptorStream
 from pghoard.rohmu.object_storage.s3 import S3Transfer
+from socks import GeneralProxyError, ProxyConnectionError
 
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
 from .errors import XtraBackupError
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, DEFAULT_MYSQL_TIMEOUT, ERR_TIMEOUT,
+    DEFAULT_MYSQL_TIMEOUT, ERR_TIMEOUT, add_gtid_ranges_to_executed_set, are_gtids_in_executed_set,
     first_contains_gtids_not_in_second, make_fs_metadata, mysql_cursor, parse_fs_metadata, parse_gtid_range_string,
     rsa_encrypt_bytes, sort_and_filter_binlogs, track_rate, truncate_gtid_executed
 )
@@ -317,12 +317,10 @@ class BackupStream(threading.Thread):
         self.log.info("Marking stream %s as closed (local update only)", self.stream_id)
         # Just write the closed info to local state here to ensure file storage
         # operation happens from appropriate thread
-        self.state_manager.update_state(
-            closed_info={
-                "closed_at": time.time(),
-                "server_id": self.server_id,
-            },
-        )
+        self.state_manager.update_state(closed_info={
+            "closed_at": time.time(),
+            "server_id": self.server_id,
+        }, )
         self.wakeup_event.set()
 
     def _handle_pending_mark_as_closed(self):
@@ -348,12 +346,10 @@ class BackupStream(threading.Thread):
         self.log.info("Marking stream %r as completed (local update only)", self.stream_id)
         # Just write the completed info to local state here to ensure file storage
         # operation happens from appropriate thread
-        self.state_manager.update_state(
-            completed_info={
-                "completed_at": time.time(),
-                "server_id": self.server_id,
-            },
-        )
+        self.state_manager.update_state(completed_info={
+            "completed_at": time.time(),
+            "server_id": self.server_id,
+        }, )
         self.wakeup_event.set()
 
     def _handle_pending_mark_as_completed(self):
@@ -1033,7 +1029,10 @@ class BackupStream(threading.Thread):
             self.log.exception("Network error while uploading binlog %s", binlog)
             self.state_manager.increment_counter(name="remote_write_errors")
             self.stats.increase(
-                "myhoard.binlog.upload_errors", tags={"reason": "network_error", "ex": ex.__class__.__name__}
+                "myhoard.binlog.upload_errors", tags={
+                    "reason": "network_error",
+                    "ex": ex.__class__.__name__
+                }
             )
             return False
         except Exception as ex:  # pylint: disable=broad-except

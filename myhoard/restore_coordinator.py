@@ -6,14 +6,14 @@ import logging
 import multiprocessing
 import os
 import queue
-import pymysql
 import threading
 import time
 from contextlib import suppress
-from pymysql import OperationalError
 
+import pymysql
 from pghoard.rohmu import errors as rohmu_errors
 from pghoard.rohmu import get_transfer
+from pymysql import OperationalError
 
 from .append_only_state_manager import AppendOnlyStateManager
 from .backup_stream import BINLOG_BUCKET_SIZE
@@ -22,7 +22,7 @@ from .binlog_downloader import download_binlog
 from .errors import BadRequest
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, ERR_TIMEOUT, make_gtid_range_string, mysql_cursor,
+    ERR_TIMEOUT, add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, make_gtid_range_string, mysql_cursor,
     parse_fs_metadata, parse_gtid_range_string, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes,
     sort_and_filter_binlogs, track_rate
 )
@@ -404,9 +404,7 @@ class RestoreCoordinator(threading.Thread):
         if final_round and self.target_time and not self.target_time_approximate_ok and binlogs[-1]["gtid_ranges"]:
             renamed = last_remote_index <= self.state["last_renamed_index"]
             if renamed:
-                file_name = self._relay_log_name(
-                    index=last_remote_index + self.state["binlog_name_offset"]
-                )
+                file_name = self._relay_log_name(index=last_remote_index + self.state["binlog_name_offset"])
             else:
                 file_name = self._relay_log_prefetch_name(index=last_remote_index)
             ranges = list(build_gtid_ranges(read_gtids_from_log(file_name, read_until_time=self.target_time)))

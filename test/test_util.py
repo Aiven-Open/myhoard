@@ -4,8 +4,9 @@ import os
 import subprocess
 from datetime import datetime
 
-import myhoard.util as myhoard_util
 import pytest
+
+import myhoard.util as myhoard_util
 
 from . import generate_rsa_key_pair
 

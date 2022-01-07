@@ -2,6 +2,7 @@
 import os
 
 import pytest
+
 from myhoard.append_only_state_manager import AppendOnlyStateManager
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]

@@ -9,16 +9,16 @@ import os
 import re
 import threading
 import time
+from http.client import RemoteDisconnected
+from socket import gaierror
+from ssl import SSLEOFError
 
 import pymysql
-from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
 from pghoard.rohmu import get_transfer
 from pghoard.rohmu.compressor import DecompressSink
 from pghoard.rohmu.encryptor import DecryptSink
-from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
-from ssl import SSLEOFError
 
 from .backup_stream import BackupStream
 from .binlog_scanner import BinlogScanner
@@ -26,14 +26,8 @@ from .errors import BadRequest
 from .restore_coordinator import RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
-    are_gtids_in_executed_set,
-    change_master_to,
-    DEFAULT_MYSQL_TIMEOUT,
-    ERR_TIMEOUT,
-    make_gtid_range_string,
-    mysql_cursor,
-    parse_fs_metadata,
-    relay_log_name,
+    DEFAULT_MYSQL_TIMEOUT, ERR_TIMEOUT, are_gtids_in_executed_set, change_master_to, make_gtid_range_string, mysql_cursor,
+    parse_fs_metadata, relay_log_name
 )
 
 ERR_CANNOT_CONNECT = 2003
@@ -818,9 +812,8 @@ class Controller(threading.Thread):
         gets promoted after backup restoration completes and there's no available master."""
         if not self.restore_coordinator.can_add_binlog_streams():
             return
-        backups = sorted(
-            (backup for backup in self.state["backups"] if backup["completed_at"]), key=lambda backup: backup["completed_at"]
-        )
+        backups = sorted((backup for backup in self.state["backups"] if backup["completed_at"]),
+                         key=lambda backup: backup["completed_at"])
         # If most recent current backup is not in the list of backups being restored then we're probably
         # restoring some old backup and don't want to automatically get latest changes
         if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_streams):
@@ -828,9 +821,8 @@ class Controller(threading.Thread):
 
         old_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
         self._refresh_backups_list()
-        backups = sorted(
-            (backup for backup in self.state["backups"] if backup["completed_at"]), key=lambda backup: backup["completed_at"]
-        )
+        backups = sorted((backup for backup in self.state["backups"] if backup["completed_at"]),
+                         key=lambda backup: backup["completed_at"])
         new_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
         if old_backups == new_backups:
             return
@@ -873,8 +865,9 @@ class Controller(threading.Thread):
             if info["Slave_IO_Running"] == "Yes":
                 raise Exception("Slave IO thread expected to be stopped but is running")
             if info["Slave_SQL_Running"] == "Yes":
-                if not re.match("(Slave|Replica) has read all relay log; waiting for more updates",
-                                info["Slave_SQL_Running_State"]):
+                if not re.match(
+                    "(Slave|Replica) has read all relay log; waiting for more updates", info["Slave_SQL_Running_State"]
+                ):
                     raise Exception("Expected SQL thread to be stopped or finished processing updates")
                 cursor.execute("STOP SLAVE SQL_THREAD")
 
@@ -1450,9 +1443,8 @@ class Controller(threading.Thread):
         # We're trying to restore a backup but that keeps on failing in the basebackup restoration phase.
         # If we have an older backup available try restoring that and play back all binlogs so that the
         # system should end up in the exact same state eventually.
-        backups = sorted(
-            (backup for backup in self.state["backups"] if backup["completed_at"]), key=lambda d: d["completed_at"]
-        )
+        backups = sorted((backup for backup in self.state["backups"] if backup["completed_at"]),
+                         key=lambda d: d["completed_at"])
         current_stream_id = self.state["restore_options"]["stream_id"]
         earlier_backup = None
         for backup in backups:
@@ -1466,19 +1458,21 @@ class Controller(threading.Thread):
             self.log.info("Earlier backup %r is available, restoring basebackup from that", earlier_backup)
             options = self.state["restore_options"]
             self.restore_coordinator.stop()
-            self.state_manager.update_state(restore_options={
-                # Get binlogs from all backup streams
-                "binlog_streams": [{
-                    "site": earlier_backup["site"],
+            self.state_manager.update_state(
+                restore_options={
+                    # Get binlogs from all backup streams
+                    "binlog_streams": [{
+                        "site": earlier_backup["site"],
+                        "stream_id": earlier_backup["stream_id"],
+                    }] + options["binlog_streams"],
+                    "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
+                    "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
                     "stream_id": earlier_backup["stream_id"],
-                }] + options["binlog_streams"],
-                "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
-                "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
-                "stream_id": earlier_backup["stream_id"],
-                "site": earlier_backup["site"],
-                "target_time": options["target_time"],
-                "target_time_approximate_ok": options["target_time_approximate_ok"],
-            })
+                    "site": earlier_backup["site"],
+                    "target_time": options["target_time"],
+                    "target_time_approximate_ok": options["target_time_approximate_ok"],
+                }
+            )
             self.restore_coordinator = None
         else:
             # Switch restore coordinator to permanently failed mode
@@ -1562,6 +1556,7 @@ class Controller(threading.Thread):
 
         max_completion_wait = 2.0
         if expected_completed:
+
             def is_completed():
                 return all(stream.active_phase == BackupStream.ActivePhase.binlog for stream in expected_completed)
 
@@ -1587,6 +1582,7 @@ class Controller(threading.Thread):
                 expected_closed.append(stream)
 
         if expected_closed:
+
             def is_closed():
                 return all(stream.active_phase == BackupStream.ActivePhase.none for stream in expected_closed)
 
@@ -1595,9 +1591,7 @@ class Controller(threading.Thread):
             if self._wait_for_operation_to_finish(is_closed, wait_time=max_completion_wait):
                 self.log.info("All pending mark as closed operations finished")
             else:
-                self.log.warning(
-                    "Not all streams finished marking themselves closed in %.1f seconds", max_completion_wait
-                )
+                self.log.warning("Not all streams finished marking themselves closed in %.1f seconds", max_completion_wait)
 
         if not expected_completed and not expected_closed:
             return

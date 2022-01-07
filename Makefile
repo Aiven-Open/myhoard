@@ -23,6 +23,7 @@ typecheck: version
 .PHONY: lint
 lint: version
 	$(PYTHON) -m pylint --rcfile .pylintrc $(PYTHON_SOURCE_DIRS)
+	$(PYTHON) -m pycodestyle --config=.pycodestyle $(PYTHON_SOURCE_DIRS)
 
 .PHONY: fmt
 fmt: version

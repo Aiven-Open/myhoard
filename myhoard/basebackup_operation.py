@@ -217,10 +217,10 @@ class BasebackupOperation:
             line = line.decode("iso-8859-1")
 
         if (
-            not self._process_output_line_new_file(line) and
-            not self._process_output_line_file_finished(line) and
-            not self._process_output_line_binlog_info(line) and
-            not self._process_output_line_lsn_info(line)
+            not self._process_output_line_new_file(line)
+            and not self._process_output_line_file_finished(line)
+            and not self._process_output_line_binlog_info(line)
+            and not self._process_output_line_lsn_info(line)
         ):
             if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
                 self.log.error("xtrabackup: %r", line)
