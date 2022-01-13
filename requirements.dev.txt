@@ -1,18 +1,19 @@
 # Use pip for build requirements to harmonize between OS versions
 coverage
 coveralls
+flake8
 httplib2
 isort==4.3.21
 mock
 mypy
 pylint-quotes
 pylint>=2.4.3
+PySocks
 pytest
 pytest-mock
 pytest-timeout
 pytest-xdist
 responses
-PySocks
 types-PyMySQL
 types-requests
 unify
