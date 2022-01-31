@@ -30,12 +30,12 @@ jobs:
 
       - id: mysql-repos
         run: |
-          wget -c 'https://repo.mysql.com/mysql-apt-config_0.8.13-1_all.deb'
+          wget -c 'https://repo.mysql.com/mysql-apt-config_0.8.22-1_all.deb'
           echo "mysql-apt-config mysql-apt-config/select-server select $MYSQL_VERSION" | sudo debconf-set-selections
           echo "mysql-apt-config mysql-apt-config/select-tools select Enabled" | sudo debconf-set-selections
           echo "mysql-apt-config mysql-apt-config/select-product select Ok" | sudo debconf-set-selections
           echo "mysql-apt-config mysql-apt-config/tools-component string mysql-tools" | sudo debconf-set-selections
-          sudo dpkg -i mysql-apt-config_0.8.13-1_all.deb
+          sudo dpkg -i mysql-apt-config_0.8.22-1_all.deb
 
       - id: percona-tools
         run: |
