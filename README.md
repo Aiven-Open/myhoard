@@ -26,7 +26,7 @@ Fault-resilience and monitoring:
 
 * Handles temporary object storage connectivity issues by retrying all
   operations
-* Metrics via statsd using [Telegraf tag extensions](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/statsd)
+* Metrics via statsd using [Telegraf® tag extensions](https://github.com/influxdata/telegraf/tree/master/plugins/inputs/statsd)
 * Unexpected exception reporting via Sentry
 * State reporting via HTTP API
 * Full internal state stored on local file system to cope with process and
@@ -760,6 +760,14 @@ Bug reports and patches are very welcome, please post them as GitHub issues
 and pull requests at https://github.com/aiven/myhoard. Any possible
 vulnerabilities or other serious issues should be reported directly to the
 maintainers <opensource@aiven.io>.
+
+Trademarks
+==========
+MySQL is a registered trademark of Oracle and/or its affiliates. Other names may be trademarks of their respective owners.
+
+Telegraf® is a trademark [registered / owned] by InfluxData, which is not affiliated with, and does not endorse, this product.
+
+Percona Xtrabackup is a trademark and property of its respective owners. All product and service names used in this website are for identification purposes only and do not imply endorsement.
 
 Credits
 =======
