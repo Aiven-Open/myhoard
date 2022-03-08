@@ -233,6 +233,7 @@ class Controller(threading.Thread):
 
     def run(self):
         self.log.info("Controller running")
+        consecutive_unexpected_errors = 0
         while self.is_running:
             try:
                 if self.mode == self.Mode.idle:
@@ -249,6 +250,7 @@ class Controller(threading.Thread):
                     assert False, f"Invalid mode {self.mode}"
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
+                consecutive_unexpected_errors = 0
             except (
                 BrokenPipeError,
                 gaierror,
@@ -258,6 +260,7 @@ class Controller(threading.Thread):
                 ServerNotFoundError,
                 SSLEOFError,
             ) as ex:
+                consecutive_unexpected_errors = 0
                 self.log.exception("Network error while in mode %s", self.mode)
                 self.state_manager.increment_counter(name="errors")
                 self.stats.increase("myhoard.network_error", tags={"ex": ex.__class__.__name__, "mode": self.mode})
@@ -267,7 +270,10 @@ class Controller(threading.Thread):
                 self.stats.unexpected_exception(ex=ex, where="Controller.run")
                 self.state_manager.increment_counter(name="errors")
                 self.stats.increase("myhoard.generic_errors")
-                time.sleep(self.iteration_sleep)
+                # Limit counter max value or else we'll get to exponent that cannot be handled anymore
+                sleep_time = min(self.iteration_sleep * 1.5 ** min(consecutive_unexpected_errors, 20), 30.0)
+                consecutive_unexpected_errors += 1
+                time.sleep(sleep_time)
         self.is_running = False
 
     def stop(self):

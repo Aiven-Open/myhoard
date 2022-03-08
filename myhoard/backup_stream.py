@@ -428,6 +428,7 @@ class BackupStream(threading.Thread):
 
     def run(self):
         self.log.info("Backup stream %r running", self.stream_id)
+        consecutive_errors = 0
         while self.is_running:
             try:
                 if not self.file_storage:
@@ -455,12 +456,16 @@ class BackupStream(threading.Thread):
 
                 self.wakeup_event.wait(self._get_iteration_sleep())
                 self.wakeup_event.clear()
+                consecutive_errors = 0
             except Exception as ex:  # pylint: disable=broad-except
                 self.log.exception("Unexpected exception in mode %s", self.mode)
                 self.stats.unexpected_exception(ex=ex, where="BackupStream.run")
                 self.state_manager.increment_counter(name="backup_errors")
                 self.stats.increase("myhoard.backup_stream.errors")
-                time.sleep(1)
+                # Limit counter max value or else we'll get to exponent that cannot be handled anymore
+                sleep_time = min(1.5 ** min(consecutive_errors, 20), 30.0)
+                consecutive_errors += 1
+                time.sleep(sleep_time)
 
     def start_preparing_for_promotion(self):
         with self.lock:
