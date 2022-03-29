@@ -1,4 +1,4 @@
-MyHoard [![Build Status](https://github.com/aiven/myhoard/workflows/Build%20MyHoard/badge.svg?branch=master)](https://github.com/aiven/myhoard/actions)
+MyHoard [![Build Status](https://github.com/aiven/myhoard/workflows/Build%20MyHoard/badge.svg?branch=master)](https://github.com/aiven/myhoard/actions) [![Codecov](https://codecov.io/gh/aiven/myhoard/branch/main/graph/badge.svg?token=nLr7M7hvCx)](https://codecov.io/gh/aiven/myhoard)
 =====================================================================================================================
 
 MyHoard is a daemon for creating, managing and restoring MySQL backups.

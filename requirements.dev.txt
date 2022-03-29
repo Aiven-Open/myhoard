@@ -10,6 +10,7 @@ pylint-quotes
 pylint>=2.4.3
 PySocks
 pytest
+pytest-cov==3.0.0
 pytest-mock
 pytest-timeout
 pytest-xdist

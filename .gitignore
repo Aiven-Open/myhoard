@@ -4,6 +4,7 @@
 *~
 /.cache
 /.coverage
+coverage.xml
 /.project
 /.pydevproject
 /.vagrant
