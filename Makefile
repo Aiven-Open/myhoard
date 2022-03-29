@@ -37,7 +37,8 @@ copyright:
 
 .PHONY: coverage
 coverage: version
-	$(PYTHON) -m pytest $(PYTEST_ARG) --cov-report term-missing --cov myhoard test/
+	$(PYTHON) -m pytest $(PYTEST_ARG) --cov-report term-missing --cov-branch \
+		--cov-report xml:coverage.xml --cov myhoard test/
 
 .PHONY: clean
 clean:
