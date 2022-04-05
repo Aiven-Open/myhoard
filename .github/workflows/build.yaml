@@ -1,5 +1,7 @@
 name: Build MyHoard
 
+permissions: read-all
+
 on:
   push:
     branches:
@@ -22,6 +24,8 @@ jobs:
 
       - id: checkout-code
         uses: actions/checkout@v2
+        with:
+          persist-credentials: false
 
       - id: prepare-python
         uses: actions/setup-python@v2
