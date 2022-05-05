@@ -73,6 +73,8 @@ def test_basic_backup(mysql_master, extra_uuid):
     )
     op.create_backup()
 
+    print(backed_up_files)
+
     for db_index in range(15):
         assert f"./test{db_index}/foo{db_index}.ibd" in backed_up_files
 
