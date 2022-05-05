@@ -744,6 +744,7 @@ Current phase of backup restoration. Possible options are these:
 * failed: Restoring the backup failed. The operation will be retried
   automatically but it may fail repeatedly and analyzing logs to get more
   details regarding the failure is advisable.
+* test-delete
 
 License
 =======
