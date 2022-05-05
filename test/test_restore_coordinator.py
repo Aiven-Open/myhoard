@@ -9,6 +9,7 @@ import myhoard.util as myhoard_util
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
+from unittest.mock import Mock, patch
 
 from . import (DataGenerator, build_statsd_client, generate_rsa_key_pair, restart_mysql, while_asserts)
 
@@ -304,3 +305,60 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         master_status = pitr_master_status or original_master_status
         assert final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"], "final status executed_gtid_set differs from master status"
         assert final_status["File"] == "bin.000001", "final status file differes from expected"
+
+
+@pytest.mark.parametrize("running_state",
+                         [
+                             "Slave has read all relay log; waiting for more updates",
+                             "Replica has read all relay log; waiting for more updates"
+                             ]
+                         )
+def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_empty):
+    restored_connect_options = {
+        "host": "127.0.0.1",
+        "password": mysql_master.password,
+        "port": mysql_empty.port,
+        "user": mysql_master.user,
+    }
+    state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
+    private_key_pem, _ = generate_rsa_key_pair()
+
+    slave_status_response = {
+        "Relay_Log_File": "relay.000001",
+        "Slave_SQL_Running_State": running_state
+    }
+
+    mock_cursor = Mock()
+    mock_cursor.fetchone.return_value = slave_status_response
+
+    with patch.object(RestoreCoordinator, '_mysql_cursor') as mock_mysql_cursor:
+
+        mock_mysql_cursor.return_value.__enter__.return_value = mock_cursor
+        mock_cursor.foo.return_value.bar.return_value.something.return_value = "bar"
+        mock_cursor.foo.return_value = "bar"
+        # We do not connect to the db in this call we just need a RestoreCoordinator object
+        rc = RestoreCoordinator(
+            binlog_streams=[],
+            file_storage_config={},
+            mysql_client_params=restored_connect_options,
+            mysql_config_file_name=mysql_empty.config_name,
+            mysql_data_directory=mysql_empty.config_options.datadir,
+            mysql_relay_log_index_file=mysql_empty.config_options.relay_log_index_file,
+            mysql_relay_log_prefix=mysql_empty.config_options.relay_log_file_prefix,
+            pending_binlogs_state_file=state_file_name.replace(".json", "") + ".pending_binlogs",
+            restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_empty, **kwargs),
+            rsa_private_key_pem=private_key_pem,
+            site="default",
+            state_file=state_file_name,
+            stats=build_statsd_client(),
+            stream_id="PLACEHOLDER",
+            target_time=None,
+            temp_dir=mysql_empty.base_dir,
+        )
+
+        rc.state["current_relay_log_target"] = 2
+
+        apply_finished, current_index = rc._check_sql_slave_status()  # pylint: disable=protected-access
+
+    assert apply_finished
+    assert current_index == 2
