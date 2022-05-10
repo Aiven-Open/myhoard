@@ -1,5 +1,7 @@
 #!/bin/bash -e
+[ -n "$1" ] || { echo "must pass python version"; exit 1; }
+PYTHON_VERSION="$1"
 export DEBIAN_FRONTEND="noninteractive"
-pip install -r requirements.txt
-pip install -r requirements.dev.txt
-pip install -e .
+python${PYTHON_VERSION} -m pip install -r requirements.txt
+python${PYTHON_VERSION} -m pip install -r requirements.dev.txt
+python${PYTHON_VERSION} -m pip install -e .
