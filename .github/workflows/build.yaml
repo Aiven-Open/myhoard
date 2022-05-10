@@ -108,7 +108,7 @@ jobs:
         run: scripts/remove-default-mysql
 
       - id: mysql-repos
-        run: scripts/ci-setup-mysql-repos ${{ matrix.mysql-version }}
+        run: scripts/ci-setup-mysql ${{ matrix.mysql-version }}
 
       - id: percona-tools
         run: scripts/ci-setup-percona
