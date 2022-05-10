@@ -222,6 +222,7 @@ class BasebackupOperation:
             not self._process_output_line_binlog_info(line) and
             not self._process_output_line_lsn_info(line)
         ):
+            pass
             if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
                 self.log.error("xtrabackup: %r", line)
             else:
@@ -229,14 +230,15 @@ class BasebackupOperation:
 
     def _process_output_line_new_file(self, line):
         match = self.current_file_re.search(line)
-        if match:
+        if match and ("Done:" not in line):
             self.current_file = match.group(1)
             if self.current_file != "<STDOUT>":
                 self.log.info("Started processing file %r", self.current_file)
-        return match
+            return True
+        return False
 
     def _process_output_line_file_finished(self, line):
-        if not line.endswith(" ...done"):
+        if not (line.endswith(" ...done") or ("Done:" in line)):
             return False
 
         if not self.current_file:
