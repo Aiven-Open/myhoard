@@ -70,7 +70,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         def restoration_is_complete():
             return new_master_controller.restore_coordinator and new_master_controller.restore_coordinator.is_complete()
 
-        wait_for_condition(restoration_is_complete, timeout=15)
+        wait_for_condition(restoration_is_complete, timeout=30, description="Restoration was not completed in time")
 
         # Ensure old master manages to send some more binary logs now that new master has finished
         # restoring backup. Because new master isn't connected to old one it won't receive these via

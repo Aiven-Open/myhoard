@@ -230,11 +230,11 @@ def generate_rsa_key_pair(*, bits=3072, public_exponent=65537):
     return private_pem, public_pem
 
 
-def wait_for_condition(condition, *, timeout=5.0, interval=0.1):
+def wait_for_condition(condition, *, timeout=5.0, interval=0.1, description="<no reason>"):
     start_time = time.monotonic()
     while True:
         if time.monotonic() - start_time >= timeout:
-            raise Exception(f"Timeout of {timeout}s exceeded before condition was met")
+            raise Exception(f"Timeout of {timeout}s exceeded before condition was met: {description}")
         if condition():
             break
         time.sleep(interval)
