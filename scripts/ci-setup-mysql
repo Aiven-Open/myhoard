@@ -1,8 +1,14 @@
 #!/bin/bash -e
 [ -n "$1" ]
 MYSQL_PACKAGE_VERSION="$1"
-export VERSION_ID="$(lsb_release -r -s)"
 
+sudo debconf-set-selections <<< 'mysql-community-server mysql-community-server/re-root-pass password ROOTPASSWORD'
+sudo debconf-set-selections <<< 'mysql-community-server mysql-community-server/root-pass password ROOTPASSWORD'
+sudo debconf-set-selections <<< 'mysql-community-server mysql-server/default-auth-override select Use Strong Password Encryption (RECOMMENDED)'
+
+rm -f mysql-*.deb
+
+export VERSION_ID="$(lsb_release -r -s)"
 
 export mysql_debs=( 
 mysql-community-client-plugins_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 

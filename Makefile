@@ -70,3 +70,14 @@ build-dep-fedora:
 	sudo dnf -y install --best --allowerasing --setopt=install_weak_deps=False \
 		--exclude=mariadb-server "$(MYSQL_SERVER_PACKAGE)"
 
+
+.PHONY: install-ubuntu
+install-ubuntu:
+	scripts/install-prereq
+	sudo scripts/remove-default-mysql
+	sudo scripts/ci-setup-mysql $(MYSQL_VERSION)
+	sudo scripts/ci-setup-percona
+	sudo scripts/install-build-deps
+	sudo scripts/install-python-deps
+	sudo scripts/create-user
+

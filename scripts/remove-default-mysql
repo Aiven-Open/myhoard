@@ -1,3 +1,4 @@
 #!/bin/bash -e
-sudo apt purge mysql-server mysql-client mysql-common mysql-server-core-* mysql-client-core-*
+sudo debconf-set-selections <<< 'mysql-community-server	mysql-community-server/remove-data-dir	boolean	true'
+sudo apt purge -y mysql-server mysql-client mysql-common mysql-server-core-* mysql-client-core-*
 sudo rm -rf /var/lib/mysql

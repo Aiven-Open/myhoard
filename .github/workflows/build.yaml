@@ -101,26 +101,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - id: install-prereq
-        run: scripts/install-prereq
-
-      - id: remove-default-mysql
-        run: scripts/remove-default-mysql
-
-      - id: mysql-repos
-        run: scripts/ci-setup-mysql ${{ matrix.mysql-version }}
-
-      - id: percona-tools
-        run: scripts/ci-setup-percona
-
-      - id: build-deps
-        run: scripts/install-build-deps
-
-      - id: python-deps
-        run: scripts/install-python-deps
+      - id: install-ubuntu
+        run: make MYSQL_VERSION=${{ matrix.mysql-version }} install-ubuntu
 
       - id: unittest
-        run: make coverage
+        run: |
+          sudo -u testme make coverage
 
       - id: upload-codecov
         uses: codecov/codecov-action@v2

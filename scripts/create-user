@@ -1,0 +1,6 @@
+#!/bin/bash -e
+adduser --disabled-password --gecos "" testme || true
+adduser testme adm
+adduser testme sudo
+echo "%sudo ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/sudonopasswd
+chmod 440 /etc/sudoers.d/sudonopasswd
