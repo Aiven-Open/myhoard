@@ -294,13 +294,13 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
             cursor.execute("SELECT id, data FROM db1.t1 WHERE id > %s ORDER BY id ASC LIMIT 200", [batch_start])
             results = cursor.fetchall()
             for i, result in enumerate(results):
-                assert result["id"] == batch_start + i + 1
+                assert result["id"] == batch_start + i + 1, "Id doesn't match"
                 row_info = data_generator.row_infos[batch_start + i]
                 expected_data = row_info[0] * row_info[1]
-                assert result["data"] == expected_data
+                assert result["data"] == expected_data, "expected_data doesn't match"
 
-        assert actual_row_count == expected_row_count
+        assert actual_row_count == expected_row_count, "row count doesn't match"
 
         master_status = pitr_master_status or original_master_status
-        assert final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"]
-        assert final_status["File"] == "bin.000001"
+        assert final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"], "final status executed_gtid_set differs from master status"
+        assert final_status["File"] == "bin.000001", "final status file differes from expected"
