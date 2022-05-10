@@ -1,0 +1,3 @@
+#!/bin/bash -e
+sudo apt purge mysql-server mysql-client mysql-common mysql-server-core-* mysql-client-core-*
+sudo rm -rf /var/lib/mysql
