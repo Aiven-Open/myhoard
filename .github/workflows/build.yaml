@@ -85,7 +85,7 @@ jobs:
   unittest:
     runs-on: ubuntu-latest
     container: 
-      image: ubuntu:focal
+      image: alanfranz/fpm-within-docker:ubuntu-focal
     strategy:
       matrix:
         python-version: ["3.10"]
