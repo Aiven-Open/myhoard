@@ -1,4 +1,5 @@
 #!/bin/bash -e
+export DEBIAN_FRONTEND="noninteractive"
 adduser --disabled-password --gecos "" testme || true
 adduser testme adm
 adduser testme sudo

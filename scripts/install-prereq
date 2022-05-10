@@ -1,3 +1,4 @@
 #!/bin/bash -e
+export DEBIAN_FRONTEND="noninteractive"
 apt-get update
 apt-get -y install sudo lsb-release wget tzdata python3-pip python3.8-full libsnappy-dev libpq5 libpq-dev
