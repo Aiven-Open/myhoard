@@ -89,8 +89,8 @@ jobs:
       image: alanfranz/fpm-within-docker:ubuntu-focal
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10"]
-        mysql-version: ["8.0.26", "8.0.27"]
+        python-version: ["3.8"]
+        mysql-version: ["8.0.26", "8.0.27", "8.0.28"]
 
     steps:
 
