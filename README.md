@@ -782,3 +782,4 @@ MyHoard uses [Percona Xtrabackup](https://www.percona.com) for creating and
 restoring database snapshot excluding binary logs.
 
 Copyright ⓒ 2019 Aiven Ltd.
+   
