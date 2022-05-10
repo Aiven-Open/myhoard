@@ -1,4 +1,0 @@
-#!/bin/bash -e
-sudo apt install -y libsnappy-dev
-sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew percona-xtrabackup-80
-mysqld --version
