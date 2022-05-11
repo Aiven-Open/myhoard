@@ -59,6 +59,7 @@ def test_basic_backup(mysql_master, extra_uuid):
                 break
             bytes_read[0] += len(data)
 
+    print(mysql_master.config_options.datadir)
     encryption_key = os.urandom(24)
     op = BasebackupOperation(
         encryption_algorithm="AES256",
@@ -74,7 +75,7 @@ def test_basic_backup(mysql_master, extra_uuid):
     op.create_backup()
 
     for db_index in range(15):
-        assert f"./test{db_index}/foo{db_index}.ibd" in backed_up_files
+        assert f"./test{db_index}/foo{db_index}.ibd" in backed_up_files, f"Couldn't find index {db_index}"
 
     assert op.binlog_info["gtid"] == master_status["Executed_Gtid_Set"]
 
