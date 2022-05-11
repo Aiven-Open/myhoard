@@ -59,7 +59,6 @@ def test_basic_backup(mysql_master, extra_uuid):
                 break
             bytes_read[0] += len(data)
 
-    print(mysql_master.config_options.datadir)
     encryption_key = os.urandom(24)
     op = BasebackupOperation(
         encryption_algorithm="AES256",
