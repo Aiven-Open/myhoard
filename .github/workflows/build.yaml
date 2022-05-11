@@ -92,20 +92,25 @@ jobs:
       # e.g. you cannot use mysql .28 with percona .27, and there's no clean way of
       # skipping matrix items that aren't meaningful
       matrix:
-        python-version: ["3.8"]
         include:
           - mysql-version: "8.0.26"
             percona-version: "8.0.26-18-1.focal"
+            python-version: "3.8"
           - mysql-version: "8.0.26"
             percona-version: "8.0.27-19-1.focal"
+            python-version: "3.8"
           - mysql-version: "8.0.26"
             percona-version: "8.0.28-20-1.focal"
+            python-version: "3.8"
           - mysql-version: "8.0.27"
             percona-version: "8.0.27-19-1.focal"
+            python-version: "3.8"
           - mysql-version: "8.0.27"
             percona-version: "8.0.28-20-1.focal"
+            python-version: "3.8"
           - mysql-version: "8.0.28"
             percona-version: "8.0.28-20-1.focal"
+            python-version: "3.8"
 
     steps:
 
