@@ -30,7 +30,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
         with:
-          images: ghcr.io/myhoard
+          images: ghcr.io/aiven/myhoard-test
           tags: type=sha,format=long,prefix=
 
       - name: Build and push Docker image
@@ -115,7 +115,7 @@ jobs:
     needs: build-and-push-image
     runs-on: ubuntu-latest
     container: 
-      image: ghcr.io/myhoard:${{ github.sha }}
+      image: ghcr.io/aiven/myhoard-test:${{ github.sha }}
     strategy:
       # this isn't a standard matrix because some version testing doesn't make sense
       # e.g. you cannot use mysql .28 with percona .27, and there's no clean way of
