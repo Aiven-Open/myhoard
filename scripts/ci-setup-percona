@@ -2,7 +2,9 @@
 export VERSION_NAME="$(lsb_release -sc)"
 export DEBIAN_FRONTEND="noninteractive"
 wget https://repo.percona.com/apt/percona-release_latest."${VERSION_NAME}"_all.deb
+set +e
 sudo dpkg -i percona-release_latest."${VERSION_NAME}"_all.deb
+set -e
 sudo apt-get -f -y install
 sudo /usr/bin/percona-release enable-only tools
 sudo apt update
