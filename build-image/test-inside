@@ -1,8 +1,9 @@
-#!/bin/bash -e
+#!/bin/bash -ex
 # this is designed to be launched INSIDE the container to run tests
 [ -n "${PYTHON_VERSION}" ] || { echo "outside env must define PYTHON_VERSION"; exit 1; }
+mkdir /testdir
 cd /testdir
 rsync -a /src .
 chown -R testme:testme src
 cd src
-su - testme make PYTHON="python${PYTHON_VERSION}" coverage
+sudo -u testme make PYTHON="python${PYTHON_VERSION}" coverage

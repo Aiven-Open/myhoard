@@ -81,13 +81,12 @@ install-ubuntu:
 	sudo scripts/install-python-deps $(PYTHON_VERSION)
 	sudo scripts/create-user
 
+# local development, don't use in CI
 dockertest:
-	cd build-image && docker build -t myhoard-test .
-	docker run -t --rm -v "$(shell pwd):/src:ro" --workdir /src -e PYTHON_VERSION=$(PYTHON_VERSION) -e MYSQL_VERSION=$(MYSQL_VERSION) \
-		-e PERCONA_VERSION=$(PERCONA_VERSION) \
-		myhoard-test /src/build-image/install-inside
-	docker run -t --rm -v "$(shell pwd):/src:ro:/src:ro" -e PYTHON_VERSION=$(PYTHON_VERSION) myhoard-test /src/build-image/test-inside
+	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) scripts/build-setup-specific-test-image
+	docker run -it --rm -e PYTHON_VERSION=$(PYTHON_VERSION) myhoard-test-temp /src/build-image/test-inside
 
 # when the image didn't change this can be used. local dev only, don't use in CI
+# in this target we override the /src that gets used to rsync source inside the container
 dockertest-quick:
-	docker run -t --rm -v "$(shell pwd):/src:ro:/src:ro" -e PYTHON_VERSION=$(PYTHON_VERSION) myhoard-test /src/build-image/test-inside
+	docker run -it --rm -v "$(shell pwd):/src:ro" -e PYTHON_VERSION=$(PYTHON_VERSION) myhoard-test-temp /src/build-image/test-inside
