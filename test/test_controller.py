@@ -285,7 +285,7 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
 
-
+@pytest.mark.skip(reason="Flaky test. Needs to be verified before re-enabling.")
 def test_3_node_service_failover_and_restore(
     default_backup_site,
     master_controller,
