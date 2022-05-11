@@ -115,7 +115,7 @@ jobs:
   unittest:
     runs-on: ubuntu-latest
     container: 
-      image: ghcr.io/myhoard:${{ GITHUB_SHA }}
+      image: ghcr.io/myhoard:${{ env.GITHUB_SHA }}
     strategy:
       # this isn't a standard matrix because some version testing doesn't make sense
       # e.g. you cannot use mysql .28 with percona .27, and there's no clean way of
