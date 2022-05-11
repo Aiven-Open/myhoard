@@ -3,8 +3,7 @@
 PYTHON_VERSION="$1"
 export DEBIAN_FRONTEND="noninteractive"
 apt-get update
-apt-get -y install sudo lsb-release wget tzdata python3-pip libsnappy-dev libpq5 libpq-dev software-properties-common
-add-apt-repository -y ppa:deadsnakes/ppa
 apt-get -y install python${PYTHON_VERSION}-full
+python${PYTHON_VERSION} -m ensurepip
 
 
