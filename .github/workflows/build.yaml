@@ -152,7 +152,7 @@ jobs:
 
       - id: unittest
         run: |
-          sudo -u testme make coverage
+          sudo -u testme make PYTHON=python${{matrix.python-version}} coverage
 
       - id: upload-codecov
         uses: codecov/codecov-action@v2
