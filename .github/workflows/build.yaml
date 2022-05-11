@@ -112,6 +112,7 @@ jobs:
 
 
   unittest:
+    needs: build-and-push-image
     runs-on: ubuntu-latest
     container: 
       image: ghcr.io/myhoard:${{ github.sha }}
