@@ -26,7 +26,7 @@ jobs:
       - name: Log in to the Container registry
         uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ${{ REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -34,7 +34,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ REGISTRY }}/${{ IMAGE_NAME }}
           tags: type=sha,format=long
 
       - name: Build and push Docker image
@@ -119,7 +119,7 @@ jobs:
   unittest:
     runs-on: ubuntu-latest
     container: 
-      image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{GITHUB_SHA}}
+      image: ${{ REGISTRY }}/${{ IMAGE_NAME }}:${{ GITHUB_SHA }}
     strategy:
       # this isn't a standard matrix because some version testing doesn't make sense
       # e.g. you cannot use mysql .28 with percona .27, and there's no clean way of
