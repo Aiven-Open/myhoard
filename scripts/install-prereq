@@ -3,7 +3,7 @@
 PYTHON_VERSION="$1"
 export DEBIAN_FRONTEND="noninteractive"
 apt-get update
-apt-get -y install python${PYTHON_VERSION}-full
+apt-get -y install python${PYTHON_VERSION}-full python${PYTHON_VERSION}-dev
 apt-get remove --purge -y python3-pip
 python${PYTHON_VERSION} < <(curl -s https://bootstrap.pypa.io/get-pip.py)
 
