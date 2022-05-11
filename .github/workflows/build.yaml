@@ -1,7 +1,5 @@
 name: Build MyHoard
 
-permissions: read-all
-
 on:
   push:
     branches:
