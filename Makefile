@@ -73,7 +73,7 @@ build-dep-fedora:
 
 .PHONY: install-ubuntu
 install-ubuntu:
-	scripts/install-prereq $(PYTHON_VERSION)
+	scripts/install-python-version $(PYTHON_VERSION)
 	sudo scripts/remove-default-mysql
 	sudo scripts/install-mysql-packages $(MYSQL_VERSION)
 	sudo scripts/ci-setup-percona
