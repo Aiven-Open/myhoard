@@ -76,7 +76,7 @@ install-ubuntu:
 	scripts/install-prereq $(PYTHON_VERSION)
 	sudo scripts/remove-default-mysql
 	sudo scripts/ci-setup-mysql $(MYSQL_VERSION)
-	sudo scripts/ci-setup-percona
+	sudo scripts/ci-setup-percona $(PERCONA_VERSION)
 	sudo scripts/install-build-deps
 	sudo scripts/install-python-deps $(PYTHON_VERSION)
 	sudo scripts/create-user
