@@ -11,6 +11,37 @@ on:
   pull_request:
 
 jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+        with:
+          images: ghcr.io/aiven/myhoard-test
+          tags: type=sha,format=long,prefix=
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
+        with:
+          context: build-image
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
   lint:
     runs-on: ubuntu-latest
     strategy:
@@ -82,68 +113,59 @@ jobs:
 
 
   unittest:
+    needs: build-and-push-image
     runs-on: ubuntu-latest
+    container: 
+      image: ghcr.io/aiven/myhoard-test:${{ github.sha }}
     strategy:
+      fail-fast: false
+      # this isn't a standard matrix because some version testing doesn't make sense
+      # e.g. you cannot use mysql .28 with percona .27, and there's no clean way of
+      # skipping matrix items that aren't meaningful
       matrix:
-        python-version: ["3.6", "3.7", "3.8", "3.9", "3.10"]
-        mysql-version: [8.0.22, 8.0.26, 8.0.27]
+        include:
+          - mysql-version: "8.0.26"
+            percona-version: "8.0.26-18-1.focal"
+            python-version: "3.9"
+          - mysql-version: "8.0.26"
+            percona-version: "8.0.27-19-1.focal"
+            python-version: "3.9"
+          - mysql-version: "8.0.26"
+            percona-version: "8.0.28-20-1.focal"
+            python-version: "3.9"
+          - mysql-version: "8.0.27"
+            percona-version: "8.0.27-19-1.focal"
+            python-version: "3.6"
+          - mysql-version: "8.0.27"
+            percona-version: "8.0.27-19-1.focal"
+            python-version: "3.7"
+          - mysql-version: "8.0.27"
+            percona-version: "8.0.27-19-1.focal"
+            python-version: "3.8"
+          - mysql-version: "8.0.27"
+            percona-version: "8.0.27-19-1.focal"
+            python-version: "3.9"
+          - mysql-version: "8.0.27"
+            percona-version: "8.0.27-19-1.focal"
+            python-version: "3.10"
+          - mysql-version: "8.0.27"
+            percona-version: "8.0.28-20-1.focal"
+            python-version: "3.9"
+          - mysql-version: "8.0.28"
+            percona-version: "8.0.28-20-1.focal"
+            python-version: "3.9"
 
     steps:
 
       - id: checkout-code
         uses: actions/checkout@v2
 
-      - id: prepare-python
-        uses: actions/setup-python@v2
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - id: remove-default-mysql
-        run: |
-          sudo apt purge mysql-server mysql-client mysql-common mysql-server-core-* mysql-client-core-*
-          sudo rm -rf /var/lib/mysql
-
-      - id: mysql-repos
-        run: |
-          VERSION_ID=$(lsb_release -r -s)
-
-          mysql_debs=(
-            mysql-community-client-plugins_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-common_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-community-client-core_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-community-client_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-client_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-community-server-core_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-community-server_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-            mysql-server_${{ matrix.mysql-version }}-1ubuntu${VERSION_ID}_amd64.deb
-          )
-
-          for package in ${mysql_debs[@]}; do
-            wget -q http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/${package}
-            sudo dpkg -i $package
-          done
-
-      - id: percona-tools
-        run: |
-          wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
-          sudo dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
-          sudo percona-release enable-only tools
-          sudo apt update
-
-      - id: build-deps
-        run: |
-          sudo apt install -y libsnappy-dev
-          sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew percona-xtrabackup-80
-          mysqld --version
-
-      - id: python-deps
-        run: |
-          pip install -r requirements.txt
-          pip install -r requirements.dev.txt
-          pip install -e .
+      - id: install-ubuntu
+        run: make MYSQL_VERSION=${{ matrix.mysql-version }} PYTHON_VERSION=${{matrix.python-version}} PERCONA_VERSION=${{matrix.percona-version}} install-ubuntu
 
       - id: unittest
-        run: make coverage
+        run: |
+          sudo -u testme make PYTHON=python${{matrix.python-version}} coverage
 
       - id: upload-codecov
         uses: codecov/codecov-action@v2

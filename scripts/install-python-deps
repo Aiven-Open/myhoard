@@ -1,0 +1,5 @@
+#!/bin/bash -e
+source /etc/PYTHON_VERSION
+python${PYTHON_VERSION} -m pip install -r requirements.txt
+python${PYTHON_VERSION} -m pip install -r requirements.dev.txt
+python${PYTHON_VERSION} -m pip install -e .

@@ -1,0 +1,22 @@
+#!/bin/bash -e
+pushd build-image
+docker build -t myhoard-test .
+popd
+
+[ -n "${PYTHON_VERSION}" ] || { echo "outside env must define PYTHON_VERSION"; exit 1; }
+[ -n "${MYSQL_VERSION}" ] || { echo "outside env must define MYSQL_VERSION"; exit 1; }
+[ -n "${PERCONA_VERSION}" ] || { echo "outside env must define PERCONA_VERSION"; exit 1; }
+
+trap "rm -f Dockerfile.myhoard-test-temp" EXIT
+cat > Dockerfile.myhoard-test-temp <<EOM
+FROM myhoard-test
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+ENV MYSQL_VERSION=${MYSQL_VERSION}
+ENV PERCONA_VERSION=${PERCONA_VERSION}
+ADD . /src
+WORKDIR /src
+RUN make clean
+RUN make -e install-ubuntu
+EOM
+
+docker build -t myhoard-test-temp -f Dockerfile.myhoard-test-temp .

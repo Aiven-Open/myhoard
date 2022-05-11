@@ -1,0 +1,29 @@
+#!/bin/bash -e
+[ -n "$1" ] || { echo "must pass mysql version"; exit 1; }
+MYSQL_PACKAGE_VERSION="$1"
+export DEBIAN_FRONTEND="noninteractive"
+
+sudo debconf-set-selections <<< 'mysql-community-server mysql-community-server/re-root-pass password ROOTPASSWORD'
+sudo debconf-set-selections <<< 'mysql-community-server mysql-community-server/root-pass password ROOTPASSWORD'
+sudo debconf-set-selections <<< 'mysql-community-server mysql-server/default-auth-override select Use Strong Password Encryption (RECOMMENDED)'
+
+rm -f mysql-*.deb
+
+export VERSION_ID="$(lsb_release -r -s)"
+
+export mysql_debs=( 
+mysql-community-client-plugins_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-common_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-community-client-core_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-community-client_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-client_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-community-server-core_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-community-server_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+mysql-server_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+)
+
+for package in "${mysql_debs[@]}"; do wget "http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/${package}"; done
+set +e
+for package in "${mysql_debs[@]}"; do sudo dpkg -i "$package"; done
+set -e
+sudo apt-get -f -y install

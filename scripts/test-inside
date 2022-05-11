@@ -1,0 +1,9 @@
+#!/bin/bash -ex
+# this is designed to be launched INSIDE the container to run tests
+source /etc/PYTHON_VERSION
+mkdir /testdir
+cd /testdir
+rsync -a /src .
+chown -R testme:testme src
+cd src
+sudo -u testme make PYTHON="python${PYTHON_VERSION}" coverage
