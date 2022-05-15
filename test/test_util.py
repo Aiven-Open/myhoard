@@ -261,7 +261,7 @@ class TestDetectRunningProcessId:
 
     @pytest.fixture
     def cmd_str(self):
-        random_str = "".join(random.choices(string.ascii_letters, k=20));
+        random_str = "".join(random.choices(string.ascii_letters, k=20))
         cmd = ["/usr/bin/bash", "-c", f"/usr/bin/sleep 60; echo {random_str}"]
         cmd_str = " ".join(cmd)
         process = subprocess.Popen(cmd)  # pylint: disable=consider-using-with
@@ -269,8 +269,7 @@ class TestDetectRunningProcessId:
         process.kill()
 
     def test_detect_running_process_id(self, cmd_str):
-        spawned_id = myhoard_util.detect_running_process_id(cmd_str)
+        spawned_id, output_bytes = myhoard_util.detect_running_process_id(cmd_str)
         if spawned_id is None:
-            output = subprocess.check_output(["ps", "-auxwwf", "--cols", "1000"])
-            raise AssertionError(f"None of the commands included in ps output:\n{output.decode('ascii')}")
+            raise AssertionError(f"Could not match command or matched twice:\n{output_bytes.decode('ascii')}")
         assert myhoard_util.detect_running_process_id("certainlynosuchprocesscurrentlyrunning") is None

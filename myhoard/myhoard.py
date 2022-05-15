@@ -136,7 +136,7 @@ class MyHoard:
         # When not using systemd and we haven't started mysqld (during current invocation of the daemon)
         # start by determining current pid (if any) of the process so that we can kill it before starting.
         if self.mysqld_pid is None:
-            self.mysqld_pid = detect_running_process_id(" ".join(self.config["start_command"])) or -1
+            self.mysqld_pid, dummy_output_bytes = detect_running_process_id(" ".join(self.config["start_command"])) or -1
         if self.mysqld_pid and self.mysqld_pid > 0:
             self.log.info("Terminating running mysqld process %s", self.mysqld_pid)
             os.kill(self.mysqld_pid, signal.SIGTERM)
