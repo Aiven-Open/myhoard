@@ -158,7 +158,13 @@ jobs:
         uses: actions/checkout@v2
 
       - id: install-ubuntu
-        run: make MYSQL_VERSION=${{ matrix.mysql-version }} PYTHON_VERSION=${{matrix.python-version}} PERCONA_VERSION=${{matrix.percona-version}} install-ubuntu
+        run: > 
+          make 
+          MYSQL_VERSION=${{ matrix.mysql-version }} 
+          PYTHON_VERSION=${{matrix.python-version}} 
+          PERCONA_VERSION=${{matrix.percona-version}} 
+          SET_PYTHON_VERSION="--set-python-version" 
+          install-ubuntu
 
       - id: unittest
         run: |

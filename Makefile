@@ -73,19 +73,20 @@ build-dep-fedora:
 
 .PHONY: install-ubuntu
 install-ubuntu:
-	scripts/install-python-version $(PYTHON_VERSION)
+	scripts/install-python-version $(PYTHON_VERSION) $(SET_PYTHON_VERSION)
 	sudo scripts/remove-default-mysql
 	sudo scripts/install-mysql-packages $(MYSQL_VERSION)
 	sudo scripts/setup-percona-repo
 	sudo scripts/install-percona-package $(PERCONA_VERSION)
-	sudo scripts/install-python-deps $(PYTHON_VERSION)
+	sudo scripts/install-python-deps
 	sudo scripts/create-user
 
 # local development, don't use in CI
 # prerequisite
 .PHONY: build-setup-specific-image
 build-setup-specific-image:
-	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) scripts/build-setup-specific-test-image
+	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
+		SET_PYTHON_VERSION="--set-python-version" scripts/build-setup-specific-test-image
 
 .PHONY: dockertest
 dockertest:
