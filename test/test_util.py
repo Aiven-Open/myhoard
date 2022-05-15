@@ -271,6 +271,6 @@ class TestDetectRunningProcessId:
     def test_detect_running_process_id(self, cmd_str):
         spawned_id = myhoard_util.detect_running_process_id(cmd_str)
         if spawned_id is None:
-            output = subprocess.check_output(["ps", "-x", "--cols", "1000", "-o", "pid,command"])
+            output = subprocess.check_output(["ps", "-auxwwf", "--cols", "1000"])
             raise AssertionError(f"None of the commands included in ps output:\n{output.decode('ascii')}")
         assert myhoard_util.detect_running_process_id("certainlynosuchprocesscurrentlyrunning") is None
