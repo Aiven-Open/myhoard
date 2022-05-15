@@ -264,7 +264,7 @@ class TestDetectRunningProcessId:
         random_str = "".join(random.choices(string.ascii_letters, k=20));
         cmd = ["/usr/bin/bash", "-c", f"/usr/bin/sleep 60; echo {random_str}"]
         cmd_str = " ".join(cmd)
-        process = subprocess.Popen(cmd)  # pylint: consider-using-with
+        process = subprocess.Popen(cmd)  # pylint: disable=consider-using-with
         yield cmd_str
         process.kill()
 
