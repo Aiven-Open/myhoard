@@ -781,7 +781,10 @@ Test environment setup: Ubuntu 20.04
 ====================================
 Run:
 
-```make PYTHON_VERSION=3.8 PERCONA_VERSION=8.0.26-18-1.focal MYSQL_VERSION=8.0.26 install-ubuntu```
+```
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo make PYTHON_VERSION=3.8 PERCONA_VERSION=8.0.26-18-1.focal MYSQL_VERSION=8.0.26 install-ubuntu
+```
 
 this command will install all the required package version. Please note: the state of your environment
 WILL change with this command. Both native and Python packages will be installed.
@@ -792,7 +795,7 @@ Test environment setup: Fedora
 
 run:
 
-```make build-dep-fedora```
+```sudo make build-dep-fedora```
 
 (this can install or change packages on your host system)
 
