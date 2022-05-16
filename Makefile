@@ -27,6 +27,8 @@ lint: version
 
 .PHONY: fmt
 fmt: version
+	# Python files are skipped because pylint already does the job
+	./fix_newlines.py --exclude test/binlog --exclude '*.py'
 	unify --quote '"' --recursive --in-place $(PYTHON_SOURCE_DIRS)
 	isort --recursive $(PYTHON_SOURCE_DIRS)
 	yapf --parallel --recursive --in-place $(PYTHON_SOURCE_DIRS)
