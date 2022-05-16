@@ -3,7 +3,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
-from typing import Tuple
+from typing import Optional, Tuple
 
 import collections
 import contextlib
@@ -418,7 +418,7 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
     return valid_binlogs
 
 
-def detect_running_process_id(command) -> Tuple[int, bytes]:
+def detect_running_process_id(command) -> Tuple[Optional[int], bytes]:
     """Find a process with matching command owned by the same user as current process and return
     its pid. Returns None if no such process is found or if multiple processes match."""
     # This is mainly used in tests. Actual use should rely on systemd and if non-Linux operating systems
@@ -429,7 +429,7 @@ def detect_running_process_id(command) -> Tuple[int, bytes]:
     regex = re.compile(r"^\s*\d+\s+{}".format(re.escape(command)))  # pylint: disable=consider-using-f-string
     ids = [int(line.strip().split()[0]) for line in output.splitlines() if regex.match(line)]
     if not ids or len(ids) > 1:
-        return None
+        return None, b""
     return ids[0], output_bytes
 
 
