@@ -429,7 +429,7 @@ def detect_running_process_id(command) -> Tuple[Optional[int], bytes]:
     regex = re.compile(r"^\s*\d+\s+{}".format(re.escape(command)))  # pylint: disable=consider-using-f-string
     ids = [int(line.strip().split()[0]) for line in output.splitlines() if regex.match(line)]
     if not ids or len(ids) > 1:
-        return None, b""
+        return None, output_bytes
     return ids[0], output_bytes
 
 
