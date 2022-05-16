@@ -745,6 +745,79 @@ Current phase of backup restoration. Possible options are these:
   automatically but it may fail repeatedly and analyzing logs to get more
   details regarding the failure is advisable.
 
+Running container-based tests
+=============================
+
+Make sure docker is installed (podman currently untested) and just run:
+
+```
+make PYTHON_VERSION=3.8 PERCONA_VERSION=8.0.26-18-1.focal MYSQL_VERSION=8.0.26 build-setup-specific-image
+make dockertest
+```
+
+If you don't need to change percona or mysql or python version, but you want to change myhoard source code and re-test,
+run:
+
+```
+make dockertest-resync
+```
+
+to re-sync the source code from the host and re-run the tests. 
+
+Take a look at ```.github/workflows/build.yaml``` for possible version values.
+
+In order to locally launch a single test (again while resyncing from current source code), you can use ```pytest-quick``` e.g.
+
+```
+make PYTEST_ARGS="-k test_3_node_service_failover_and_restore" dockertest-pytest
+```
+
+Running tests natively
+======================
+
+Running native tests must NOT be performed as root (requires additional options for mysql)
+
+Test environment setup: Ubuntu 20.04
+====================================
+Run:
+
+```
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo make PYTHON_VERSION=3.8 PERCONA_VERSION=8.0.26-18-1.focal MYSQL_VERSION=8.0.26 install-ubuntu
+```
+
+this command will install all the required package version. Please note: the state of your environment
+WILL change with this command. Both native and Python packages will be installed.
+
+
+Test environment setup: Fedora
+==============================
+
+run:
+
+```sudo make build-dep-fedora```
+
+(this can install or change packages on your host system)
+
+
+Running tests
+=============
+
+Once the environment setup is over, you can execute
+
+```make PYTHON_VERSION=3.8 coverage```
+
+And have all test run, or just
+
+```python${PYTHON_VERSION} -m pytest "$@"```
+
+Setting ```PYTHON_VERSION``` is optional, but make sure you're using the same interpreter that was employed during setup, otherwise
+you may encounter runtime errors.
+
+
+``````
+
+
 License
 =======
 
@@ -782,3 +855,4 @@ MyHoard uses [Percona Xtrabackup](https://www.percona.com) for creating and
 restoring database snapshot excluding binary logs.
 
 Copyright ⓒ 2019 Aiven Ltd.
+   

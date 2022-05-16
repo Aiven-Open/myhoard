@@ -1,0 +1,16 @@
+#!/bin/bash -e
+[ -n "$1" ] || { echo "must pass python version"; exit 1; }
+
+PYTHON_VERSION="$1"
+export DEBIAN_FRONTEND="noninteractive"
+apt-get update
+apt-get -y install python${PYTHON_VERSION}-full python${PYTHON_VERSION}-dev
+apt-get remove --purge -y python3-pip
+python${PYTHON_VERSION} < <(curl -s https://bootstrap.pypa.io/get-pip.py)
+if [[ "$2" == "--set-python-version" ]]
+then
+  echo "PYTHON_VERSION=${PYTHON_VERSION}" >> /etc/PYTHON_VERSION
+fi
+
+
+

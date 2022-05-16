@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tempfile
 import time
+from typing import Tuple
 
 import pymysql
 from cryptography.hazmat.backends import default_backend
@@ -412,19 +413,19 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
     return valid_binlogs
 
 
-def detect_running_process_id(command):
+def detect_running_process_id(command) -> Tuple[int, bytes]:
     """Find a process with matching command owned by the same user as current process and return
-    its pid. Returns None if no such process is found."""
+    its pid. Returns None if no such process is found or if multiple processes match."""
     # This is mainly used in tests. Actual use should rely on systemd and if non-Linux operating systems
     # are supported later whatever service management interface those other operating systems provide
-    output = subprocess.check_output(["ps", "-x", "--cols", "1000", "-o", "pid,command"])
+    output_bytes = subprocess.check_output(["ps", "-x", "--cols", "1000", "-o", "pid,command"])
     # We don't expect to have non-ASCII characters, convert using ISO-8859-1, which should always work without raising
-    output = output.decode("ISO-8859-1")
+    output = output_bytes.decode("ISO-8859-1")
     regex = re.compile(r"^\s*\d+\s+{}".format(re.escape(command)))  # pylint: disable=consider-using-f-string
     ids = [int(line.strip().split()[0]) for line in output.splitlines() if regex.match(line)]
     if not ids or len(ids) > 1:
         return None
-    return ids[0]
+    return ids[0], output_bytes
 
 
 def wait_for_port(*, host, port, timeout):

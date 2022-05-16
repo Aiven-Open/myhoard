@@ -70,7 +70,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         def restoration_is_complete():
             return new_master_controller.restore_coordinator and new_master_controller.restore_coordinator.is_complete()
 
-        wait_for_condition(restoration_is_complete, timeout=15)
+        wait_for_condition(restoration_is_complete, timeout=30, description="Restoration was not completed in time")
 
         # Ensure old master manages to send some more binary logs now that new master has finished
         # restoring backup. Because new master isn't connected to old one it won't receive these via
@@ -285,7 +285,7 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
 
-
+@pytest.mark.skip(reason="Flaky test. Needs to be verified before re-enabling.")
 def test_3_node_service_failover_and_restore(
     default_backup_site,
     master_controller,

@@ -70,3 +70,34 @@ build-dep-fedora:
 	sudo dnf -y install --best --allowerasing --setopt=install_weak_deps=False \
 		--exclude=mariadb-server "$(MYSQL_SERVER_PACKAGE)"
 
+
+.PHONY: install-ubuntu
+install-ubuntu:
+	scripts/install-python-version $(PYTHON_VERSION) $(SET_PYTHON_VERSION)
+	sudo scripts/remove-default-mysql
+	sudo scripts/install-mysql-packages $(MYSQL_VERSION)
+	sudo scripts/setup-percona-repo
+	sudo scripts/install-percona-package $(PERCONA_VERSION)
+	sudo scripts/install-python-deps
+	sudo scripts/create-user
+
+# local development, don't use in CI
+# prerequisite
+.PHONY: build-setup-specific-image
+build-setup-specific-image:
+	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
+		SET_PYTHON_VERSION="--set-python-version" scripts/build-setup-specific-test-image
+
+.PHONY: dockertest
+dockertest:
+	docker run -it --rm myhoard-test-temp /src/scripts/test-inside
+
+# when the image didn't change this can be used. local dev only, don't use in CI
+# in this target we override the /src that gets used to rsync source inside the container
+.PHONY: dockertest-resync
+dockertest-resync:
+	docker run -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/test-inside
+
+.PHONY: dockertest-pytest
+dockertest-pytest:
+	docker run -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/pytest-inside $(PYTEST_ARGS)

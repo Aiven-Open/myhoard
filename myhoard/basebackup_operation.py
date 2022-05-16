@@ -229,14 +229,15 @@ class BasebackupOperation:
 
     def _process_output_line_new_file(self, line):
         match = self.current_file_re.search(line)
-        if match:
+        if match and ("Done:" not in line):
             self.current_file = match.group(1)
             if self.current_file != "<STDOUT>":
                 self.log.info("Started processing file %r", self.current_file)
-        return match
+            return True
+        return False
 
     def _process_output_line_file_finished(self, line):
-        if not line.endswith(" ...done"):
+        if not (line.endswith(" ...done") or ("Done:" in line)):
             return False
 
         if not self.current_file:

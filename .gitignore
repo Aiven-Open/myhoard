@@ -19,3 +19,4 @@ __pycache__/
 /venv/
 /.venv/
 *.orig
+Dockerfile.myhoard-test-temp
