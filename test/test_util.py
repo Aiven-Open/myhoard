@@ -7,7 +7,6 @@ import myhoard.util as myhoard_util
 import os
 import pytest
 import random
-import string
 import subprocess
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -201,7 +200,12 @@ def test_encrypt_decrypt():
 class TestDetectRunningProcessId:
     @pytest.fixture
     def cmd_str(self):
-        cmd = ["/usr/bin/sleep", str(random.randint(1000, 5000)), str(random.randint(1000, 5000)), str(random.randint(1000, 5000))]
+        cmd = [
+            "/usr/bin/sleep",
+            str(random.randint(1000, 5000)),
+            str(random.randint(1000, 5000)),
+            str(random.randint(1000, 5000)),
+        ]
         cmd_str = " ".join(cmd)
         process = subprocess.Popen(cmd)  # pylint: disable=consider-using-with
         yield cmd_str
