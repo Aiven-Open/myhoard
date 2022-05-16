@@ -1,15 +1,14 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from . import get_random_port, wait_for_port, while_asserts
+
 import contextlib
 import json
 import os
+import pytest
+import requests
 import signal
 import subprocess
 import sys
-
-import pytest
-import requests
-
-from . import get_random_port, wait_for_port, while_asserts
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

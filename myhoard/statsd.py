@@ -6,15 +6,16 @@ Supports Telegraf's statsd protocol extension for 'key=value' tags:
 
   https://github.com/influxdata/telegraf/tree/master/plugins/inputs/statsd
 """
+from contextlib import contextmanager
+from copy import copy
+from typing import Union
+
 import datetime
 import enum
 import logging
 import os
 import socket
 import time
-from contextlib import contextmanager
-from copy import copy
-from typing import Union
 
 try:
     import raven

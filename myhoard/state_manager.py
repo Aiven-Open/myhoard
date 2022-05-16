@@ -1,10 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .util import atomic_create_file
+
 import errno
 import json
 import os
 import threading
-
-from .util import atomic_create_file
 
 
 class StateManager:

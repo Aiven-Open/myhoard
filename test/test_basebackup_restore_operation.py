@@ -1,16 +1,14 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import os
-import shutil
-import subprocess
-import tempfile
-
-import pytest
-
-import myhoard.util as myhoard_util
+from . import build_statsd_client, wait_for_port
 from myhoard.basebackup_operation import BasebackupOperation
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
 
-from . import build_statsd_client, wait_for_port
+import myhoard.util as myhoard_util
+import os
+import pytest
+import shutil
+import subprocess
+import tempfile
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 

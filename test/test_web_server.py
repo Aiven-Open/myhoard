@@ -1,14 +1,13 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import uuid
-
-import pytest
+from . import awhile_asserts, while_asserts
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.web_server import WebServer
 
-from . import awhile_asserts, while_asserts
+import pytest
+import uuid
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -27,10 +26,7 @@ async def test_backup_create(master_controller, web_client):
 
     log_count_before = len(controller.backup_streams[0].remote_binlogs)
     await post_and_verify_json_body(
-        web_client, "/backup", {
-            "backup_type": WebServer.BackupType.binlog,
-            "wait_for_upload": 1
-        }
+        web_client, "/backup", {"backup_type": WebServer.BackupType.binlog, "wait_for_upload": 1}
     )
     log_count_after = len(controller.backup_streams[0].remote_binlogs)
     assert log_count_after > log_count_before
@@ -125,31 +121,19 @@ async def test_status_update_to_observe(master_controller, web_client):
 
 async def test_status_update_to_restore(master_controller, web_client):
     response = await put_and_verify_json_body(
-        web_client, "/status", {
-            "mode": "restore",
-            "site": "default",
-            "stream_id": "abc"
-        }, expected_status=400
+        web_client, "/status", {"mode": "restore", "site": "default", "stream_id": "abc"}, expected_status=400
     )
     assert response["message"] == "Requested backup 'abc' for site 'default' not found"
 
     response = await put_and_verify_json_body(
-        web_client, "/status", {
-            "mode": "restore",
-            "site": "default"
-        }, expected_status=400
+        web_client, "/status", {"mode": "restore", "site": "default"}, expected_status=400
     )
     assert response["message"] == "Field 'stream_id' must be given and a string"
 
     response = await put_and_verify_json_body(
         web_client,
         "/status",
-        {
-            "mode": "restore",
-            "site": "default",
-            "stream_id": "abc",
-            "target_time": "foo"
-        },
+        {"mode": "restore", "site": "default", "stream_id": "abc", "target_time": "foo"},
         expected_status=400,
     )
     assert response["message"] == "Field 'target_time' must be an integer when present"
@@ -164,13 +148,9 @@ async def test_status_update_to_restore(master_controller, web_client):
         # Operation will fail because we faked the backup info
         assert response["phase"] != RestoreCoordinator.Phase.failed
 
-    master_controller[0].state["backups"].append({
-        "stream_id": "abc",
-        "site": "default",
-        "basebackup_info": {
-            "end_ts": 1234567
-        }
-    })
+    master_controller[0].state["backups"].append(
+        {"stream_id": "abc", "site": "default", "basebackup_info": {"end_ts": 1234567}}
+    )
     await put_and_verify_json_body(web_client, "/status", {"mode": "restore", "site": "default", "stream_id": "abc"})
     master_controller[0].start()
     await awhile_asserts(restore_status_returned, timeout=2)

@@ -1,7 +1,15 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from myhoard.backup_stream import BackupStream
+from myhoard.controller import Controller
+from myhoard.statsd import StatsClient
+
 import asyncio
 import contextlib
 import multiprocessing
+import myhoard.util as myhoard_util
 import os
 import random
 import signal
@@ -10,15 +18,6 @@ import string
 import subprocess
 import threading
 import time
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-
-import myhoard.util as myhoard_util
-from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller
-from myhoard.statsd import StatsClient
 
 
 class MySQLConfig:
@@ -35,7 +34,7 @@ class MySQLConfig:
         proc=None,
         server_id=None,
         startup_command=None,
-        user=None
+        user=None,
     ):
         self.base_dir = base_dir
         self.config = config
@@ -164,7 +163,7 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
-    mysql_config.proc = subprocess.Popen(command)   # pylint: disable=consider-using-with
+    mysql_config.proc = subprocess.Popen(command)  # pylint: disable=consider-using-with
     print("Started mysqld with pid", mysql_config.proc.pid)
     wait_for_port(mysql_config.port, wait_time=30)
 
@@ -221,7 +220,7 @@ def generate_rsa_key_pair(*, bits=3072, public_exponent=65537):
     private_pem = private.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
+        encryption_algorithm=serialization.NoEncryption(),
     )
     public_pem = public.public_bytes(
         encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo

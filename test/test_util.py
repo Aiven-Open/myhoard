@@ -1,23 +1,24 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from . import generate_rsa_key_pair
+from datetime import datetime
+
 import copy
+import myhoard.util as myhoard_util
 import os
+import pytest
 import random
 import string
 import subprocess
-from datetime import datetime
-
-import myhoard.util as myhoard_util
-import pytest
-
-from . import generate_rsa_key_pair
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
 def test_read_gtids_from_log():
     fn = os.path.join(os.path.dirname(__file__), "binlog")
-    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
-              for event in myhoard_util.read_gtids_from_log(fn)]
+    events = [
+        (datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
+        for event in myhoard_util.read_gtids_from_log(fn)
+    ]
 
     server_uuid = "c1100de1-04f7-11e9-82fd-60f6773756fe"
     server_id = 1
@@ -50,14 +51,18 @@ def test_read_gtids_from_log():
         for _ in myhoard_util.read_gtids_from_log(__file__):
             pass
 
-    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
-              for event in myhoard_util.read_gtids_from_log(fn, read_until_time=1546504335)]
+    events = [
+        (datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
+        for event in myhoard_util.read_gtids_from_log(fn, read_until_time=1546504335)
+    ]
     expected_events.pop()
     expected_events.pop()
     assert events == expected_events
 
-    events = [(datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
-              for event in myhoard_util.read_gtids_from_log(fn, read_until_position=1695)]
+    events = [
+        (datetime.utcfromtimestamp(event[0]).isoformat(), event[1], event[2], event[3], event[4])
+        for event in myhoard_util.read_gtids_from_log(fn, read_until_position=1695)
+    ]
     expected_events.pop()
     assert events == expected_events
 
@@ -102,41 +107,13 @@ def test_build_gtid_ranges():
 
 def test_partition_sort_and_combine_gtid_ranges():
     ranges = [
-        {
-            "server_uuid": "uuid1",
-            "start": 1,
-            "end": 3
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 6,
-            "end": 7
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 8,
-            "end": 8
-        },
-        {
-            "server_uuid": "uuid2",
-            "start": 10,
-            "end": 12
-        },
-        {
-            "server_uuid": "uuid2",
-            "start": 4,
-            "end": 9
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 2,
-            "end": 2
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 2,
-            "end": 4
-        },
+        {"server_uuid": "uuid1", "start": 1, "end": 3},
+        {"server_uuid": "uuid1", "start": 6, "end": 7},
+        {"server_uuid": "uuid1", "start": 8, "end": 8},
+        {"server_uuid": "uuid2", "start": 10, "end": 12},
+        {"server_uuid": "uuid2", "start": 4, "end": 9},
+        {"server_uuid": "uuid1", "start": 2, "end": 2},
+        {"server_uuid": "uuid1", "start": 2, "end": 4},
     ]
     result = myhoard_util.partition_sort_and_combine_gtid_ranges(ranges)
     assert result == {"uuid1": [[1, 4], [6, 8]], "uuid2": [[4, 12]]}
@@ -144,41 +121,13 @@ def test_partition_sort_and_combine_gtid_ranges():
 
 def test_first_contains_gtids_not_in_second():
     first = [
-        {
-            "server_uuid": "uuid1",
-            "start": 1,
-            "end": 3
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 6,
-            "end": 7
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 8,
-            "end": 8
-        },
-        {
-            "server_uuid": "uuid2",
-            "start": 10,
-            "end": 12
-        },
-        {
-            "server_uuid": "uuid2",
-            "start": 4,
-            "end": 9
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 2,
-            "end": 2
-        },
-        {
-            "server_uuid": "uuid1",
-            "start": 2,
-            "end": 4
-        },
+        {"server_uuid": "uuid1", "start": 1, "end": 3},
+        {"server_uuid": "uuid1", "start": 6, "end": 7},
+        {"server_uuid": "uuid1", "start": 8, "end": 8},
+        {"server_uuid": "uuid2", "start": 10, "end": 12},
+        {"server_uuid": "uuid2", "start": 4, "end": 9},
+        {"server_uuid": "uuid1", "start": 2, "end": 2},
+        {"server_uuid": "uuid1", "start": 2, "end": 4},
     ]
     second = copy.deepcopy(first)
     assert not myhoard_util.first_contains_gtids_not_in_second(first, second)
@@ -218,33 +167,25 @@ def test_are_gtids_in_executed_set():
     gtid_executed_str = "uuid1:1-6:9:12-20,uuid2:1-30"
     gtid_executed = myhoard_util.parse_gtid_range_string(gtid_executed_str)
     assert myhoard_util.are_gtids_in_executed_set(
-        gtid_executed, [{
-            "server_uuid": "uuid1",
-            "start": 18,
-            "end": 18,
-        }, {
-            "server_uuid": "uuid2",
-            "start": 30,
-            "end": 30,
-        }]
+        gtid_executed,
+        [
+            {"server_uuid": "uuid1", "start": 18, "end": 18},
+            {"server_uuid": "uuid2", "start": 30, "end": 30},
+        ],
     )
-    assert not myhoard_util.are_gtids_in_executed_set(gtid_executed, [{
-        "server_uuid": "uuid1",
-        "start": 18,
-        "end": 21,
-    }])
+    assert not myhoard_util.are_gtids_in_executed_set(
+        gtid_executed,
+        [{"server_uuid": "uuid1", "start": 18, "end": 21}],
+    )
     assert myhoard_util.are_gtids_in_executed_set(
-        gtid_executed, [{
-            "server_uuid": "uuid1",
-            "start": 18,
-            "end": 21,
-        }], exclude_uuid="uuid1"
+        gtid_executed,
+        [{"server_uuid": "uuid1", "start": 18, "end": 21}],
+        exclude_uuid="uuid1",
     )
-    assert not myhoard_util.are_gtids_in_executed_set(gtid_executed, [{
-        "server_uuid": "uuid3",
-        "start": 1,
-        "end": 1,
-    }])
+    assert not myhoard_util.are_gtids_in_executed_set(
+        gtid_executed,
+        [{"server_uuid": "uuid3", "start": 1, "end": 1}],
+    )
 
 
 def test_encrypt_decrypt():
@@ -258,7 +199,6 @@ def test_encrypt_decrypt():
 
 
 class TestDetectRunningProcessId:
-
     @pytest.fixture
     def cmd_str(self):
         random_str = "".join(random.choices(string.ascii_letters, k=20))
