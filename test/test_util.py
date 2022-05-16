@@ -201,8 +201,7 @@ def test_encrypt_decrypt():
 class TestDetectRunningProcessId:
     @pytest.fixture
     def cmd_str(self):
-        random_str = "".join(random.choices(string.ascii_letters, k=20))
-        cmd = ["/usr/bin/bash", "-c", f"/usr/bin/sleep 60; echo {random_str}"]
+        cmd = ["/usr/bin/sleep", str(random.randint(1000, 5000)), str(random.randint(1000, 5000)), str(random.randint(1000, 5000))]
         cmd_str = " ".join(cmd)
         process = subprocess.Popen(cmd)  # pylint: disable=consider-using-with
         yield cmd_str
@@ -212,4 +211,5 @@ class TestDetectRunningProcessId:
         spawned_id, output_bytes = myhoard_util.detect_running_process_id(cmd_str)
         if spawned_id is None:
             raise AssertionError(f"Could not match command or matched twice:\n{output_bytes.decode('ascii')}")
-        assert myhoard_util.detect_running_process_id("certainlynosuchprocesscurrentlyrunning") is None
+        no_id, output_bytes = myhoard_util.detect_running_process_id("certainlynosuchprocesscurrentlyrunning")
+        assert no_id is None
