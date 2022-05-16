@@ -1,9 +1,10 @@
 # Use pip for build requirements to harmonize between OS versions
+black==22.3.0
 coverage
 coveralls
 flake8
 httplib2
-isort==4.3.21
+isort==5.10.1
 mock
 mypy
 pylint-quotes
@@ -17,5 +18,3 @@ pytest-xdist
 responses
 types-PyMySQL
 types-requests
-unify
-yapf==0.27.0
