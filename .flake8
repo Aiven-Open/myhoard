@@ -1,11 +1,10 @@
 [flake8]
-format = default
 max-line-length = 125
-ignore =
+extend-ignore =
   E123,  # Closing brackets indent
   E126,  # Hanging indents
   E129,  # Visual indent
+  E203,  # Whitespace before ':' (in accordance with Black)
+  E231,  # Missing whitespace after ',' (in accordance with Black)
   E501,  # Max line length
   E722,  # bare-except
-  W503,  # Breaks & binary operators
-  W504,  # line break after binary operator (conflicts with our yapf style)
