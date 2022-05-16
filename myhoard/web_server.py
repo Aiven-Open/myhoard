@@ -1,4 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from aiohttp import web
+from aiohttp.web_response import json_response
+from myhoard.backup_stream import BackupStream
+from myhoard.controller import Controller
+from myhoard.errors import BadRequest
+
 import asyncio
 import contextlib
 import enum
@@ -6,12 +12,6 @@ import json
 import logging
 import time
 import uuid
-
-from aiohttp import web
-from aiohttp.web_response import json_response
-from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller
-from myhoard.errors import BadRequest
 
 
 class WebServer:
@@ -193,14 +193,16 @@ class WebServer:
         self.site = None
 
     def _add_routes(self):
-        self.app.add_routes([
-            web.get("/backup", self.backup_list),
-            web.post("/backup", self.backup_create),
-            web.put("/replication_state", self.replication_state_set),
-            web.get("/status", self.status_show),
-            web.put("/status", self.status_update),
-            web.get("/status/restore", self.restore_status_show),
-        ])
+        self.app.add_routes(
+            [
+                web.get("/backup", self.backup_list),
+                web.post("/backup", self.backup_create),
+                web.put("/replication_state", self.replication_state_set),
+                web.get("/status", self.status_show),
+                web.put("/status", self.status_update),
+                web.get("/status/restore", self.restore_status_show),
+            ]
+        )
 
     @classmethod
     def validate_replication_state(cls, state):

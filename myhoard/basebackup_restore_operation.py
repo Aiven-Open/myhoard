@@ -1,4 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from contextlib import suppress
+from pghoard.common import increase_pipe_capacity, set_stream_nonblocking
+
 import base64
 import fnmatch
 import logging
@@ -10,9 +13,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from contextlib import suppress
-
-from pghoard.common import increase_pipe_capacity, set_stream_nonblocking
 
 
 class BasebackupRestoreOperation:
@@ -63,29 +63,32 @@ class BasebackupRestoreOperation:
             self.temp_dir = tempfile.mkdtemp(dir=self.temp_dir_base)
 
             try:
-                # yapf: disable
                 command_line = [
                     "xbstream",
                     # TODO: Check if it made sense to restore directly to MySQL data directory so that
                     # we could skip the move phase. It's not clear if move does anything worthwhile
                     # except skips a few extra files, which could instead be deleted explicitly
-                    "--directory", self.temp_dir,
+                    "--directory",
+                    self.temp_dir,
                     "--extract",
                     "--decompress",
-                    "--decompress-threads", str(max(cpu_count - 1, 1)),
-                    "--decrypt", self.encryption_algorithm,
-                    "--encrypt-key-file", encryption_key_file.name,
-                    "--encrypt-threads", str(max(cpu_count - 1, 1)),
-                    "--parallel", str(max(cpu_count - 1, 1)),
+                    "--decompress-threads",
+                    str(max(cpu_count - 1, 1)),
+                    "--decrypt",
+                    self.encryption_algorithm,
+                    "--encrypt-key-file",
+                    encryption_key_file.name,
+                    "--encrypt-threads",
+                    str(max(cpu_count - 1, 1)),
+                    "--parallel",
+                    str(max(cpu_count - 1, 1)),
                     "--verbose",
                 ]
 
                 with self.stats.timing_manager("myhoard.basebackup_restore.xbstream_extract"):
-                    with subprocess.Popen(command_line,
-                                          bufsize=0,
-                                          stdin=subprocess.PIPE,
-                                          stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE) as xbstream:
+                    with subprocess.Popen(
+                        command_line, bufsize=0, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                    ) as xbstream:
                         self.proc = xbstream
                         self._process_xbstream_input_output()
 
@@ -99,7 +102,8 @@ class BasebackupRestoreOperation:
                     f"--defaults-file={self.mysql_config_file_name}",
                     "--no-version-check",
                     "--prepare",
-                    "--target-dir", self.temp_dir,
+                    "--target-dir",
+                    self.temp_dir,
                 ]
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(
@@ -132,7 +136,8 @@ class BasebackupRestoreOperation:
                     f"--defaults-file={self.mysql_config_file_name}",
                     "--move-back",
                     "--no-version-check",
-                    "--target-dir", self.temp_dir,
+                    "--target-dir",
+                    self.temp_dir,
                 ]
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_move"):
                     with subprocess.Popen(

@@ -1,12 +1,12 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from pghoard.rohmu import get_transfer
+from pghoard.rohmu.compressor import DecompressSink
+from pghoard.rohmu.encryptor import DecryptSink
+
 import contextlib
 import logging
 import os
 import time
-
-from pghoard.rohmu import get_transfer
-from pghoard.rohmu.compressor import DecompressSink
-from pghoard.rohmu.encryptor import DecryptSink
 
 
 def download_binlog(config, queue_in, queue_out):
@@ -43,8 +43,10 @@ class BinlogDownloader:
                     output_obj = DecryptSink(output_obj, action["remote_file_size"], self.rsa_private_key_pem)
                     self.transfer.get_contents_to_fileobj(action["remote_key"], output_obj)
                     self.log.info(
-                        "%r successfully saved as %r in %.2f seconds", action["remote_key"], action["local_file_name"],
-                        time.monotonic() - start_time
+                        "%r successfully saved as %r in %.2f seconds",
+                        action["remote_key"],
+                        action["local_file_name"],
+                        time.monotonic() - start_time,
                     )
             except Exception as ex:  # pylint: disable=broad-except
                 exception = ex

@@ -1,4 +1,35 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .append_only_state_manager import AppendOnlyStateManager
+from .basebackup_operation import BasebackupOperation
+from .errors import XtraBackupError
+from .state_manager import StateManager
+from .util import (
+    add_gtid_ranges_to_executed_set,
+    are_gtids_in_executed_set,
+    DEFAULT_MYSQL_TIMEOUT,
+    ERR_TIMEOUT,
+    first_contains_gtids_not_in_second,
+    make_fs_metadata,
+    mysql_cursor,
+    parse_fs_metadata,
+    parse_gtid_range_string,
+    rsa_encrypt_bytes,
+    sort_and_filter_binlogs,
+    track_rate,
+    truncate_gtid_executed,
+)
+from contextlib import suppress
+from datetime import datetime, timezone
+from http.client import RemoteDisconnected
+from httplib2 import ServerNotFoundError
+from pghoard.rohmu import errors as rohmu_errors
+from pghoard.rohmu.compressor import CompressionStream
+from pghoard.rohmu.encryptor import EncryptorStream
+from pghoard.rohmu.object_storage.s3 import S3Transfer
+from socket import gaierror
+from socks import GeneralProxyError, ProxyConnectionError
+from ssl import SSLEOFError
+
 import contextlib
 import enum
 import json
@@ -8,28 +39,6 @@ import pymysql
 import threading
 import time
 import uuid
-from contextlib import suppress
-from datetime import datetime, timezone
-from http.client import RemoteDisconnected
-from httplib2 import ServerNotFoundError
-from socket import gaierror
-from socks import GeneralProxyError, ProxyConnectionError
-from ssl import SSLEOFError
-
-from pghoard.rohmu import errors as rohmu_errors
-from pghoard.rohmu.compressor import CompressionStream
-from pghoard.rohmu.encryptor import EncryptorStream
-from pghoard.rohmu.object_storage.s3 import S3Transfer
-
-from .append_only_state_manager import AppendOnlyStateManager
-from .basebackup_operation import BasebackupOperation
-from .errors import XtraBackupError
-from .state_manager import StateManager
-from .util import (
-    add_gtid_ranges_to_executed_set, are_gtids_in_executed_set, DEFAULT_MYSQL_TIMEOUT, ERR_TIMEOUT,
-    first_contains_gtids_not_in_second, make_fs_metadata, mysql_cursor, parse_fs_metadata, parse_gtid_range_string,
-    rsa_encrypt_bytes, sort_and_filter_binlogs, track_rate, truncate_gtid_executed
-)
 
 BINLOG_BUCKET_SIZE = 500
 
@@ -229,12 +238,12 @@ class BackupStream(threading.Thread):
                 return
             self.log.info(
                 "Local binlog %s for stream %r not yet uploaded but another stream has it. Storing remote reference %r",
-                local_index, self.stream_id, remote_key
+                local_index,
+                self.stream_id,
+                remote_key,
             )
             self.state_manager.update_state(
-                local_index_to_remote_key={
-                    **self.state["local_index_to_remote_key"], local_index: remote_key
-                }
+                local_index_to_remote_key={**self.state["local_index_to_remote_key"], local_index: remote_key}
             )
 
     @property
@@ -445,7 +454,7 @@ class BackupStream(threading.Thread):
                     if self.active_phase == self.ActivePhase.none:
                         self.log.info(
                             "Backup stream %s is closed, stopping stream processor as no updates are possible",
-                            self.stream_id
+                            self.stream_id,
                         )
                         self.is_running = False
                         break
@@ -497,10 +506,12 @@ class BackupStream(threading.Thread):
     def _basebackup_stream_handler(self, stream):
         file_storage = self.file_storage_setup_fn()
 
-        metadata = make_fs_metadata({
-            "backup_started_at": time.time(),
-            "uploaded_from": self.server_id,
-        })
+        metadata = make_fs_metadata(
+            {
+                "backup_started_at": time.time(),
+                "uploaded_from": self.server_id,
+            }
+        )
 
         last_time = [time.monotonic()]
         last_value = [0]
@@ -778,7 +789,9 @@ class BackupStream(threading.Thread):
             if elapsed < total_wait:
                 self.log.info(
                     "Basebackup has failed %r times previously. Delay until next attempt is %.1f, only %.1f elapsed so far",
-                    fail_count, total_wait, elapsed
+                    fail_count,
+                    total_wait,
+                    elapsed,
                 )
                 return
 
@@ -878,7 +891,12 @@ class BackupStream(threading.Thread):
             if uncompressed_size and compressed_size:
                 self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
         except (
-            gaierror, GeneralProxyError, ProxyConnectionError, RemoteDisconnected, ServerNotFoundError, SSLEOFError
+            gaierror,
+            GeneralProxyError,
+            ProxyConnectionError,
+            RemoteDisconnected,
+            ServerNotFoundError,
+            SSLEOFError,
         ) as ex:
             self.log.exception("Network error while taking basebackup")
             self.state_manager.increment_counter(name="basebackup_errors")
@@ -941,8 +959,9 @@ class BackupStream(threading.Thread):
                         # excluding duplicate binlogs but it would be wasteful to upload potentially very large number
                         # of files that have no new GTIDs compared to existing remote state.
                         self.log.info(
-                            "Local binlog %r contains GTIDs not included in last valid remote binlog %r, uploading", binlog,
-                            remote_with_gtids
+                            "Local binlog %r contains GTIDs not included in last valid remote binlog %r, uploading",
+                            binlog,
+                            remote_with_gtids,
                         )
                         skip = False
                     if not skip:
@@ -950,7 +969,8 @@ class BackupStream(threading.Thread):
                 else:
                     self.log.info(
                         "Local binlog %r contains no GTID ranges and we haven't uploaded any binlogs with GTIDs since "
-                        "promotion. Cannot determine whether the file is needed or not -> skipping", binlog
+                        "promotion. Cannot determine whether the file is needed or not -> skipping",
+                        binlog,
                     )
 
                 if skip:
@@ -1022,8 +1042,11 @@ class BackupStream(threading.Thread):
                     self._mark_upload_completed(binlog=binlog, upload_time=start_wall)
                 elapsed = time.monotonic() - start
                 self.log.info(
-                    "Successfully %s binlog index %s as remote index %s in %.1f seconds", log_action, binlog["local_index"],
-                    binlog["remote_index"], elapsed
+                    "Successfully %s binlog index %s as remote index %s in %.1f seconds",
+                    log_action,
+                    binlog["local_index"],
+                    binlog["remote_index"],
+                    elapsed,
                 )
             return True
         except (

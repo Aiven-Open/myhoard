@@ -1,22 +1,25 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from . import (
+    build_controller,
+    build_statsd_client,
+    generate_rsa_key_pair,
+    get_mysql_config_options,
+    get_random_port,
+    MySQLConfig,
+    random_basic_string,
+)
+from myhoard.util import atomic_create_file, change_master_to, mysql_cursor, wait_for_port
+from myhoard.web_server import WebServer
+from typing import Optional
+
 import contextlib
 import logging
 import os
+import pytest
 import shutil
 import signal
 import subprocess
 import sys
-from typing import Optional
-
-import pytest
-
-from myhoard.util import (atomic_create_file, change_master_to, mysql_cursor, wait_for_port)
-from myhoard.web_server import WebServer
-
-from . import (
-    MySQLConfig, build_controller, build_statsd_client, generate_rsa_key_pair, get_mysql_config_options, get_random_port,
-    random_basic_string
-)
 
 pytest_plugins = "aiohttp.pytest_plugin"
 
@@ -160,14 +163,16 @@ FLUSH PRIVILEGES;
         ]
         if mysql_basedir:
             cmd.append(f"--basedir={mysql_basedir}")
-        cmd.extend([
-            "--initialize",
-            "--disable-log-bin",
-            "--gtid-mode=OFF",
-            "--skip-slave-preserve-commit-order",
-            "--init-file",
-            init_file,
-        ])
+        cmd.extend(
+            [
+                "--initialize",
+                "--disable-log-bin",
+                "--gtid-mode=OFF",
+                "--skip-slave-preserve-commit-order",
+                "--init-file",
+                init_file,
+            ]
+        )
         subprocess.run(cmd, check=True, timeout=30)
 
     connect_options = {
@@ -201,7 +206,7 @@ FLUSH PRIVILEGES;
                         "MASTER_PASSWORD": master.password,
                         "MASTER_SSL": 0,
                         "MASTER_USER": master.user,
-                    }
+                    },
                 )
                 cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
             else:
@@ -312,18 +317,13 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "enabled": True,
             "min_binlog_age_before_purge": 600,
             "purge_interval": 60,
-            "purge_when_observe_no_streams": True
+            "purge_when_observe_no_streams": True,
         },
         "http_address": "127.0.0.1",
         "http_port": get_random_port(start=3000, end=30000),
         "mysql": {
             "binlog_prefix": mysql_master.config_options.binlog_file_prefix,
-            "client_params": {
-                "host": "127.0.0.1",
-                "password": "NgLqvU8gbWCtfJWJPy",
-                "port": 3306,
-                "user": "root"
-            },
+            "client_params": {"host": "127.0.0.1", "password": "NgLqvU8gbWCtfJWJPy", "port": 3306, "user": "root"},
             "config_file_name": mysql_master.config_name,
             "data_directory": mysql_master.config_options.datadir,
             "relay_log_index_file": mysql_master.config_options.relay_log_index_file,
@@ -343,10 +343,14 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
         },
         "systemctl_command": ["sudo", "/usr/bin/systemctl"],
         "systemd_env_update_command": [
-            "sudo", "/usr/bin/myhoard_mysql_env_update", "--", "/etc/systemd/system/mysqld.environment", "MYSQLD_OPTS"
+            "sudo",
+            "/usr/bin/myhoard_mysql_env_update",
+            "--",
+            "/etc/systemd/system/mysqld.environment",
+            "MYSQLD_OPTS",
         ],
         "systemd_service": None,
-        "temporary_directory": temp_dir
+        "temporary_directory": temp_dir,
     }
 
 

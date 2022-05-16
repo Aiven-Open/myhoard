@@ -1,11 +1,11 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .util import atomic_create_file
+
 import io
 import json
 import logging
 import os
 import threading
-
-from .util import atomic_create_file
 
 
 class AppendOnlyStateManager:
@@ -79,7 +79,7 @@ class AppendOnlyStateManager:
         self.log.info(
             "Loaded %s entries from %r, %s of them are marked as dead", len(entries), self.state_file, self.dead_entry_count
         )
-        self.entries.extend(json.loads(entry.decode("utf-8")) for entry in entries[self.dead_entry_count:])
+        self.entries.extend(json.loads(entry.decode("utf-8")) for entry in entries[self.dead_entry_count :])
 
     def remove_head(self):
         self.remove_many_from_head(count=1)
@@ -94,8 +94,10 @@ class AppendOnlyStateManager:
             new_entries = self.entries[count:]
             if self.dead_entry_count + count > self.max_dead_entry_count:
                 self.log.info(
-                    "Dead entry count %s exceeds %s for %r, rewriting file", self.dead_entry_count + count,
-                    self.max_dead_entry_count, self.state_file
+                    "Dead entry count %s exceeds %s for %r, rewriting file",
+                    self.dead_entry_count + count,
+                    self.max_dead_entry_count,
+                    self.state_file,
                 )
                 self._rewrite_file(entries=new_entries)
                 self.dead_entry_count = 0

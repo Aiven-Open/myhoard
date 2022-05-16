@@ -1,20 +1,18 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import contextlib
-import os
-import random
-import re
-import time
-from typing import List
-from unittest.mock import MagicMock
-
-import pytest
-
+from . import build_controller, DataGenerator, get_mysql_config_options, MySQLConfig, wait_for_condition, while_asserts
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.restore_coordinator import RestoreCoordinator
-from myhoard.util import (change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges)
+from myhoard.util import change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges
+from typing import List
+from unittest.mock import MagicMock
 
-from . import (DataGenerator, MySQLConfig, build_controller, get_mysql_config_options, wait_for_condition, while_asserts)
+import contextlib
+import os
+import pytest
+import random
+import re
+import time
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -114,7 +112,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
             with mysql_cursor(**mysql_empty.connect_options) as cursor:
                 cursor.execute(
                     "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed, @@GLOBAL.gtid_executed AS gtid_executed",
-                    [old_master_gtid_executed]
+                    [old_master_gtid_executed],
                 )
                 result = cursor.fetchone()
                 new_master_gtid_executed = result["gtid_executed"]
@@ -251,15 +249,17 @@ def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_
         session_tmpdir=session_tmpdir,
     )
     fake_file_names = create_fake_state_files(controller)
-    controller.state["backups"] = [{
-        "basebackup_info": {},
-        "closed_at": None,
-        "completed_at": None,
-        "recovery_site": False,
-        "stream_id": "1234",
-        "resumable": False,
-        "site": "default",
-    }]
+    controller.state["backups"] = [
+        {
+            "basebackup_info": {},
+            "closed_at": None,
+            "completed_at": None,
+            "recovery_site": False,
+            "stream_id": "1234",
+            "resumable": False,
+            "site": "default",
+        }
+    ]
     controller._refresh_backups_list()  # pylint: disable=protected-access
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
@@ -272,18 +272,21 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
         session_tmpdir=session_tmpdir,
     )
     fake_file_names = create_fake_state_files(controller)
-    controller.state["backups"] = [{
-        "basebackup_info": {},
-        "closed_at": None,
-        "completed_at": None,
-        "recovery_site": False,
-        "stream_id": "1234",
-        "resumable": False,
-        "site": "not_default_site",
-    }]
+    controller.state["backups"] = [
+        {
+            "basebackup_info": {},
+            "closed_at": None,
+            "completed_at": None,
+            "recovery_site": False,
+            "stream_id": "1234",
+            "resumable": False,
+            "site": "not_default_site",
+        }
+    ]
     controller._refresh_backups_list()  # pylint: disable=protected-access
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
+
 
 @pytest.mark.skip(reason="Flaky test. Needs to be verified before re-enabling.")
 def test_3_node_service_failover_and_restore(
@@ -707,50 +710,24 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     # Can add backups but backup being restored is not the last one, does not try to look up new backups
     rc.can_add_binlog_streams.return_value = True
     controller.state["backups"] = [
-        {
-            "completed_at": "2",
-            "site": "a",
-            "stream_id": "2"
-        },
-        {
-            "completed_at": "1",
-            "site": "a",
-            "stream_id": "1"
-        },
+        {"completed_at": "2", "site": "a", "stream_id": "2"},
+        {"completed_at": "1", "site": "a", "stream_id": "1"},
     ]
     rc.binlog_streams = [
-        {
-            "site": "a",
-            "stream_id": "1"
-        },
+        {"site": "a", "stream_id": "1"},
     ]
     controller.extend_binlog_stream_list()
     backups.assert_not_called()
 
     # Can add backups and restoring last backup, looks up new backups but does nothing because no new ones are found
     rc.binlog_streams = [
-        {
-            "site": "a",
-            "stream_id": "2"
-        },
+        {"site": "a", "stream_id": "2"},
     ]
     rc.stream_id = "2"
     backups.return_value = [
-        {
-            "completed_at": "2",
-            "site": "a",
-            "stream_id": "2"
-        },
-        {
-            "completed_at": "1",
-            "site": "a",
-            "stream_id": "1"
-        },
-        {
-            "completed_at": "0",
-            "site": "a",
-            "stream_id": "0"
-        },
+        {"completed_at": "2", "site": "a", "stream_id": "2"},
+        {"completed_at": "1", "site": "a", "stream_id": "1"},
+        {"completed_at": "0", "site": "a", "stream_id": "0"},
     ]
     controller.extend_binlog_stream_list()
     backups.assert_called()
@@ -758,21 +735,9 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
 
     # Can add backups and restoring last backup, new backup is found and added to list of binlog streams to restore
     backups.return_value = [
-        {
-            "completed_at": "3",
-            "site": "a",
-            "stream_id": "3"
-        },
-        {
-            "completed_at": "2",
-            "site": "a",
-            "stream_id": "2"
-        },
-        {
-            "completed_at": "1",
-            "site": "a",
-            "stream_id": "1"
-        },
+        {"completed_at": "3", "site": "a", "stream_id": "3"},
+        {"completed_at": "2", "site": "a", "stream_id": "2"},
+        {"completed_at": "1", "site": "a", "stream_id": "1"},
     ]
     rc.add_new_binlog_streams.return_value = True
     controller.state["restore_options"] = {"binlog_streams": rc.binlog_streams, "foo": "abc"}
@@ -781,14 +746,8 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     rc.add_new_binlog_streams.assert_called_with([{"site": "a", "stream_id": "3"}])
     assert controller.state["restore_options"] == {
         "binlog_streams": [
-            {
-                "site": "a",
-                "stream_id": "2"
-            },
-            {
-                "site": "a",
-                "stream_id": "3"
-            },
+            {"site": "a", "stream_id": "2"},
+            {"site": "a", "stream_id": "3"},
         ],
         "foo": "abc",
     }
@@ -1116,23 +1075,18 @@ def test_binlog_auto_rotation(master_controller):
 
 def test_collect_binlogs_to_purge():
     now = time.time()
-    binlogs = [{
-        "local_index": 1,
-        "gtid_ranges": [{
-            "server_uuid": "uuid1",
-            "start": 1,
-            "end": 6,
-        }],
-        "processed_at": now - 20,
-    }, {
-        "local_index": 2,
-        "gtid_ranges": [{
-            "server_uuid": "uuid1",
-            "start": 7,
-            "end": 8,
-        }],
-        "processed_at": now - 10,
-    }]
+    binlogs = [
+        {
+            "local_index": 1,
+            "gtid_ranges": [{"server_uuid": "uuid1", "start": 1, "end": 6}],
+            "processed_at": now - 20,
+        },
+        {
+            "local_index": 2,
+            "gtid_ranges": [{"server_uuid": "uuid1", "start": 7, "end": 8}],
+            "processed_at": now - 10,
+        },
+    ]
     purge_settings = {
         "min_binlog_age_before_purge": 30,
         "purge_when_observe_no_streams": True,
@@ -1181,8 +1135,10 @@ def test_collect_binlogs_to_purge():
     assert not binlogs_to_purge
     assert only_inapplicable_binlogs is False
     log.info.assert_called_with(
-        "Binlog %s either reported as unsafe to delete (%s) by some stream or not reported as safe to delete by any (%s)", 1,
-        True, True
+        "Binlog %s either reported as unsafe to delete (%s) by some stream or not reported as safe to delete by any (%s)",
+        1,
+        True,
+        True,
     )
 
     # No backup streams or replication state and observe node, should allow purging anything
@@ -1221,9 +1177,7 @@ def test_collect_binlogs_to_purge():
 
     log = MagicMock()
     replication_state = {
-        "server1": {
-            "uuid1": [[1, 7]]
-        },
+        "server1": {"uuid1": [[1, 7]]},
     }
     binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
@@ -1240,9 +1194,7 @@ def test_collect_binlogs_to_purge():
 
     log = MagicMock()
     replication_state = {
-        "server1": {
-            "uuid1": [[1, 8]]
-        },
+        "server1": {"uuid1": [[1, 8]]},
     }
     binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
@@ -1271,15 +1223,13 @@ def test_collect_binlogs_to_purge():
     assert not binlogs_to_purge
     assert only_inapplicable_binlogs is True
 
-    binlogs.append({
-        "local_index": 3,
-        "gtid_ranges": [{
-            "server_uuid": "uuid1",
-            "start": 7,
-            "end": 8,
-        }],
-        "processed_at": now - 10,
-    })
+    binlogs.append(
+        {
+            "local_index": 3,
+            "gtid_ranges": [{"server_uuid": "uuid1", "start": 7, "end": 8}],
+            "processed_at": now - 10,
+        }
+    )
     log = MagicMock()
     binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],

@@ -1,4 +1,8 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from contextlib import suppress
+from myhoard.errors import XtraBackupError
+from pghoard.common import increase_pipe_capacity, set_stream_nonblocking
+
 import base64
 import logging
 import os
@@ -8,11 +12,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from contextlib import suppress
-
-from pghoard.common import increase_pipe_capacity, set_stream_nonblocking
-
-from myhoard.errors import XtraBackupError
 
 
 class BasebackupOperation:
@@ -93,18 +92,21 @@ class BasebackupOperation:
                 mysql_config_file.flush()
 
                 self.temp_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackup")
-                # yapf: disable
                 command_line = [
                     "xtrabackup",
                     # defaults file must be given with --defaults-file=foo syntax, space here does not work
                     f"--defaults-file={mysql_config_file.name}",
                     "--backup",
                     "--compress",
-                    "--encrypt", self.encryption_algorithm,
-                    "--encrypt-key-file", encryption_key_file.name,
+                    "--encrypt",
+                    self.encryption_algorithm,
+                    "--encrypt-key-file",
+                    encryption_key_file.name,
                     "--no-version-check",
-                    "--stream", "xbstream",
-                    "--target-dir", self.temp_dir,
+                    "--stream",
+                    "xbstream",
+                    "--target-dir",
+                    self.temp_dir,
                 ]
 
                 with self.stats.timing_manager("myhoard.basebackup.xtrabackup_backup"):
@@ -217,10 +219,10 @@ class BasebackupOperation:
             line = line.decode("iso-8859-1")
 
         if (
-            not self._process_output_line_new_file(line) and
-            not self._process_output_line_file_finished(line) and
-            not self._process_output_line_binlog_info(line) and
-            not self._process_output_line_lsn_info(line)
+            not self._process_output_line_new_file(line)
+            and not self._process_output_line_file_finished(line)
+            and not self._process_output_line_binlog_info(line)
+            and not self._process_output_line_lsn_info(line)
         ):
             if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
                 self.log.error("xtrabackup: %r", line)
@@ -283,8 +285,12 @@ class BasebackupOperation:
         if estimated_total_bytes > 0:
             estimated_progress = min(self.processed_original_bytes / estimated_total_bytes * 100, 100)
 
-        self.log.info("Processed %s bytes of estimated %s total bytes, progress at %.2f%%",
-                      self.processed_original_bytes, estimated_total_bytes, estimated_progress)
+        self.log.info(
+            "Processed %s bytes of estimated %s total bytes, progress at %.2f%%",
+            self.processed_original_bytes,
+            estimated_total_bytes,
+            estimated_progress,
+        )
         self.stats.gauge_float("myhoard.basebackup.estimated_progress", estimated_progress)
 
         if self.progress_callback:

@@ -1,13 +1,11 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import json
-import os
-
-import pytest
-
-import myhoard.util as myhoard_util
+from . import build_statsd_client
 from myhoard.binlog_scanner import BinlogScanner
 
-from . import build_statsd_client
+import json
+import myhoard.util as myhoard_util
+import os
+import pytest
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 

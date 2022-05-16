@@ -1,17 +1,15 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import os
-import time
-
-import pytest
-from pghoard.rohmu.object_storage.local import LocalTransfer
-
-import myhoard.util as myhoard_util
+from . import build_statsd_client, DataGenerator, generate_rsa_key_pair, restart_mysql, while_asserts
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
+from pghoard.rohmu.object_storage.local import LocalTransfer
 from unittest.mock import Mock, patch
 
-from . import (DataGenerator, build_statsd_client, generate_rsa_key_pair, restart_mysql, while_asserts)
+import myhoard.util as myhoard_util
+import os
+import pytest
+import time
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -101,9 +99,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     print(
         int(time.monotonic() - data_gen_start),
-        "initial rows:", data_generator.row_count,
-        "estimated bytes:", data_generator.estimated_bytes,
-        "binlog count:", len(scanner.binlogs),
+        "initial rows:",
+        data_generator.row_count,
+        "estimated bytes:",
+        data_generator.estimated_bytes,
+        "binlog count:",
+        len(scanner.binlogs),
     )  # yapf: disable
 
     bs1.start()
@@ -118,9 +119,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     print(
         int(time.monotonic() - data_gen_start),
-        "rows when basebackup 1 finished:", data_generator.row_count,
-        "estimated bytes:", data_generator.estimated_bytes,
-        "binlog count:", len(scanner.binlogs),
+        "rows when basebackup 1 finished:",
+        data_generator.row_count,
+        "estimated bytes:",
+        data_generator.estimated_bytes,
+        "binlog count:",
+        len(scanner.binlogs),
     )  # yapf: disable
 
     bs2.start()
@@ -134,9 +138,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     print(
         int(time.monotonic() - data_gen_start),
-        "rows when basebackup 2 finished:", data_generator.row_count,
-        "estimated bytes:", data_generator.estimated_bytes,
-        "binlog count:", len(scanner.binlogs),
+        "rows when basebackup 2 finished:",
+        data_generator.row_count,
+        "estimated bytes:",
+        data_generator.estimated_bytes,
+        "binlog count:",
+        len(scanner.binlogs),
     )  # yapf: disable
 
     # Wait until bs1 has uploaded all binlogs, then mark that backup as closed and stop it
@@ -182,9 +189,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     print(
         int(time.monotonic() - data_gen_start),
-        "rows when marking complete:", data_generator.row_count,
-        "estimated bytes:", data_generator.estimated_bytes,
-        "binlog count:", len(scanner.binlogs),
+        "rows when marking complete:",
+        data_generator.row_count,
+        "estimated bytes:",
+        data_generator.estimated_bytes,
+        "binlog count:",
+        len(scanner.binlogs),
     )  # yapf: disable
     bs2.mark_as_completed()
 
@@ -204,9 +214,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
 
     print(
         int(time.monotonic() - data_gen_start),
-        "final rows:", data_generator.row_count,
-        "estimated bytes:", data_generator.estimated_bytes,
-        "binlog count:", len(scanner.binlogs),
+        "final rows:",
+        data_generator.row_count,
+        "estimated bytes:",
+        data_generator.estimated_bytes,
+        "binlog count:",
+        len(scanner.binlogs),
     )  # yapf: disable
 
     start = time.monotonic()
@@ -236,13 +249,10 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     # Restore basebackup from backup stream 1 but binlogs from both streams. First stream doesn't
     # contain latest state but applying binlogs from second stream should get it fully up-to-date
     rc = RestoreCoordinator(
-        binlog_streams=[{
-            "site": "default",
-            "stream_id": bs1.state["stream_id"],
-        }, {
-            "site": "default",
-            "stream_id": bs2.state["stream_id"],
-        }],
+        binlog_streams=[
+            {"site": "default", "stream_id": bs1.state["stream_id"]},
+            {"site": "default", "stream_id": bs2.state["stream_id"]},
+        ],
         file_storage_config={
             "directory": backup_target_location,
             "storage_type": "local",
@@ -303,16 +313,16 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         assert actual_row_count == expected_row_count, "row count doesn't match"
 
         master_status = pitr_master_status or original_master_status
-        assert final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"], "final status executed_gtid_set differs from master status"
+        assert (
+            final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"]
+        ), "final status executed_gtid_set differs from master status"
         assert final_status["File"] == "bin.000001", "final status file differes from expected"
 
 
-@pytest.mark.parametrize("running_state",
-                         [
-                             "Slave has read all relay log; waiting for more updates",
-                             "Replica has read all relay log; waiting for more updates"
-                             ]
-                         )
+@pytest.mark.parametrize(
+    "running_state",
+    ["Slave has read all relay log; waiting for more updates", "Replica has read all relay log; waiting for more updates"],
+)
 def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_empty):
     restored_connect_options = {
         "host": "127.0.0.1",
@@ -323,15 +333,12 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
     private_key_pem, _ = generate_rsa_key_pair()
 
-    slave_status_response = {
-        "Relay_Log_File": "relay.000001",
-        "Slave_SQL_Running_State": running_state
-    }
+    slave_status_response = {"Relay_Log_File": "relay.000001", "Slave_SQL_Running_State": running_state}
 
     mock_cursor = Mock()
     mock_cursor.fetchone.return_value = slave_status_response
 
-    with patch.object(RestoreCoordinator, '_mysql_cursor') as mock_mysql_cursor:
+    with patch.object(RestoreCoordinator, "_mysql_cursor") as mock_mysql_cursor:
 
         mock_mysql_cursor.return_value.__enter__.return_value = mock_cursor
         mock_cursor.foo.return_value.bar.return_value.something.return_value = "bar"

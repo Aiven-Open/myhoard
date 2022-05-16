@@ -1,4 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from myhoard import version
+from myhoard.controller import Controller
+from myhoard.statsd import StatsClient
+from myhoard.util import detect_running_process_id, wait_for_port
+from myhoard.web_server import WebServer
+
 import argparse
 import asyncio
 import json
@@ -7,12 +13,6 @@ import os
 import signal
 import subprocess
 import sys
-
-from myhoard import version
-from myhoard.controller import Controller
-from myhoard.statsd import StatsClient
-from myhoard.util import detect_running_process_id, wait_for_port
-from myhoard.web_server import WebServer
 
 try:
     from systemd import daemon  # pylint: disable=no-name-in-module
@@ -160,8 +160,11 @@ class MyHoard:
             subprocess.run(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=True)
         except subprocess.CalledProcessError as e:
             self.log.error(
-                "Failed to update MySQL config, %r exited with code %s. Output: %r / %r", command, e.returncode, e.output,
-                e.stderr
+                "Failed to update MySQL config, %r exited with code %s. Output: %r / %r",
+                command,
+                e.returncode,
+                e.output,
+                e.stderr,
             )
             raise Exception(f"Reconfiguring {service!r} failed. Code {e.returncode}") from e
 
@@ -170,8 +173,11 @@ class MyHoard:
             subprocess.run(systemctl + ["restart", service], stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=True)
         except subprocess.CalledProcessError as e:
             self.log.error(
-                "Failed to restart %r, systemctl exited with code %s. Output: %r / %r", service, e.returncode, e.output,
-                e.stderr
+                "Failed to restart %r, systemctl exited with code %s. Output: %r / %r",
+                service,
+                e.returncode,
+                e.output,
+                e.stderr,
             )
             raise Exception(f"Restarting {service!r} failed. Code {e.returncode}") from e
         self.log.info("Restarting %r completed successfully", service)

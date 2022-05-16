@@ -1,25 +1,4 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import contextlib
-import datetime
-import enum
-import json
-import logging
-import math
-import os
-import re
-import threading
-import time
-
-import pymysql
-from http.client import RemoteDisconnected
-from httplib2 import ServerNotFoundError
-from pghoard.rohmu import get_transfer
-from pghoard.rohmu.compressor import DecompressSink
-from pghoard.rohmu.encryptor import DecryptSink
-from socket import gaierror
-from socks import GeneralProxyError, ProxyConnectionError
-from ssl import SSLEOFError
-
 from .backup_stream import BackupStream
 from .binlog_scanner import BinlogScanner
 from .errors import BadRequest
@@ -35,6 +14,26 @@ from .util import (
     parse_fs_metadata,
     relay_log_name,
 )
+from http.client import RemoteDisconnected
+from httplib2 import ServerNotFoundError
+from pghoard.rohmu import get_transfer
+from pghoard.rohmu.compressor import DecompressSink
+from pghoard.rohmu.encryptor import DecryptSink
+from socket import gaierror
+from socks import GeneralProxyError, ProxyConnectionError
+from ssl import SSLEOFError
+
+import contextlib
+import datetime
+import enum
+import json
+import logging
+import math
+import os
+import pymysql
+import re
+import threading
+import time
 
 ERR_CANNOT_CONNECT = 2003
 
@@ -165,7 +164,8 @@ class Controller(threading.Thread):
             old = self.state["backup_request"]
             if old:
                 if (
-                    old == new_request or normalized_backup_time < old["normalized_backup_time"]
+                    old == new_request
+                    or normalized_backup_time < old["normalized_backup_time"]
                     # Prefer storing "scheduled" as backup reason since that reduces chance of trying to correct
                     # backup schedule too quickly in case of backup time has been changed and manual backup is created
                     or (
@@ -204,23 +204,27 @@ class Controller(threading.Thread):
                 raise ValueError(f"Requested backup {stream_id!r} for site {site!r} not found")
 
             self.log.info(
-                "Restoring backup stream %r, target time %r%s", stream_id, target_time,
-                " (approximate time)" if target_time_approximate_ok else ""
+                "Restoring backup stream %r, target time %r%s",
+                stream_id,
+                target_time,
+                " (approximate time)" if target_time_approximate_ok else "",
             )
             self.state_manager.update_state(
                 mode=self.Mode.restore,
                 restore_options={
-                    "binlog_streams": [{
-                        "site": site,
-                        "stream_id": stream_id,
-                    }],
+                    "binlog_streams": [
+                        {
+                            "site": site,
+                            "stream_id": stream_id,
+                        }
+                    ],
                     "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
                     "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
                     "stream_id": stream_id,
                     "site": site,
                     "target_time": target_time,
                     "target_time_approximate_ok": target_time_approximate_ok,
-                }
+                },
             )
             self._update_mode_tag()
 
@@ -357,7 +361,9 @@ class Controller(threading.Thread):
             if binlog_age < min_age:
                 log.info(
                     "Binlog %s was processed %s seconds ago and min age before purging is %s seconds, not purging",
-                    binlog["local_index"], math.ceil(binlog_age), min_age
+                    binlog["local_index"],
+                    math.ceil(binlog_age),
+                    min_age,
                 )
                 if only_binlogs_that_are_too_new is None:
                     only_binlogs_that_are_too_new = True
@@ -390,12 +396,15 @@ class Controller(threading.Thread):
                 if can_purge:
                     log.info(
                         "Binlog %s is reported safe to delete by at least one stream and not as unsafe by any",
-                        binlog["local_index"]
+                        binlog["local_index"],
                     )
                 else:
                     log.info(
                         "Binlog %s either reported as unsafe to delete (%s) by some stream or not reported as safe to "
-                        "delete by any (%s)", binlog["local_index"], at_least_one_unsafe_stream, at_least_one_safe_stream
+                        "delete by any (%s)",
+                        binlog["local_index"],
+                        at_least_one_unsafe_stream,
+                        at_least_one_safe_stream,
                     )
             if not can_purge:
                 break
@@ -473,15 +482,17 @@ class Controller(threading.Thread):
                 resumable = basebackup_info and basebackup_compressed_size
                 completed = resumable and completed_info
                 closed = completed and closed_info
-                backups.append({
-                    "basebackup_info": basebackup_info,
-                    "closed_at": closed_info["closed_at"] if closed else None,
-                    "completed_at": completed_info["completed_at"] if completed else None,
-                    "recovery_site": site_config.get("recovery_only", False),
-                    "stream_id": site_and_stream_id.rsplit("/", 1)[-1],
-                    "resumable": bool(resumable),
-                    "site": site_name,
-                })
+                backups.append(
+                    {
+                        "basebackup_info": basebackup_info,
+                        "closed_at": closed_info["closed_at"] if closed else None,
+                        "completed_at": completed_info["completed_at"] if completed else None,
+                        "recovery_site": site_config.get("recovery_only", False),
+                        "stream_id": site_and_stream_id.rsplit("/", 1)[-1],
+                        "resumable": bool(resumable),
+                        "site": site_name,
+                    }
+                )
         return backups
 
     def _apply_downloaded_remote_binlogs(self):
@@ -504,8 +515,10 @@ class Controller(threading.Thread):
             if not self.state["promote_details"].get("relay_index_updated"):
                 first_index = int(first_name.split(".")[-1])
                 if (
-                    first_index == 1 and not slave_status["Relay_Master_Log_File"]
-                    and not slave_status["Exec_Master_Log_Pos"] and not slave_status["Retrieved_Gtid_Set"]
+                    first_index == 1
+                    and not slave_status["Relay_Master_Log_File"]
+                    and not slave_status["Exec_Master_Log_Pos"]
+                    and not slave_status["Retrieved_Gtid_Set"]
                 ):
                     # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
                     self.log.info(
@@ -799,8 +812,10 @@ class Controller(threading.Thread):
                     self.site_transfers[site] = transfer
                 transfer.get_contents_to_fileobj(binlog["remote_key"], output_obj)
                 self.log.info(
-                    "%r successfully saved as %r in %.2f seconds", binlog["remote_key"], prefetch_name,
-                    time.monotonic() - start_time
+                    "%r successfully saved as %r in %.2f seconds",
+                    binlog["remote_key"],
+                    prefetch_name,
+                    time.monotonic() - start_time,
                 )
 
             # Try to keep objects in state mostly immutable to avoid weird issues due to changes from different
@@ -879,8 +894,9 @@ class Controller(threading.Thread):
             if info["Slave_IO_Running"] == "Yes":
                 raise Exception("Slave IO thread expected to be stopped but is running")
             if info["Slave_SQL_Running"] == "Yes":
-                if not re.match("(Slave|Replica) has read all relay log; waiting for more updates",
-                                info["Slave_SQL_Running_State"]):
+                if not re.match(
+                    "(Slave|Replica) has read all relay log; waiting for more updates", info["Slave_SQL_Running_State"]
+                ):
                     raise Exception("Expected SQL thread to be stopped or finished processing updates")
                 cursor.execute("STOP SLAVE SQL_THREAD")
 
@@ -1024,7 +1040,8 @@ class Controller(threading.Thread):
         if self.backup_streams:
             last_normalized_backup_time = max(stream.state["normalized_backup_time"] for stream in self.backup_streams)
             scheduled_streams = [
-                stream for stream in self.backup_streams
+                stream
+                for stream in self.backup_streams
                 if stream.state["backup_reason"] == BackupStream.BackupReason.scheduled
             ]
             if scheduled_streams:
@@ -1041,8 +1058,9 @@ class Controller(threading.Thread):
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
             self.log.info(
-                "New normalized time %r differs from previous %r, adding new backup request", normalized_backup_time,
-                last_normalized_backup_time
+                "New normalized time %r differs from previous %r, adding new backup request",
+                normalized_backup_time,
+                last_normalized_backup_time,
             )
             self.mark_backup_requested(
                 backup_reason=BackupStream.BackupReason.scheduled, normalized_backup_time=normalized_backup_time
@@ -1383,7 +1401,8 @@ class Controller(threading.Thread):
         processed_references = set((ref["local_index"], ref["remote_key"]) for ref in references)
         with self.lock:
             new_references = [
-                ref for ref in self.state["uploaded_binlogs"]
+                ref
+                for ref in self.state["uploaded_binlogs"]
                 if (ref["local_index"], ref["remote_key"]) not in processed_references
             ]
             self.state_manager.update_state(uploaded_binlogs=new_references)
@@ -1472,19 +1491,24 @@ class Controller(threading.Thread):
             self.log.info("Earlier backup %r is available, restoring basebackup from that", earlier_backup)
             options = self.state["restore_options"]
             self.restore_coordinator.stop()
-            self.state_manager.update_state(restore_options={
-                # Get binlogs from all backup streams
-                "binlog_streams": [{
-                    "site": earlier_backup["site"],
+            self.state_manager.update_state(
+                restore_options={
+                    # Get binlogs from all backup streams
+                    "binlog_streams": [
+                        {
+                            "site": earlier_backup["site"],
+                            "stream_id": earlier_backup["stream_id"],
+                        }
+                    ]
+                    + options["binlog_streams"],
+                    "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
+                    "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
                     "stream_id": earlier_backup["stream_id"],
-                }] + options["binlog_streams"],
-                "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
-                "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
-                "stream_id": earlier_backup["stream_id"],
-                "site": earlier_backup["site"],
-                "target_time": options["target_time"],
-                "target_time_approximate_ok": options["target_time_approximate_ok"],
-            })
+                    "site": earlier_backup["site"],
+                    "target_time": options["target_time"],
+                    "target_time_approximate_ok": options["target_time_approximate_ok"],
+                }
+            )
             self.restore_coordinator = None
         else:
             # Switch restore coordinator to permanently failed mode
@@ -1524,13 +1548,14 @@ class Controller(threading.Thread):
                 # the service was started when current time was just before the scheduled backup time
                 if streams_in_catchup > 0 and not streams_active:
                     streams = [
-                        stream for stream in self.backup_streams
+                        stream
+                        for stream in self.backup_streams
                         if stream.active_phase == BackupStream.ActivePhase.binlog_catchup
                     ]
                     streams = sorted(streams, key=lambda stream: stream.created_at)
                     self.log.info(
                         "Multiple streams exist with none in regular binlog streaming phase, marking %r as complete",
-                        streams[0].stream_id
+                        streams[0].stream_id,
                     )
                     streams[0].mark_as_completed()
                     expected_completed.append(streams[0])
@@ -1550,8 +1575,10 @@ class Controller(threading.Thread):
                         and stream.highest_processed_local_index >= highest_processed_local_index
                     ):
                         self.log.info(
-                            "Stream %r caught up with previous stream (%s == %s), marking as completed", stream.stream_id,
-                            stream.highest_processed_local_index, highest_processed_local_index
+                            "Stream %r caught up with previous stream (%s == %s), marking as completed",
+                            stream.stream_id,
+                            stream.highest_processed_local_index,
+                            highest_processed_local_index,
                         )
                         stream.mark_as_completed()
                         expected_completed.append(stream)
@@ -1561,13 +1588,16 @@ class Controller(threading.Thread):
                         # Print less frequently to avoid log spam.
                         if self.binlog_not_caught_log_counter % 10 == 0:
                             self.log.info(
-                                "Stream %r at position %s while latest position is %s, not yet caught up", stream.stream_id,
-                                stream.highest_processed_local_index, highest_processed_local_index
+                                "Stream %r at position %s while latest position is %s, not yet caught up",
+                                stream.stream_id,
+                                stream.highest_processed_local_index,
+                                highest_processed_local_index,
                             )
                         self.binlog_not_caught_log_counter += 1
 
         max_completion_wait = 2.0
         if expected_completed:
+
             def is_completed():
                 return all(stream.active_phase == BackupStream.ActivePhase.binlog for stream in expected_completed)
 
@@ -1593,6 +1623,7 @@ class Controller(threading.Thread):
                 expected_closed.append(stream)
 
         if expected_closed:
+
             def is_closed():
                 return all(stream.active_phase == BackupStream.ActivePhase.none for stream in expected_closed)
 
@@ -1601,9 +1632,7 @@ class Controller(threading.Thread):
             if self._wait_for_operation_to_finish(is_closed, wait_time=max_completion_wait):
                 self.log.info("All pending mark as closed operations finished")
             else:
-                self.log.warning(
-                    "Not all streams finished marking themselves closed in %.1f seconds", max_completion_wait
-                )
+                self.log.warning("Not all streams finished marking themselves closed in %.1f seconds", max_completion_wait)
 
         if not expected_completed and not expected_closed:
             return

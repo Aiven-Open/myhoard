@@ -1,12 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import os
-
-import pytest
-
-import myhoard.util as myhoard_util
+from . import build_statsd_client, restart_mysql
 from myhoard.basebackup_operation import BasebackupOperation
 
-from . import build_statsd_client, restart_mysql
+import myhoard.util as myhoard_util
+import os
+import pytest
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -22,8 +20,10 @@ def test_basic_backup(mysql_master, extra_uuid):
         cursor.execute("COMMIT")
         # Insert second source_uuid into gtid_executed to test that this is parsed correctly
         if extra_uuid:
-            cursor.execute("INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
-                           f"VALUES ('{extra_uuid}', 1, 1)")
+            cursor.execute(
+                "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
+                f"VALUES ('{extra_uuid}', 1, 1)"
+            )
             cursor.execute("COMMIT")
 
     if extra_uuid:

@@ -1,20 +1,4 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import contextlib
-import enum
-import json
-import logging
-import multiprocessing
-import os
-import queue
-import pymysql
-import threading
-import time
-from contextlib import suppress
-from pymysql import OperationalError
-
-from pghoard.rohmu import errors as rohmu_errors
-from pghoard.rohmu import get_transfer
-
 from .append_only_state_manager import AppendOnlyStateManager
 from .backup_stream import BINLOG_BUCKET_SIZE
 from .basebackup_restore_operation import BasebackupRestoreOperation
@@ -22,10 +6,34 @@ from .binlog_downloader import download_binlog
 from .errors import BadRequest
 from .state_manager import StateManager
 from .util import (
-    add_gtid_ranges_to_executed_set, build_gtid_ranges, change_master_to, ERR_TIMEOUT, make_gtid_range_string, mysql_cursor,
-    parse_fs_metadata, parse_gtid_range_string, read_gtids_from_log, relay_log_name, rsa_decrypt_bytes,
-    sort_and_filter_binlogs, track_rate
+    add_gtid_ranges_to_executed_set,
+    build_gtid_ranges,
+    change_master_to,
+    ERR_TIMEOUT,
+    make_gtid_range_string,
+    mysql_cursor,
+    parse_fs_metadata,
+    parse_gtid_range_string,
+    read_gtids_from_log,
+    relay_log_name,
+    rsa_decrypt_bytes,
+    sort_and_filter_binlogs,
+    track_rate,
 )
+from contextlib import suppress
+from pghoard.rohmu import errors as rohmu_errors, get_transfer
+from pymysql import OperationalError
+
+import contextlib
+import enum
+import json
+import logging
+import multiprocessing
+import os
+import pymysql
+import queue
+import threading
+import time
 
 # "Could not initialize master info structure; more error messages can be found in the MySQL error log"
 # Happens when using multithreaded SQL apply and provided relay logs do not contain sufficient data to
@@ -404,9 +412,7 @@ class RestoreCoordinator(threading.Thread):
         if final_round and self.target_time and not self.target_time_approximate_ok and binlogs[-1]["gtid_ranges"]:
             renamed = last_remote_index <= self.state["last_renamed_index"]
             if renamed:
-                file_name = self._relay_log_name(
-                    index=last_remote_index + self.state["binlog_name_offset"]
-                )
+                file_name = self._relay_log_name(index=last_remote_index + self.state["binlog_name_offset"])
             else:
                 file_name = self._relay_log_prefetch_name(index=last_remote_index)
             ranges = list(build_gtid_ranges(read_gtids_from_log(file_name, read_until_time=self.target_time)))
@@ -491,7 +497,7 @@ class RestoreCoordinator(threading.Thread):
         prefetched_binlogs = self.state["prefetched_binlogs"]
         for binlog in binlogs:
             del prefetched_binlogs[binlog["remote_key"]]
-        pending_binlogs = self.pending_binlogs[len(binlogs):]
+        pending_binlogs = self.pending_binlogs[len(binlogs) :]
         # Mark target_time_reached as True if we started applying the last binlog whose info we had previously
         # fetched to avoid more binlogs being retrieved in case we're syncing against active master
         target_time_reached = self.state["target_time_reached"]
@@ -504,11 +510,13 @@ class RestoreCoordinator(threading.Thread):
 
         applying_binlogs = []
         for binlog in binlogs:
-            applying_binlogs.append({
-                "adjusted_index": binlog["adjusted_remote_index"] + self.state["binlog_name_offset"],
-                "file_size": binlog["file_size"],
-                "gtid_ranges": binlog["gtid_ranges"],
-            })
+            applying_binlogs.append(
+                {
+                    "adjusted_index": binlog["adjusted_remote_index"] + self.state["binlog_name_offset"],
+                    "file_size": binlog["file_size"],
+                    "gtid_ranges": binlog["gtid_ranges"],
+                }
+            )
         if all_gtids_applied:
             applying_binlogs = []
 
@@ -588,7 +596,7 @@ class RestoreCoordinator(threading.Thread):
             if target_index is not None and current_index > target_index:
                 self.log.warning("Expected to reach binlog index %r but reached %r instead", target_index, current_index)
                 self.stats.increase("myhoard.restore.unexpected_extra_relay_log")
-                offset += (current_index - target_index)
+                offset += current_index - target_index
             self.update_state(binlog_name_offset=offset, phase=phase)
         return apply_finished
 
@@ -649,9 +657,7 @@ class RestoreCoordinator(threading.Thread):
             # clear `ongoing_prefetch_operations`, restart processes and put download items back to queue
             self.update_state(
                 file_fail_counters=fail_counters,
-                prefetched_binlogs={
-                    **prefetched_binlogs, key: binlog["file_size"]
-                },
+                prefetched_binlogs={**prefetched_binlogs, key: binlog["file_size"]},
             )
         else:
             fail_counters[key] = fail_counters.get(key, 0) + 1
@@ -665,8 +671,10 @@ class RestoreCoordinator(threading.Thread):
                 self.update_state(file_fail_counters=fail_counters)
             else:
                 self.log.error(
-                    "Failed to fetch %r: %r. Too many (%s) failures, marking restoration as failed", key, result["message"],
-                    fail_counters[key]
+                    "Failed to fetch %r: %r. Too many (%s) failures, marking restoration as failed",
+                    key,
+                    result["message"],
+                    fail_counters[key],
                 )
                 self.update_state(file_fail_counters=fail_counters, phase=self.Phase.failed)
 
@@ -772,8 +780,10 @@ class RestoreCoordinator(threading.Thread):
                         # is equal or higher than target time is certain not to contain data we're going to apply
                         self.log.info(
                             "Start time %s of binlog %s from server %s is after our target time %s, skipping",
-                            binlog["gtid_ranges"][0]["start_ts"], binlog["remote_index"], binlog["server_id"],
-                            self.target_time
+                            binlog["gtid_ranges"][0]["start_ts"],
+                            binlog["remote_index"],
+                            binlog["server_id"],
+                            self.target_time,
                         )
                         target_time_reached_by_server.add(binlog["server_id"])
                         continue
@@ -784,7 +794,10 @@ class RestoreCoordinator(threading.Thread):
                         # binlogs that are still relevant.
                         self.log.info(
                             "End time %s of binlog %s from server %s is at or after our target time %s, target time reached",
-                            binlog["gtid_ranges"][0]["end_ts"], binlog["remote_index"], binlog["server_id"], self.target_time
+                            binlog["gtid_ranges"][0]["end_ts"],
+                            binlog["remote_index"],
+                            binlog["server_id"],
+                            self.target_time,
                         )
                         target_time_reached_by_server.add(binlog["server_id"])
                 new_binlogs.append(binlog)
@@ -898,7 +911,7 @@ class RestoreCoordinator(threading.Thread):
             while new_binlogs and not new_binlogs[-1]["gtid_ranges"]:
                 self.log.info(
                     "Dropping last new binlog %r because target time is reached and binlog is empty",
-                    new_binlogs[-1]["remote_index"]
+                    new_binlogs[-1]["remote_index"],
                 )
                 new_binlogs.pop()
 
@@ -939,8 +952,9 @@ class RestoreCoordinator(threading.Thread):
 
     def _queue_prefetch_operations(self, *, force=False):
         on_disk_binlog_count = (
-            len(self.ongoing_prefetch_operations) + len(self.state["prefetched_binlogs"]) +
-            len(self.state["applying_binlogs"])
+            len(self.ongoing_prefetch_operations)
+            + len(self.state["prefetched_binlogs"])
+            + len(self.state["applying_binlogs"])
         )
         ongoing_bytes = sum(binlog["file_size"] for binlog in self.ongoing_prefetch_operations.values())
         prefetched_bytes = sum(self.state["prefetched_binlogs"].values())
@@ -1018,8 +1032,11 @@ class RestoreCoordinator(threading.Thread):
             elif found_last_entry or (last_gno is not None and gno > last_gno):
                 if start_position != binlog_position:
                     self.log.warning(
-                        "Basebackup binlog position %r differs from position %r of GTID %s:%r", binlog_position,
-                        start_position, uuid_str, gno
+                        "Basebackup binlog position %r differs from position %r of GTID %s:%r",
+                        binlog_position,
+                        start_position,
+                        uuid_str,
+                        gno,
                     )
                     self.update_state(binlog_position=start_position)
                 break
@@ -1096,8 +1113,10 @@ class RestoreCoordinator(threading.Thread):
             cursor.execute("SHOW SLAVE STATUS")
             final_relay_log_file = cursor.fetchone()["Relay_Log_File"]
             self.log.info(
-                "Flushed relay logs %d times, initial file was %r and current is %r", flush_count, initial_relay_log_file,
-                final_relay_log_file
+                "Flushed relay logs %d times, initial file was %r and current is %r",
+                flush_count,
+                initial_relay_log_file,
+                final_relay_log_file,
             )
 
         self._rename_prefetched_binlogs(binlogs)
@@ -1151,7 +1170,7 @@ class RestoreCoordinator(threading.Thread):
 
         # Try to start SQL thread with an incremental delay
         if self.sql_thread_restart_count > 0:
-            factor = 1.5 ** self.sql_thread_restart_count
+            factor = 1.5**self.sql_thread_restart_count
             iteration_delay = min(self.SQL_THREAD_RESTART_INIT_INTERVAL * factor, self.SQL_THREAD_RESTART_MAX_INTERVAL)
             if self.sql_thread_restart_time is not None:
                 time_passed = time.monotonic() - self.sql_thread_restart_time
@@ -1178,7 +1197,7 @@ class RestoreCoordinator(threading.Thread):
                 self.log.debug("Expected relay log name not reached (%r < %r)", current_index, expected_index)
                 sql_running_states = (
                     "Slave has read all relay log; waiting for more updates",
-                    "Replica has read all relay log; waiting for more updates"
+                    "Replica has read all relay log; waiting for more updates",
                 )
                 if sql_running_state in sql_running_states:
                     # Sometimes if the next file is empty MySQL SQL thread does not update the relay log
@@ -1187,7 +1206,9 @@ class RestoreCoordinator(threading.Thread):
                     if expected_range:
                         self.log.info(
                             "SQL thread has finished executing even though target file has not been reached (%r < %r), "
-                            "target GTID range has been set. Continuing with GTID check", current_index, expected_index
+                            "target GTID range has been set. Continuing with GTID check",
+                            current_index,
+                            expected_index,
                         )
                     else:
                         # We don't quite know if proceeding is safe but there's no other sensible action than
@@ -1195,7 +1216,9 @@ class RestoreCoordinator(threading.Thread):
                         # that should be applied anyway so there should be no data loss.
                         self.log.warning(
                             "SQL thread has finished executing even though target file has not been reached (%r < %r), "
-                            "no GTID range set. Considering complete", current_index, expected_index
+                            "no GTID range set. Considering complete",
+                            current_index,
+                            expected_index,
                         )
                         return True, expected_index
                 else:
@@ -1212,14 +1235,16 @@ class RestoreCoordinator(threading.Thread):
                 range_str = make_gtid_range_string([expected_range])
                 cursor.execute(
                     "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed, @@GLOBAL.gtid_executed AS gtid_executed",
-                    [range_str]
+                    [range_str],
                 )
                 result = cursor.fetchone()
                 found = result["executed"]
                 if found:
                     self.log.info(
-                        "Expected log file %r reached and GTID range %r has been applied: %s", current_file, expected_range,
-                        result["gtid_executed"]
+                        "Expected log file %r reached and GTID range %r has been applied: %s",
+                        current_file,
+                        expected_range,
+                        result["gtid_executed"],
                     )
                     # In some cases SQL thread doesn't change Relay_Log_File value appropriately. Update
                     # the index we return from here to match expected index if all transactions have been
@@ -1280,10 +1305,13 @@ class RestoreCoordinator(threading.Thread):
                     # Range doesn't exist if there were no entries with GTID by the time basebackup creation
                     # completed
                     if gtid_range["start"] == 1:
-                        cursor.execute((
-                            "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
-                            " VALUES (%s, %s, %s)"
-                        ), (gtid_range["server_uuid"], gtid_range["start"], gtid_range["end"]))
+                        cursor.execute(
+                            (
+                                "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
+                                " VALUES (%s, %s, %s)"
+                            ),
+                            (gtid_range["server_uuid"], gtid_range["start"], gtid_range["end"]),
+                        )
                         cursor.execute("COMMIT")
                     else:
                         # This is not expected to happen. We cannot ensure gtid_executed is in sane state if it
@@ -1305,8 +1333,7 @@ class RestoreCoordinator(threading.Thread):
                     )
 
                 cursor.execute(
-                    ("UPDATE mysql.gtid_executed SET interval_end = %s "
-                     "  WHERE source_uuid = %s AND interval_start = %s"),
+                    ("UPDATE mysql.gtid_executed SET interval_end = %s " "  WHERE source_uuid = %s AND interval_start = %s"),
                     (gtid_range["end"], gtid_range["server_uuid"], existing_range["interval_start"]),
                 )
                 cursor.execute("COMMIT")

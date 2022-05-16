@@ -1,12 +1,12 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .append_only_state_manager import AppendOnlyStateManager
+from .state_manager import StateManager
+from .util import build_gtid_ranges, read_gtids_from_log
+
 import logging
 import os
 import threading
 import time
-
-from .append_only_state_manager import AppendOnlyStateManager
-from .state_manager import StateManager
-from .util import build_gtid_ranges, read_gtids_from_log
 
 
 class BinlogScanner:
@@ -75,8 +75,12 @@ class BinlogScanner:
             added.append(binlog_info)
             next_index += 1
             self.log.info(
-                "New binlog %r (%s bytes) in %.2f seconds, found %d GTID ranges: %r", full_name, file_size, duration,
-                len(gtid_ranges), gtid_ranges
+                "New binlog %r (%s bytes) in %.2f seconds, found %d GTID ranges: %r",
+                full_name,
+                file_size,
+                duration,
+                len(gtid_ranges),
+                gtid_ranges,
             )
 
         new_size = 0
@@ -126,7 +130,9 @@ class BinlogScanner:
                     removed_callback(removed)
                 with self.lock:
                     actual_removed = [
-                        binlog for binlog in self.binlogs[:len(removed)] if binlog["local_index"] in self.known_local_indexes
+                        binlog
+                        for binlog in self.binlogs[: len(removed)]
+                        if binlog["local_index"] in self.known_local_indexes
                     ]
                     self.binlog_state.remove_many_from_head(len(actual_removed))
                     for binlog in actual_removed:

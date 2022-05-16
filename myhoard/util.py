@@ -1,22 +1,22 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.hashes import SHA1
+from typing import Tuple
+
 import collections
 import contextlib
 import io
 import json
 import os
+import pymysql
 import re
 import socket
 import struct
 import subprocess
 import tempfile
 import time
-from typing import Tuple
-
-import pymysql
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.hashes import SHA1
 
 DEFAULT_MYSQL_TIMEOUT = 4.0
 ERR_TIMEOUT = 2013
@@ -273,11 +273,13 @@ def add_gtid_ranges_to_executed_set(existing_set, *new_ranges):
     all_ranges = []
     for server_uuid, ranges in existing_set.items():
         for rng in ranges:
-            all_ranges.append({
-                "end": rng[1],
-                "server_uuid": server_uuid,
-                "start": rng[0],
-            })
+            all_ranges.append(
+                {
+                    "end": rng[1],
+                    "server_uuid": server_uuid,
+                    "start": rng[0],
+                }
+            )
     for rng in new_ranges:
         all_ranges.extend(rng)
     return partition_sort_and_combine_gtid_ranges(all_ranges)
@@ -380,7 +382,7 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
         if last_range_start is not None:
             ranges.append([last_range_start, range_start - 1, promotions[last_range_start]])
         last_range_start = range_start
-    ranges.append([last_range_start, 2 ** 31, promotions[last_range_start]])
+    ranges.append([last_range_start, 2**31, promotions[last_range_start]])
 
     binlogs.sort(key=lambda bl: (bl["remote_index"], bl["server_id"]))
     valid_binlogs = []
@@ -397,8 +399,11 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
             # something that is expected to happen sometimes and is handled gracefully here.
             # Log a warning still to make this more visible in logs in case something does go wrong.
             log.warning(
-                "Binlog %s from server %s ignored because server %s is valid for that index: %r", index, binlog["server_id"],
-                server_id, ranges
+                "Binlog %s from server %s ignored because server %s is valid for that index: %r",
+                index,
+                binlog["server_id"],
+                server_id,
+                ranges,
             )
         else:
             adjusted_index = binlog.get("adjusted_remote_index", index)
