@@ -382,7 +382,7 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
         if last_range_start is not None:
             ranges.append([last_range_start, range_start - 1, promotions[last_range_start]])
         last_range_start = range_start
-    ranges.append([last_range_start, 2**31, promotions[last_range_start]])
+    ranges.append([last_range_start, 2 ** 31, promotions[last_range_start]])
 
     binlogs.sort(key=lambda bl: (bl["remote_index"], bl["server_id"]))
     valid_binlogs = []
