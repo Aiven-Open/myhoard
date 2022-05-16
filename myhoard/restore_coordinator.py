@@ -1176,7 +1176,11 @@ class RestoreCoordinator(threading.Thread):
             current_index = int(current_file.rsplit(".", 1)[-1])
             if expected_index is not None and current_index < expected_index:
                 self.log.debug("Expected relay log name not reached (%r < %r)", current_index, expected_index)
-                if sql_running_state == "Slave has read all relay log; waiting for more updates":
+                sql_running_states = (
+                    "Slave has read all relay log; waiting for more updates",
+                    "Replica has read all relay log; waiting for more updates"
+                )
+                if sql_running_state in sql_running_states:
                     # Sometimes if the next file is empty MySQL SQL thread does not update the relay log
                     # file to match the last one. Because the thread has finished doing anything we need
                     # to react to the situation or else restoration will stall indefinitely.
