@@ -21,7 +21,7 @@ from .util import (
     track_rate,
 )
 from contextlib import suppress
-from pghoard.rohmu import errors as rohmu_errors, get_transfer
+from rohmu import errors as rohmu_errors, get_transfer
 from pymysql import OperationalError
 
 import contextlib

@@ -22,10 +22,10 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
-from pghoard.rohmu import errors as rohmu_errors
-from pghoard.rohmu.compressor import CompressionStream
-from pghoard.rohmu.encryptor import EncryptorStream
-from pghoard.rohmu.object_storage.s3 import S3Transfer
+from rohmu import errors as rohmu_errors
+from rohmu.compressor import CompressionStream
+from rohmu.encryptor import EncryptorStream
+from rohmu.object_storage.s3 import S3Transfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError

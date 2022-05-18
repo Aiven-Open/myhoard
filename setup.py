@@ -18,8 +18,8 @@ setup(
     packages=find_packages(exclude=["test"]),
     install_requires=[
         "cryptography",
-        "pghoard",
         "PyMySQL",
+        "rohmu",
     ],
     extras_require={},
     dependency_links=[],

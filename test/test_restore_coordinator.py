@@ -3,7 +3,7 @@ from . import build_statsd_client, DataGenerator, generate_rsa_key_pair, restart
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
-from pghoard.rohmu.object_storage.local import LocalTransfer
+from rohmu.object_storage.local import LocalTransfer
 from unittest.mock import Mock, patch
 
 import myhoard.util as myhoard_util
