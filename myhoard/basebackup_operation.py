@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
 from myhoard.errors import XtraBackupError
-from pghoard.common import increase_pipe_capacity, set_stream_nonblocking
+from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
 
 import base64
 import logging

@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from pghoard.rohmu import get_transfer
-from pghoard.rohmu.compressor import DecompressSink
-from pghoard.rohmu.encryptor import DecryptSink
+from rohmu import get_transfer
+from rohmu.compressor import DecompressSink
+from rohmu.encryptor import DecryptSink
 
 import contextlib
 import logging

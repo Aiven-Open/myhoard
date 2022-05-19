@@ -16,9 +16,9 @@ from .util import (
 )
 from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
-from pghoard.rohmu import get_transfer
-from pghoard.rohmu.compressor import DecompressSink
-from pghoard.rohmu.encryptor import DecryptSink
+from rohmu import get_transfer
+from rohmu.compressor import DecompressSink
+from rohmu.encryptor import DecryptSink
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
