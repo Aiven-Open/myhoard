@@ -21,6 +21,7 @@ BuildRequires:  python3-rohmu
 BuildRequires:  python3-socks
 BuildRequires:  python3-yapf
 BuildRequires:  rpm-build
+BuildRequires:  systemd-rpm-macros
 Requires:       percona-xtrabackup-80 >= 8.0
 Requires:       python3-aiohttp
 Requires:       python3-cryptography >= 0.8
