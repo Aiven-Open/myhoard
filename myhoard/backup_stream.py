@@ -88,6 +88,7 @@ class BackupStream(threading.Thread):
         self,
         *,
         backup_reason,
+        binlog_progress_tracker=None,
         binlogs=None,
         compression=None,
         file_storage_setup_fn,
@@ -128,6 +129,7 @@ class BackupStream(threading.Thread):
         self.mysql_client_params = mysql_client_params
         self.mysql_config_file_name = mysql_config_file_name
         self.mysql_data_directory = mysql_data_directory
+        self.binlog_progress_tracker = binlog_progress_tracker
         # Keep track of remote binlogs so that we can drop binlogs containing only GTID
         # ranges that have already been backed up from our list of pending binlogs
         remote_binlogs = []
@@ -1030,7 +1032,14 @@ class BackupStream(threading.Thread):
                     with open(binlog["full_name"], "rb") as input_file:
                         compress_stream = CompressionStream(input_file, compression_algorithm, compression_level)
                         encrypt_stream = EncryptorStream(compress_stream, self.rsa_public_key_pem)
-                        self.file_storage.store_file_object(index_name, encrypt_stream, metadata=metadata)
+                        self.file_storage.store_file_object(
+                            index_name,
+                            encrypt_stream,
+                            metadata=metadata,
+                            upload_progress_fn=self.binlog_progress_tracker.increment
+                            if self.binlog_progress_tracker
+                            else None,
+                        )
                         self.stats.increase("myhoard.binlog.upload")
                     if self.file_uploaded_callback:
                         self.file_uploaded_callback(
