@@ -36,6 +36,7 @@ import threading
 import time
 
 ERR_CANNOT_CONNECT = 2003
+ERR_BACKUP_IN_PROGRESS = 4085
 
 
 class Controller(threading.Thread):
@@ -1176,14 +1177,7 @@ class Controller(threading.Thread):
                 purge_settings=purge_settings,
                 replication_state=replication_state,
             )
-            if not binlogs_to_purge:
-                # If we only had binlogs for which we legitimately couldn't tell whether purging was safe or not,
-                # or which according to settings should not have been purged, update the could have purged timestamp
-                # that gets reported as metric data point because for inactive server this is expected behavior and
-                # we don't want the metric value to indicate any abnormality in system behavior.
-                if only_inapplicable_binlogs:
-                    last_could_have_purged = time.time()
-            else:
+            if binlogs_to_purge:
                 # PURGE BINARY LOGS TO 'name' does not delete the file identified by 'name' so we need to increase
                 # the index by one to get also the last file removed
                 base_name, index = binlogs_to_purge[-1]["file_name"].rsplit(".", 1)
@@ -1205,9 +1199,19 @@ class Controller(threading.Thread):
                         # Connection refused doesn't matter much - similar to timeout. We'll retry.
                         self.log.warning("Connection refused while purging binary logs: %r", ex)
                         return
+                    if ex.args[0] == ERR_BACKUP_IN_PROGRESS:
+                        self.log.warning("Cannot purge binary logs while a backup lock is held: %r", ex)
+                        return
                     raise
                 last_purge = time.time()
                 last_could_have_purged = last_purge
+            else:
+                # If we only had binlogs for which we legitimately couldn't tell whether purging was safe or not,
+                # or which according to settings should not have been purged, update the could have purged timestamp
+                # that gets reported as metric data point because for inactive server this is expected behavior and
+                # we don't want the metric value to indicate any abnormality in system behavior.
+                if only_inapplicable_binlogs:
+                    last_could_have_purged = time.time()
         finally:
             current_time = time.time()
 
