@@ -123,6 +123,7 @@ class RestoreCoordinator(threading.Thread):
         self.iteration_sleep_long = self.ITERATION_SLEEP_LONG
         self.iteration_sleep_short = self.ITERATION_SLEEP_SHORT
         self.lock = threading.RLock()
+        self.last_completed_restoration = time.monotonic()
         self.log = logging.getLogger(f"{self.__class__.__name__}/{stream_id}")
         self.max_binlog_count = None
         # Maximum bytes worth of binlogs to store on disk simultaneously. Note that this is
@@ -367,6 +368,7 @@ class RestoreCoordinator(threading.Thread):
             self.basebackup_restore_operation = None
 
     def refresh_binlogs(self):
+        self._update_restoration_time_metric()
         self._fetch_more_binlog_infos(force=True)
         if not self.pending_binlogs:
             self.log.info("No binary logs available, marking restore completed immediately")
@@ -614,6 +616,14 @@ class RestoreCoordinator(threading.Thread):
         self._ensure_mysql_server_is_started(with_binlog=True, with_gtids=True)
         self.update_state(phase=self.Phase.completed)
         self.log.info("Backup restoration completed")
+        self._update_restoration_time_metric(reset=True)
+
+    def _update_restoration_time_metric(self, *, reset=False):
+        if reset:
+            self.last_completed_restoration = time.monotonic()
+        self.stats.gauge_int(
+            "myhoard.restore.binlogs_time_since_restoration", int(time.monotonic() - self.last_completed_restoration)
+        )
 
     def read_queue(self):
         try:
@@ -1170,7 +1180,7 @@ class RestoreCoordinator(threading.Thread):
 
         # Try to start SQL thread with an incremental delay
         if self.sql_thread_restart_count > 0:
-            factor = 1.5 ** self.sql_thread_restart_count
+            factor = 1.5**self.sql_thread_restart_count
             iteration_delay = min(self.SQL_THREAD_RESTART_INIT_INTERVAL * factor, self.SQL_THREAD_RESTART_MAX_INTERVAL)
             if self.sql_thread_restart_time is not None:
                 time_passed = time.monotonic() - self.sql_thread_restart_time
