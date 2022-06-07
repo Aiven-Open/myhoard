@@ -11,15 +11,15 @@ rm -f mysql-*.deb
 
 export VERSION_ID="$(lsb_release -r -s)"
 
-export mysql_debs=( 
-mysql-community-client-plugins_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-common_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-community-client-core_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-community-client_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-client_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-community-server-core_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-community-server_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
-mysql-server_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb 
+export mysql_debs=(
+mysql-community-client-plugins_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-common_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-community-client-core_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-community-client_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-client_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-community-server-core_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-community-server_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
+mysql-server_${MYSQL_PACKAGE_VERSION}-1ubuntu${VERSION_ID}_amd64.deb
 )
 
 for package in "${mysql_debs[@]}"; do wget "http://repo.mysql.com/apt/ubuntu/pool/mysql-8.0/m/mysql-community/${package}"; done

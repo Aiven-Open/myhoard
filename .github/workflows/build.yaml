@@ -115,7 +115,7 @@ jobs:
   unittest:
     needs: build-and-push-image
     runs-on: ubuntu-latest
-    container: 
+    container:
       image: ghcr.io/aiven/myhoard-test:${{ github.sha }}
     strategy:
       fail-fast: false
@@ -158,12 +158,12 @@ jobs:
         uses: actions/checkout@v2
 
       - id: install-ubuntu
-        run: > 
-          make 
-          MYSQL_VERSION=${{ matrix.mysql-version }} 
-          PYTHON_VERSION=${{matrix.python-version}} 
-          PERCONA_VERSION=${{matrix.percona-version}} 
-          SET_PYTHON_VERSION="--set-python-version" 
+        run: >
+          make
+          MYSQL_VERSION=${{ matrix.mysql-version }}
+          PYTHON_VERSION=${{matrix.python-version}}
+          PERCONA_VERSION=${{matrix.percona-version}}
+          SET_PYTHON_VERSION="--set-python-version"
           install-ubuntu
 
       - id: unittest

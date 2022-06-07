@@ -762,7 +762,7 @@ run:
 make dockertest-resync
 ```
 
-to re-sync the source code from the host and re-run the tests. 
+to re-sync the source code from the host and re-run the tests.
 
 Take a look at ```.github/workflows/build.yaml``` for possible version values.
 
@@ -855,4 +855,3 @@ MyHoard uses [Percona Xtrabackup](https://www.percona.com) for creating and
 restoring database snapshot excluding binary logs.
 
 Copyright ⓒ 2019 Aiven Ltd.
-   
