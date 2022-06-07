@@ -3,7 +3,9 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
-from typing import Optional, Tuple
+from logging import Logger
+from math import log10
+from typing import List, Optional, Tuple
 
 import collections
 import contextlib
@@ -16,6 +18,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 
 DEFAULT_MYSQL_TIMEOUT = 4.0
@@ -382,7 +385,7 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
         if last_range_start is not None:
             ranges.append([last_range_start, range_start - 1, promotions[last_range_start]])
         last_range_start = range_start
-    ranges.append([last_range_start, 2 ** 31, promotions[last_range_start]])
+    ranges.append([last_range_start, 2**31, promotions[last_range_start]])
 
     binlogs.sort(key=lambda bl: (bl["remote_index"], bl["server_id"]))
     valid_binlogs = []
@@ -469,3 +472,91 @@ def track_rate(*, current, last_recorded, last_recorded_time, metric_name, min_i
             return_value = current
             return_time = now
     return return_value, return_time
+
+
+class RateTracker(threading.Thread):
+    """Monitors rates of change, somewhat similarly to track_rate(), but capable of updating
+    the statsd gauge even when there is no (or little) activity.
+
+    frequency: period in seconds between recalculation of the metric.
+    window: minimum period of time over which the rate is calculated.
+    ndigits: rounding precision used to aggregate consecutive increments.
+    """
+
+    _current_rate: Optional[int]
+    _previous_values: List[Tuple[float, float]]
+    _running: bool
+
+    def __init__(
+        self,
+        *,
+        stats,
+        log: Logger,
+        metric_name,
+        window: float = 30,
+        frequency: Optional[float] = None,
+        ndigits: Optional[int] = None,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.stats = stats
+        self.metric_name = metric_name
+        self.log = log
+        self.window: float = window
+        self.frequency: float = frequency or window / 2
+        self.ndigits = self.calculate_default_ndigits(window) if ndigits is None else ndigits
+        self._previous_values_lock = threading.Lock()
+        self._reset()
+
+    @staticmethod
+    def calculate_default_ndigits(window: float) -> int:
+        """Ensures between 10 and 99 discrete 'bins' will be formed
+        within the nominated window."""
+        # for a window 1-10: ndigits=1)
+        # for a window 10-100: ndigits=0)
+        # for a window 100-1000: ndigits=-1)
+        # etc
+        return int(-log10(window)) + 1
+
+    def _reset(self) -> None:
+        with self._previous_values_lock:
+            self._current_rate = None
+            self._previous_values = []
+            self._running = True
+
+    def increment(self, value: float) -> None:
+        now = round(time.monotonic(), self.ndigits)
+        with self._previous_values_lock:
+            if self._previous_values:
+                previous_timestamp, previous_value = self._previous_values[-1]
+                if previous_timestamp == now:
+                    self._previous_values[-1] = (previous_timestamp, previous_value + value)
+                    return
+
+            self._previous_values.append((now, value))
+
+            # delete old values until the oldest value is "just" over 'window' seconds ago
+            while len(self._previous_values) > 1 and self._previous_values[1][0] + self.window < now:
+                self._previous_values.pop(0)
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        while self._running:
+            try:
+                time.sleep(self.frequency)
+                self.increment(0)
+                with self._previous_values_lock:
+                    old_time = self._previous_values[0][0]
+                    if old_time + self.window <= time.monotonic():
+                        total_value = sum(previous_value[1] for previous_value in self._previous_values)
+                        current_time = self._previous_values[-1][0]
+                        new_rate = int(total_value / (current_time - old_time))
+                        if new_rate != self._current_rate:
+                            self._current_rate = new_rate
+                            self.stats.gauge_int(self.metric_name, self._current_rate)
+            except Exception as exception:  # pylint: disable=broad-except
+                self.log.exception(f"Failed to update transfer rate {self.metric_name!r}")
+                self.stats.unexpected_exception(ex=exception, where="RateTracker.run")
+                self.stats.increase("myhoard.ratetracker.errors")
+                self._reset()

@@ -21,8 +21,8 @@ from .util import (
     track_rate,
 )
 from contextlib import suppress
-from rohmu import errors as rohmu_errors, get_transfer
 from pymysql import OperationalError
+from rohmu import errors as rohmu_errors, get_transfer
 
 import contextlib
 import enum
@@ -1170,7 +1170,7 @@ class RestoreCoordinator(threading.Thread):
 
         # Try to start SQL thread with an incremental delay
         if self.sql_thread_restart_count > 0:
-            factor = 1.5 ** self.sql_thread_restart_count
+            factor = 1.5**self.sql_thread_restart_count
             iteration_delay = min(self.SQL_THREAD_RESTART_INIT_INTERVAL * factor, self.SQL_THREAD_RESTART_MAX_INTERVAL)
             if self.sql_thread_restart_time is not None:
                 time_passed = time.monotonic() - self.sql_thread_restart_time

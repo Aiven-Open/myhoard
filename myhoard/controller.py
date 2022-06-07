@@ -12,6 +12,7 @@ from .util import (
     make_gtid_range_string,
     mysql_cursor,
     parse_fs_metadata,
+    RateTracker,
     relay_log_name,
 )
 from http.client import RemoteDisconnected
@@ -61,6 +62,7 @@ class Controller(threading.Thread):
     # We don't expect anyone but the single active MyHoard to make any changes to backups but we still want
     # to sometimes check there aren't some unexpected changes. The "sometimes" can be pretty infrequently
     BACKUP_REFRESH_ACTIVE_MULTIPLIER = 10.0
+    BINLOG_TRANSFER_RATE_CALCULATION_WINDOW = 30.0
     ITERATION_SLEEP = 1.0
 
     def __init__(
@@ -83,12 +85,23 @@ class Controller(threading.Thread):
         temp_dir,
     ):
         super().__init__()
+        self.log = logging.getLogger(self.__class__.__name__)
         self.backup_refresh_interval_base = self.BACKUP_REFRESH_INTERVAL_BASE
         self.backup_settings = backup_settings
         self.backup_sites = backup_sites
         self.backup_streams = []
         self.backup_streams_initialized = False
         self.binlog_not_caught_log_counter = 0
+        self.binlog_progress_tracker = (
+            RateTracker(
+                stats=stats,
+                log=self.log,
+                metric_name="myhoard.backup_stream.binlog_upload_rate",
+                window=self.BINLOG_TRANSFER_RATE_CALCULATION_WINDOW,
+            )
+            if stats
+            else None
+        )
         self.binlog_purge_settings = binlog_purge_settings
         scanner_state_file = os.path.join(state_dir, "binlog_scanner_state.json")
         self.binlog_scanner = BinlogScanner(
@@ -100,7 +113,6 @@ class Controller(threading.Thread):
         self.is_running = True
         self.iteration_sleep = self.ITERATION_SLEEP
         self.lock = threading.RLock()
-        self.log = logging.getLogger(self.__class__.__name__)
         self.max_binlog_bytes = None
         self.mysql_client_params = mysql_client_params
         self.mysql_config_file_name = mysql_config_file_name
@@ -239,6 +251,8 @@ class Controller(threading.Thread):
     def run(self):
         self.log.info("Controller running")
         consecutive_unexpected_errors = 0
+        if self.binlog_progress_tracker:
+            self.binlog_progress_tracker.start()
         while self.is_running:
             try:
                 if self.mode == self.Mode.idle:
@@ -291,6 +305,8 @@ class Controller(threading.Thread):
             self.restore_coordinator.stop()
         for stream in self.backup_streams:
             stream.stop()
+        if self.binlog_progress_tracker:
+            self.binlog_progress_tracker.stop()
         self.log.info("Controller stopped")
 
     def switch_to_active_mode(self, *, force=False):
@@ -595,6 +611,7 @@ class Controller(threading.Thread):
         # data stored in local state file if available or in backup file storage if local state is not available
         return BackupStream(
             backup_reason=None,
+            binlog_progress_tracker=self.binlog_progress_tracker,
             compression=backup_site.get("compression"),
             file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
             file_uploaded_callback=self._binlog_uploaded,
@@ -1441,6 +1458,7 @@ class Controller(threading.Thread):
         site_id, backup_site = self._get_upload_backup_site()
         stream = BackupStream(
             backup_reason=backup_reason,
+            binlog_progress_tracker=self.binlog_progress_tracker,
             binlogs=self.binlog_scanner.binlogs,
             compression=backup_site.get("compression"),
             file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
