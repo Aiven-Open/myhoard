@@ -7,6 +7,7 @@ httplib2
 isort==5.10.1
 mock
 mypy
+pre-commit
 pylint-quotes
 pylint>=2.4.3
 PySocks
