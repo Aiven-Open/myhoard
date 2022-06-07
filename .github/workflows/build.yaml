@@ -47,7 +47,7 @@ jobs:
     strategy:
       matrix:
         # only use one version for the lint step
-        python-version: [3.6]
+        python-version: ["3.10"]
     env:
       MYSQL_VERSION: mysql-8.0
 
@@ -91,25 +91,11 @@ jobs:
           pip install -r requirements.dev.txt
           pip install -e .
 
-      - id: fmt
-        continue-on-error: true
-        run: |
-          make fmt
-          if [ $(git diff --name-only --diff-filter=ACMR | wc -l ) != 0 ]; then
-          echo "Reformatting failed! Please run make fmt on your commits and resubmit!" 1>&2 ;
-          git diff ;
-          exit 1 ;
-          fi
-
-      - id: typecheck
-        continue-on-error: true
-        run: make typecheck
+      - id: pre-commit
+        run: pre-commit run --all
 
       - id: copyright
         run: make copyright
-
-      - id: lint
-        run: make lint
 
 
   unittest:

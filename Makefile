@@ -16,22 +16,6 @@ MYSQL_SERVER_PACKAGE ?= mysql-server >= 8.0
 unittest: version
 	$(PYTHON) -m pytest -vv test/
 
-.PHONY: typecheck
-typecheck: version
-	$(PYTHON) -m mypy --show-absolute-path $(PYTHON_SOURCE_DIRS)
-
-.PHONY: lint
-lint: version
-	$(PYTHON) -m pylint --rcfile .pylintrc $(PYTHON_SOURCE_DIRS)
-	$(PYTHON) -m flake8 --config .flake8 $(PYTHON_SOURCE_DIRS)
-
-.PHONY: fmt
-fmt: version
-	# Python files are skipped because pylint already does the job
-	./fix_newlines.py --exclude test/binlog --exclude '*.py'
-	isort $(PYTHON_SOURCE_DIRS)
-	black $(PYTHON_SOURCE_DIRS)
-
 .PHONY: copyright
 copyright:
 	grep -EL "Copyright \(c\) 20.* Aiven" $(shell git ls-files "*.py" | grep -v __init__.py)
