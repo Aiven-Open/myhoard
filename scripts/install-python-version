@@ -11,6 +11,3 @@ if [[ "$2" == "--set-python-version" ]]
 then
   echo "PYTHON_VERSION=${PYTHON_VERSION}" >> /etc/PYTHON_VERSION
 fi
-
-
-
