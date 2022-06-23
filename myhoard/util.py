@@ -3,7 +3,6 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
-from logging import Logger
 from math import log10
 from typing import List, Optional, Tuple
 
@@ -11,6 +10,7 @@ import collections
 import contextlib
 import io
 import json
+import logging
 import os
 import pymysql
 import re
@@ -23,6 +23,8 @@ import time
 
 DEFAULT_MYSQL_TIMEOUT = 4.0
 ERR_TIMEOUT = 2013
+
+logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -335,23 +337,33 @@ def mysql_connection(*, ca_file=None, db="mysql", host="127.0.0.1", password, po
     ssl = None
     if ca_file:
         ssl = {"ca": ca_file}
-    connection = pymysql.connect(
-        charset="utf8mb4",
-        connect_timeout=timeout,
-        cursorclass=pymysql.cursors.DictCursor,
-        db=db,
-        host=host,
-        password=password,
-        read_timeout=timeout,
-        port=port,
-        ssl=ssl,
-        user=user,
-        write_timeout=timeout,
-    )
-    try:
-        yield connection
-    finally:
-        connection.close()
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            connection = pymysql.connect(
+                charset="utf8mb4",
+                connect_timeout=timeout,
+                cursorclass=pymysql.cursors.DictCursor,
+                db=db,
+                host=host,
+                password=password,
+                read_timeout=timeout,
+                port=port,
+                ssl=ssl,
+                user=user,
+                write_timeout=timeout,
+            )
+        except pymysql.err.OperationalError as e:
+            if attempt == max_attempts:
+                raise
+            logger.warning("Could not connect to mysql at %s:%s (will retry): %s", host, port, e)
+            time.sleep(1)
+        else:
+            try:
+                yield connection
+                return
+            finally:
+                connection.close()
 
 
 @contextlib.contextmanager
@@ -491,7 +503,7 @@ class RateTracker(threading.Thread):
         self,
         *,
         stats,
-        log: Logger,
+        log: logging.Logger,
         metric_name,
         window: float = 30,
         frequency: Optional[float] = None,
