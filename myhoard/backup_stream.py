@@ -258,6 +258,19 @@ class BackupStream(threading.Thread):
             return 0
 
     @property
+    def binlog_upload_delay(self) -> int:
+        """Returns the number of seconds since the oldest pending binlog was written."""
+        now = time.time()
+        oldest_mtime = now
+        for binlog in self.state["pending_binlogs"]:
+            try:
+                oldest_mtime = min(oldest_mtime, os.stat(binlog["full_name"]).st_mtime)
+            except FileNotFoundError:
+                pass  # binlog was just purged, so ignore it.
+
+        return int(now - oldest_mtime)
+
+    @property
     def created_at(self):
         return self.state["created_at"]
 

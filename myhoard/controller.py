@@ -1410,6 +1410,11 @@ class Controller(threading.Thread):
         self.stats.gauge_float("myhoard.binlog_upload_age_min", min(binlog_upload_ages))
         self.stats.gauge_float("myhoard.binlog_upload_age_max", max(binlog_upload_ages))
 
+        # Send additional info about how long 'complete' binlog files have been waiting to be uploaded
+        binlog_upload_delays = [backup_stream.binlog_upload_delay for backup_stream in backup_streams]
+        self.stats.gauge_int("myhoard.binlog_upload_delay_min", min(binlog_upload_delays))
+        self.stats.gauge_int("myhoard.binlog_upload_delay_max", max(binlog_upload_delays))
+
     def _set_uploaded_binlog_references(self):
         references = self.state["uploaded_binlogs"]
         for reference in references:
