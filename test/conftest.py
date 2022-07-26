@@ -10,11 +10,12 @@ from . import (
 )
 from myhoard.util import atomic_create_file, change_master_to, mysql_cursor, wait_for_port
 from myhoard.web_server import WebServer
-from typing import Optional
+from typing import Callable, Iterator, Optional
 
 import contextlib
 import logging
 import os
+import py.path
 import pytest
 import shutil
 import signal
@@ -38,8 +39,11 @@ handler.setFormatter(formatter)
 root.addHandler(handler)
 
 
+PyPathFactory = Callable[[], py.path.local]
+
+
 @pytest.fixture(scope="session", name="session_tmpdir")
-def fixture_session_tmpdir(tmpdir_factory):
+def fixture_session_tmpdir(tmpdir_factory) -> Iterator[PyPathFactory]:
     """Create a temporary directory object that's usable in the session scope.  The returned value is a
     function which creates a new temporary directory which will be automatically cleaned up upon exit."""
     tmpdir_obj = tmpdir_factory.mktemp("myhoard.session.tmpdr.")
