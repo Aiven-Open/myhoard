@@ -1140,7 +1140,10 @@ class Controller(threading.Thread):
         self._build_backup_stream(backup).remove()
         with self.lock:
             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
-            self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
+            self.state_manager.update_state(
+                backup=[a_backup for a_backup in self.state["backups"] if a_backup["stream_id"] != backup["stream_id"]],
+                owned_stream_ids=owned_stream_ids,
+            )
 
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings

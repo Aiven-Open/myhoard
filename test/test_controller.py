@@ -1,10 +1,11 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_controller, DataGenerator, get_mysql_config_options, MySQLConfig, wait_for_condition, while_asserts
+from .conftest import PyPathFactory
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges
-from typing import List
+from typing import Any, List, Mapping
 from unittest.mock import MagicMock
 
 import contextlib
@@ -263,6 +264,30 @@ def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_
     controller._refresh_backups_list()  # pylint: disable=protected-access
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
+
+
+def test_purged_backup_is_immediately_removed_from_local_backups(
+    default_backup_site: Mapping[str, Any], mysql_empty: MySQLConfig, session_tmpdir: PyPathFactory
+) -> None:
+    controller = build_controller(
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.backup_settings["backup_count_min"] = 0
+    controller.state["backups"] = [
+        {
+            "basebackup_info": {},
+            "closed_at": 2,
+            "completed_at": 1,
+            "recovery_site": False,
+            "stream_id": "1234",
+            "resumable": False,
+            "site": "default",
+        }
+    ]
+    controller._purge_old_backups()  # pylint: disable=protected-access
+    assert controller.state["backups"] == []
 
 
 def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_empty, session_tmpdir):
