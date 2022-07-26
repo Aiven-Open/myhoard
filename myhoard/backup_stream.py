@@ -25,6 +25,7 @@ from httplib2 import ServerNotFoundError
 from rohmu import errors as rohmu_errors
 from rohmu.compressor import CompressionStream
 from rohmu.encryptor import EncryptorStream
+from rohmu.errors import FileNotFoundFromStorageError
 from rohmu.object_storage.s3 import S3Transfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
@@ -419,7 +420,8 @@ class BackupStream(threading.Thread):
         self.delete_state()
         try:
             file_storage.delete_tree(f"{self.site}/{self.stream_id}")
-        except FileNotFoundError:
+        # rohmu can raise both errors for local storage and none of them for remote storages
+        except (FileNotFoundError, FileNotFoundFromStorageError):
             pass
         except Exception as ex:  # pylint: disable=broad-except
             self.log.error("Removing remote backup failed: %r", ex)
