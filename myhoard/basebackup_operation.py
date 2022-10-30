@@ -117,7 +117,7 @@ class BasebackupOperation:
                         self._process_input_output()
 
         self.data_directory_size_end, self.data_directory_filtered_size = self._get_data_directory_size()
-        self._update_progress()
+        self._update_progress(estimated_progress=100)
 
     def _get_data_directory_size(self):
         total_filtered_size = 0
@@ -279,11 +279,13 @@ class BasebackupOperation:
             self.log.info("Transaction log lsn info: %r", self.lsn_info)
         return match
 
-    def _update_progress(self, *, last_file_name=None, last_file_size=None):
+    def _update_progress(self, *, last_file_name=None, last_file_size=None, estimated_progress=None):
         estimated_total_bytes = self.data_directory_filtered_size
-        estimated_progress = 0
-        if estimated_total_bytes > 0:
-            estimated_progress = min(self.processed_original_bytes / estimated_total_bytes * 100, 100)
+
+        if estimated_progress is None:
+            estimated_progress = 0
+            if estimated_total_bytes > 0:
+                estimated_progress = min(self.processed_original_bytes / estimated_total_bytes * 100, 100)
 
         self.log.info(
             "Processed %s bytes of estimated %s total bytes, progress at %.2f%%",
