@@ -736,7 +736,8 @@ Current phase of backup restoration. Possible options are these:
 Make sure docker is installed (podman currently untested) and just run:
 
 ```
-make PYTHON_VERSION=3.8 PERCONA_VERSION=8.0.26-18-1.focal MYSQL_VERSION=8.0.26 build-setup-specific-image
+make PYTHON_VERSION=3.10 PERCONA_VERSION=8.0.29-22-1.bullseye MYSQL_VERSION=8.0.26 build-setup-specific-image
+
 make dockertest
 ```
 
@@ -765,9 +766,16 @@ Running native tests must NOT be performed as root (requires additional options 
 
 Run:
 
-```
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo make PYTHON_VERSION=3.8 PERCONA_VERSION=8.0.26-18-1.focal MYSQL_VERSION=8.0.26 install-ubuntu
+```bash
+sudo apt-get install -y lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc
+make clean
+sudo scripts/remove-default-mysql
+sudo scripts/install-mysql-packages ${MYSQL_VERSION}
+sudo scripts/setup-percona-repo
+sudo scripts/install-percona-package ${PERCONA_VERSION}
+scripts/install-python-deps
+sudo scripts/create-user
+RUN python -m pip install -e .
 ```
 
 this command will install all the required package version. Please note: the state of your environment
