@@ -1,4 +1,4 @@
-name: Build MyHoard
+name: Unit tests
 
 permissions: read-all
 
@@ -11,37 +11,6 @@ on:
   pull_request:
 
 jobs:
-  build-and-push-image:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Log in to the Container registry
-        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
-        with:
-          images: ghcr.io/aiven/myhoard-test
-          tags: type=sha,format=long,prefix=
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@ad44023a93711e3deb337508980b4b5e9bcdc5dc
-        with:
-          context: build-image
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-
   lint:
     runs-on: ubuntu-latest
     strategy:
@@ -52,14 +21,17 @@ jobs:
       MYSQL_VERSION: mysql-8.0
 
     steps:
-
       - id: checkout-code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           persist-credentials: false
-
+      - name: Cache APT Packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.1.2
+        with:
+          version: 1.0
+          packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl
       - id: prepare-python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -97,12 +69,8 @@ jobs:
       - id: copyright
         run: make copyright
 
-
   unittest:
-    needs: build-and-push-image
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/aiven/myhoard-test:${{ github.sha }}
     strategy:
       fail-fast: false
       # this isn't a standard matrix because some version testing doesn't make sense
@@ -139,24 +107,35 @@ jobs:
             python-version: "3.9"
 
     steps:
-
       - id: checkout-code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
+      - name: Cache APT Packages
+        uses: awalsh128/cache-apt-pkgs-action@v1.1.2
+        with:
+          version: 1.0
+          packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc
+      - id: prepare-python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            **/requirements.txt
+            **/requirements.dev.txt
 
-      - id: install-ubuntu
-        run: >
-          make
-          MYSQL_VERSION=${{ matrix.mysql-version }}
-          PYTHON_VERSION=${{matrix.python-version}}
-          PERCONA_VERSION=${{matrix.percona-version}}
-          SET_PYTHON_VERSION="--set-python-version"
-          install-ubuntu
+      - run: make clean
+      - run: sudo scripts/remove-default-mysql
+      - run: sudo scripts/install-mysql-packages ${{matrix.mysql-version}}
+      - run: sudo scripts/setup-percona-repo
+      - run: sudo scripts/install-percona-package ${{matrix.percona-version}}
+      - run: scripts/install-python-deps
+      - run: python -m pip install -e .
 
       - id: unittest
         run: |
-          sudo -u testme make PYTHON=python${{matrix.python-version}} coverage
+          make coverage
 
       - id: upload-codecov
-        uses: codecov/codecov-action@v2
+        uses: codecov/codecov-action@v3
         with:
           verbose: true

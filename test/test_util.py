@@ -271,7 +271,7 @@ class TestDetectRunningProcessId:
     @pytest.fixture
     def cmd_str(self):
         cmd = [
-            "/usr/bin/sleep",
+            "/bin/sleep",
             str(random.randint(1000, 5000)),
             str(random.randint(1000, 5000)),
             str(random.randint(1000, 5000)),

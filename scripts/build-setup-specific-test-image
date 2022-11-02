@@ -1,23 +1,29 @@
-#!/bin/bash -e
-pushd build-image
-docker build -t myhoard-test .
-popd
-
+#!/bin/bash -ex
 [ -n "${PYTHON_VERSION}" ] || { echo "outside env must define PYTHON_VERSION"; exit 1; }
 [ -n "${MYSQL_VERSION}" ] || { echo "outside env must define MYSQL_VERSION"; exit 1; }
 [ -n "${PERCONA_VERSION}" ] || { echo "outside env must define PERCONA_VERSION"; exit 1; }
 
 trap "rm -f Dockerfile.myhoard-test-temp" EXIT
 cat > Dockerfile.myhoard-test-temp <<EOM
-FROM myhoard-test
-ENV PYTHON_VERSION=${PYTHON_VERSION}
+FROM python:${PYTHON_VERSION}-bullseye
+RUN apt-get update && apt-get install -y \
+    sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
+  && rm -rf /var/lib/apt/lists/*
 ENV MYSQL_VERSION=${MYSQL_VERSION}
 ENV PERCONA_VERSION=${PERCONA_VERSION}
-ENV SET_PYTHON_VERSION="--set-python-version"
-ADD . /src
+ADD scripts /src/scripts
+ADD Makefile /src/
 WORKDIR /src
 RUN make clean
-RUN make -e install-ubuntu
+RUN sudo scripts/remove-default-mysql
+RUN sudo scripts/install-mysql-packages ${MYSQL_VERSION}
+RUN sudo scripts/setup-percona-repo
+RUN sudo scripts/install-percona-package ${PERCONA_VERSION}
+ADD requirement* /src/
+RUN scripts/install-python-deps
+RUN sudo scripts/create-user
+ADD . /src
+RUN python -m pip install -e .
 EOM
 
 docker build -t myhoard-test-temp -f Dockerfile.myhoard-test-temp .
