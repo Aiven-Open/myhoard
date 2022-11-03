@@ -463,6 +463,7 @@ class BackupStream(threading.Thread):
                     if self.state["closed_info"] and self.active_phase != self.ActivePhase.none:
                         self._handle_pending_mark_as_closed()
                     if self.active_phase == self.ActivePhase.basebackup:
+                        self.stats.gauge_int("myhoard.backup_stream.basebackup_requested", 1)
                         self._take_basebackup()
                     if self.is_streaming_binlogs():
                         self._upload_binlogs()
