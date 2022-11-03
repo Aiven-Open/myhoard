@@ -1,5 +1,3 @@
-short_ver = $(shell git describe --abbrev=0)
-long_ver = $(shell git describe --long 2>/dev/null || echo $(short_ver)-0-unknown-g`git describe --always`)
 generated = myhoard/version.py
 
 all: $(generated)
@@ -22,8 +20,9 @@ copyright:
 
 .PHONY: coverage
 coverage: version
-	$(PYTHON) -m pytest $(PYTEST_ARG) --cov-report term-missing --cov-branch \
-		--cov-report xml:coverage.xml --cov myhoard test/
+	[ -d "$(PYTEST_TMP)" ] || mkdir -p "$(PYTEST_TMP)"
+	$(PYTHON) -m pytest $(PYTEST_ARG) --cov-report term-missing --cov-branch --cov-report xml:coverage.xml --cov myhoard test/
+
 
 .PHONY: clean
 clean:
@@ -44,8 +43,8 @@ rpm: $(generated)
 	rpmbuild -bb myhoard.spec \
 		--define '_topdir $(PWD)/rpm' \
 		--define '_sourcedir $(CURDIR)' \
-		--define 'major_version $(short_ver)' \
-		--define 'minor_version $(subst -,.,$(subst $(short_ver)-,,$(long_ver)))'
+		--define 'major_version $(git describe --abbrev=0)' \
+		--define 'minor_version $(subst -,.,$(subst $(git describe --abbrev=0)-,,$(git describe --long)))'
 	$(RM) myhoard-rpm-src.tar
 
 .PHONY: build-dep-fedora
@@ -56,22 +55,13 @@ build-dep-fedora:
 		--exclude=mariadb-server "$(MYSQL_SERVER_PACKAGE)"
 
 
-.PHONY: install-ubuntu
-install-ubuntu:
-	scripts/install-python-version $(PYTHON_VERSION) $(SET_PYTHON_VERSION)
-	sudo scripts/remove-default-mysql
-	sudo scripts/install-mysql-packages $(MYSQL_VERSION)
-	sudo scripts/setup-percona-repo
-	sudo scripts/install-percona-package $(PERCONA_VERSION)
-	sudo scripts/install-python-deps
-	sudo scripts/create-user
 
 # local development, don't use in CI
 # prerequisite
 .PHONY: build-setup-specific-image
 build-setup-specific-image:
 	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
-		SET_PYTHON_VERSION="--set-python-version" scripts/build-setup-specific-test-image
+		scripts/build-setup-specific-test-image
 
 .PHONY: dockertest
 dockertest:

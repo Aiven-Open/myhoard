@@ -1,7 +1,7 @@
 Name:           myhoard
 Version:        %{major_version}
 Release:        %{minor_version}%{?dist}
-Url:            http://github.com/aiven/myhoard
+Url:            https://github.com/aiven/myhoard
 Summary:        MySQL streaming backup service
 BuildArch:      noarch
 License:        ASL 2.0
