@@ -1333,7 +1333,7 @@ class RestoreCoordinator(threading.Thread):
                     )
 
                 cursor.execute(
-                    ("UPDATE mysql.gtid_executed SET interval_end = %s " "  WHERE source_uuid = %s AND interval_start = %s"),
+                    ("UPDATE mysql.gtid_executed SET interval_end = %s WHERE source_uuid = %s AND interval_start = %s"),
                     (gtid_range["end"], gtid_range["server_uuid"], existing_range["interval_start"]),
                 )
                 cursor.execute("COMMIT")

@@ -353,7 +353,7 @@ class Controller(threading.Thread):
                 return
             elif self.mode in {self.Mode.active, self.Mode.promote}:
                 # Master (or almost master) cannot become a standby
-                raise ValueError(f"Switch from {self.mode} to observe mode is not allowed")
+                raise ValueError(f"Switch from {self.mode.value} to observe mode is not allowed")
             elif self.mode == self.Mode.restore:
                 self._fail_if_restore_is_not_complete()
                 self._fail_if_not_read_only()
