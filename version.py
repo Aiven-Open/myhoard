@@ -1,26 +1,37 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import imp
+from __future__ import annotations
+
+import importlib.util
 import os
 import subprocess
+import sys
+
+PROJECT_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
-def save_version(new_ver, old_ver, version_file):
-    if not new_ver:
+def save_version(new_version: str | None, old_version: str | None, version_file_path: str) -> bool:
+    if not new_version:
         return False
-    version_file = os.path.join(os.path.dirname(__file__), version_file)
-    if not old_ver or new_ver != old_ver:
-        with open(version_file, "w") as fp:
-            fp.write("__version__ = '{}'\n".format(new_ver))
+    if not old_version or new_version != old_version:
+        with open(version_file_path, "w") as fp:
+            fp.write(f'__version__ = "{new_version}"\n')
     return True
 
 
-def get_project_version(version_file):
-    version_file = os.path.join(os.path.dirname(os.path.realpath(__file__)), version_file)
+def get_project_version(version_file_relpath: str) -> str:
+    version_file_abspath = os.path.join(PROJECT_DIR, version_file_relpath)
+    file_version = None
     try:
-        module = imp.load_source("verfile", version_file)
-        file_ver = module.__version__
+        module_spec = importlib.util.spec_from_file_location("verfile", location=version_file_abspath)
+        if module_spec:
+            module = importlib.util.module_from_spec(module_spec)
+            if module_spec.loader:
+                module_spec.loader.exec_module(module)
+                file_version = module.__version__
+        else:
+            print(f"Could not load module spec from version file location: {version_file_abspath!r}")
     except IOError:
-        file_ver = None
+        print(f"Could not load version module from spec (file location: {version_file_abspath!r})")
 
     os.chdir(os.path.dirname(__file__) or ".")
     try:
@@ -28,23 +39,27 @@ def get_project_version(version_file):
     except (OSError, subprocess.CalledProcessError):
         pass
     else:
-        git_ver = git_out.splitlines()[0].strip().decode("utf-8")
-        if "." not in git_ver:
-            git_ver = "0.0.1-0-unknown-{}".format(git_ver)
-        if save_version(git_ver, file_ver, version_file):
-            return git_ver
+        git_version = git_out.splitlines()[0].strip().decode("utf-8")
+        if "." not in git_version:
+            git_version = f"0.0.1-0-unknown-{git_version}"
+        if save_version(git_version, file_version, version_file_abspath):
+            print(f"Version resolved from git: {git_version}")
+            return git_version
 
-    short_ver = subprocess.run(["git", "describe", "--abbrev=0"], check=True, text=True, capture_output=True).stderr
-    if save_version(short_ver, file_ver, version_file):
-        return short_ver
+    short_version = subprocess.run(["git", "describe", "--abbrev=0"], check=True, text=True, capture_output=True).stderr
+    if save_version(short_version, file_version, version_file_abspath):
+        print(f"Short version resolved from git abbrev: {short_version}")
+        return short_version
 
-    if not file_ver:
-        raise Exception("version not available from git or from file {!r}".format(version_file))
-
-    return file_ver
+    if not file_version:
+        raise Exception(f"version not available from git or from file {version_file_abspath!r}")
+    else:
+        print(f"Version resolved from file: {file_version}")
+    return file_version
 
 
 if __name__ == "__main__":
-    import sys
-
+    if len(sys.argv) < 2:
+        print("Usage: python3 version.py <filename>")
+        sys.exit(1)
     get_project_version(sys.argv[1])
