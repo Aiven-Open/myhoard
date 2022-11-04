@@ -26,7 +26,7 @@ Requires:       percona-xtrabackup-80 >= 8.0
 Requires:       python3-aiohttp
 Requires:       python3-cryptography >= 0.8
 Requires:       python3-PyMySQL >= 0.9.2
-Requires:       python3-rohmu >= 1.0.2
+Requires:       python3-rohmu >= 1.0.7
 Requires:       systemd
 
 %undefine _missing_build_ids_terminate_build
