@@ -22,3 +22,4 @@ __pycache__/
 Dockerfile.myhoard-test-temp
 .vscode/
 myhoard/version.py
+.hypothesis/
