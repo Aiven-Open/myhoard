@@ -1,3 +1,5 @@
+short_ver = $(shell git describe --abbrev=0)
+long_ver = $(shell git describe --long 2>/dev/null || echo $(short_ver)-0-unknown-g`git describe --always`)
 generated = myhoard/version.py
 
 all: $(generated)
@@ -43,8 +45,8 @@ rpm: $(generated)
 	rpmbuild -bb myhoard.spec \
 		--define '_topdir $(PWD)/rpm' \
 		--define '_sourcedir $(CURDIR)' \
-		--define 'major_version $(git describe --abbrev=0)' \
-		--define 'minor_version $(subst -,.,$(subst $(git describe --abbrev=0)-,,$(git describe --long)))'
+		--define 'major_version $(short_ver)' \
+		--define 'minor_version $(subst -,.,$(subst $(short_ver)-,,$(long_ver)))'
 	$(RM) myhoard-rpm-src.tar
 
 .PHONY: build-dep-fedora
