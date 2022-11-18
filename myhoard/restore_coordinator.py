@@ -1089,7 +1089,11 @@ class RestoreCoordinator(threading.Thread):
         # Should already be stopped but just to make sure
         cursor.execute("STOP SLAVE")
         cursor.execute("SHOW SLAVE STATUS")
-        initial_relay_log_file = cursor.fetchone()["Relay_Log_File"]
+        slave_status = cursor.fetchone()
+        if not slave_status:
+            return
+
+        initial_relay_log_file = slave_status["Relay_Log_File"]
 
         # Technically we'd want one fewer relay log file here but the server seems to have some
         # caching logic related to the current relay log and we need to make sure currently active
