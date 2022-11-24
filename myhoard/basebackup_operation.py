@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
 from myhoard.errors import XtraBackupError
+from myhoard.util import get_tables_to_optimise, mysql_cursor
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
 
 import base64
@@ -48,6 +49,7 @@ class BasebackupOperation:
         self.data_directory_filtered_size = None
         self.data_directory_size_end = None
         self.data_directory_size_start = None
+        self._error_lines: list[str] = []
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
         self.log = logging.getLogger(self.__class__.__name__)
@@ -108,7 +110,7 @@ class BasebackupOperation:
                     "--target-dir",
                     self.temp_dir,
                 ]
-
+                self._error_lines = []
                 with self.stats.timing_manager("myhoard.basebackup.xtrabackup_backup"):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -118,6 +120,14 @@ class BasebackupOperation:
 
         self.data_directory_size_end, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress(estimated_progress=100)
+
+    def _process_error_lines(self):
+        with mysql_cursor(**self.mysql_client_params) as cursor:
+            for table_to_optimise in get_tables_to_optimise(self._error_lines, log=self.log):
+                sql = f"OPTIMIZE TABLE {table_to_optimise};"
+                cursor.execute(sql)
+                self.stats.increase(metric="myhoard.basebackup.optimize_table")
+                cursor.execute("COMMIT;")
 
     def _get_data_directory_size(self):
         total_filtered_size = 0
@@ -192,6 +202,7 @@ class BasebackupOperation:
             with suppress(Exception):
                 self.proc.stderr.close()
             self.log.info("Joining output reader thread...")
+            self._process_error_lines()
             # We've closed stdout so the thread is bound to exit without any other calls
             if reader_thread:
                 reader_thread.join()
@@ -226,6 +237,7 @@ class BasebackupOperation:
         ):
             if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
                 self.log.error("xtrabackup: %r", line)
+                self._error_lines.append(line)
             else:
                 self.log.info("xtrabackup: %r", line)
 
