@@ -456,6 +456,15 @@ def relay_log_name(*, prefix, index, full_path=True):
     return name
 
 
+def get_mysql_version(cursor: pymysql.cursors.DictCursor) -> Optional[str]:
+    cursor.execute("SELECT @@GLOBAL.version AS mysql_version")
+    row = cursor.fetchone()
+    if row is not None and "mysql_version" in row:
+        return row["mysql_version"]
+    else:
+        return None
+
+
 def track_rate(*, current, last_recorded, last_recorded_time, metric_name, min_increase=1_000_000, stats):
     """Calculates rate of change given current value and previously handled value and time. If there is
     a relevant change (as defined by min_increase) and some time has passed, the current rate of change
