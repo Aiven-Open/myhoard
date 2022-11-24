@@ -1,7 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
+from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.errors import XtraBackupError
+from myhoard.util import get_mysql_version, mysql_cursor
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
+from typing import Optional
 
 import base64
 import logging
@@ -73,6 +76,7 @@ class BasebackupOperation:
         self.abort_reason = None
         self.data_directory_size_start, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress()
+        self._optimize_tables()
 
         # Write encryption key to file to avoid having it on command line. NamedTemporaryFile has mode 0600
         with tempfile.NamedTemporaryFile(
@@ -118,6 +122,45 @@ class BasebackupOperation:
 
         self.data_directory_size_end, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress(estimated_progress=100)
+
+    def _optimize_tables(self) -> None:
+        with mysql_cursor(**self.mysql_client_params) as cursor:
+            version = get_mysql_version(cursor)
+            if LooseVersion(version) < LooseVersion("8.0.29"):
+                return
+
+            # allow OPTIMIZE TABLE to run on tables without primary keys
+            cursor.execute("SET @@SESSION.sql_require_primary_key = 0;")
+
+            def unescape_to_utf8(escaped: str) -> Optional[str]:
+                ret = re.sub(r"@([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), escaped)
+                ret = re.sub(
+                    r"@([0-9a-fA-F])([a-zA-Z])", lambda m: chr(ord(m.group(2)) + 121 + 20 * int(m.group(1), 16)), ret
+                )
+                if "`" in ret or "\\" in ret:
+                    # bail out so we don't unescape ourselves below
+                    return None
+                return ret
+
+            database_and_tables = []
+            cursor.execute("SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE TOTAL_ROW_VERSIONS > 0")
+            for row in cursor.fetchall():
+                db_and_table = row["NAME"].split("/")
+                table_info = {
+                    "database": unescape_to_utf8(db_and_table[0]),
+                    "table": unescape_to_utf8(db_and_table[1]),
+                }
+                if table_info["database"] is None or table_info["table"] is None:
+                    self.log.warning("Could not decode database/table name of '%s'", row["NAME"])
+                    continue
+                database_and_tables.append(table_info)
+
+            for database_and_table in database_and_tables:
+                self.stats.increase(metric="myhoard.basebackup.optimize_table")
+                self.log.info("Optimizing table %r", database_and_table)
+                # sending it as parameters doesn't work
+                cursor.execute(f"OPTIMIZE TABLE `{database_and_table['database']}`.`{database_and_table['table']}`")
+                cursor.execute("COMMIT")
 
     def _get_data_directory_size(self):
         total_filtered_size = 0

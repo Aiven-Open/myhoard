@@ -1,6 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from . import build_statsd_client, restart_mysql
+from . import build_statsd_client, MySQLConfig, restart_mysql
+from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.basebackup_operation import BasebackupOperation
+from typing import IO
+from unittest import SkipTest
 
 import myhoard.util as myhoard_util
 import os
@@ -125,5 +128,52 @@ def test_fails_on_invalid_params(mysql_master):
         stream_handler=stream_handler,
         temp_dir=mysql_master.base_dir,
     )
-    with pytest.raises(Exception, match="^xtrabackup failed with code 13$"):
+    # we're opening a connection to check the version on mysql >= 8.0.29 below we're failing with the first message
+    with pytest.raises(Exception, match=r"(^xtrabackup failed with code 13$|^mysql_cursor\(\) missing 3 required keyword)"):
         op.create_backup()
+
+
+def test_backup_with_non_optimized_tables(mysql_master: MySQLConfig) -> None:
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        version = myhoard_util.get_mysql_version(cursor)
+        if LooseVersion(version) < LooseVersion("8.0.29"):
+            raise SkipTest("DB version doesn't need OPTIMIZE TABLE")
+
+        def create_test_db(*, db_name: str, table_name: str, add_pk: bool) -> None:
+            cursor.execute(f"CREATE DATABASE {db_name}")
+
+            if add_pk:
+                id_column_type = "integer primary key"
+            else:
+                id_column_type = "integer"
+
+            cursor.execute(f"CREATE TABLE {db_name}.{table_name} (id {id_column_type})")
+            for value in range(15):
+                cursor.execute(f"INSERT INTO {db_name}.{table_name} (id) VALUES ({value})")
+            cursor.execute("COMMIT")
+            cursor.execute(f"ALTER TABLE {db_name}.{table_name} ADD COLUMN foobar VARCHAR(15)")
+            cursor.execute("COMMIT")
+
+        for db_index in range(15):
+            create_test_db(db_name=f"test{db_index}", table_name=f"foo{db_index}", add_pk=db_index % 2 == 0)
+
+        create_test_db(db_name="`söme/thing'; weird`", table_name="`table with space`", add_pk=True)
+
+    def stream_handler(stream: IO) -> None:
+        while True:
+            if not stream.read(10 * 1024):
+                break
+
+    encryption_key = os.urandom(24)
+    op = BasebackupOperation(
+        encryption_algorithm="AES256",
+        encryption_key=encryption_key,
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
+        progress_callback=None,
+        stats=build_statsd_client(),
+        stream_handler=stream_handler,
+        temp_dir=mysql_master.base_dir,
+    )
+    op.create_backup()
