@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import collections
 import contextlib
@@ -23,6 +23,29 @@ import time
 
 DEFAULT_MYSQL_TIMEOUT = 4.0
 ERR_TIMEOUT = 2013
+
+
+def get_tables_to_optimise(error_lines: list[str], *, log: Logger) -> Iterator[str]:
+    xtrabackup_lines = [line.split("[Xtrabackup] ", 1)[1] for line in error_lines if "[Xtrabackup] " in line]
+    while xtrabackup_lines:
+        line = xtrabackup_lines.pop(0)
+        if line == "This feature is not stable and will cause backup corruption.":
+            break
+    else:
+        return  # did not find the trigger line
+    if (
+        (len(xtrabackup_lines) < 3)
+        or (
+            not xtrabackup_lines[0]
+            == "Please check https://docs.percona.com/percona-xtrabackup/8.0/em/instant.html for more details."
+        )
+    ) or (not xtrabackup_lines[1] == "Tables found:"):
+        log.error("Unexpected error structure. Cannot identify tables to optimise.")
+        return
+    for line in xtrabackup_lines[2:]:
+        if line.startswith("Please run OPTIMIZE TABLE"):
+            return
+        yield line.replace("/", ".")
 
 
 @contextlib.contextmanager
