@@ -155,20 +155,18 @@ class BasebackupOperation:
                 if not row:
                     break
                 db_and_table = row["NAME"].split("/")
-                table_info = {
-                    "database": unescape_to_utf8(db_and_table[0]),
-                    "table": unescape_to_utf8(db_and_table[1]),
-                }
-                if table_info["database"] is None or table_info["table"] is None:
+                database = unescape_to_utf8(db_and_table[0])
+                table = unescape_to_utf8(db_and_table[1])
+                if database is None or table is None:
                     self.log.warning("Could not decode database/table name of '%s'", row["NAME"])
                     continue
-                database_and_tables.append(table_info)
+                database_and_tables.append((database, table))
 
-            for database_and_table in database_and_tables:
+            for database, table in database_and_tables:
                 self.stats.increase(metric="myhoard.basebackup.optimize_table")
-                self.log.info("Optimizing table %r", database_and_table)
+                self.log.info("Optimizing table %r.%r", database, table)
                 # sending it as parameters doesn't work
-                cursor.execute(f"OPTIMIZE TABLE `{database_and_table['database']}`.`{database_and_table['table']}`")
+                cursor.execute(f"OPTIMIZE TABLE `{database}`.`{table}`")
                 cursor.execute("COMMIT")
 
     def _get_data_directory_size(self):
