@@ -150,7 +150,10 @@ class BasebackupOperation:
 
             database_and_tables = []
             cursor.execute("SELECT NAME FROM INFORMATION_SCHEMA.INNODB_TABLES WHERE TOTAL_ROW_VERSIONS > 0")
-            for row in cursor.fetchall():
+            while True:
+                row = cursor.fetchone()
+                if not row:
+                    break
                 db_and_table = row["NAME"].split("/")
                 table_info = {
                     "database": unescape_to_utf8(db_and_table[0]),
