@@ -16,6 +16,10 @@ import subprocess
 import tempfile
 import threading
 
+# Number of seconds to allow for database operations to complete
+# while running the OPTIMIZE TABLE mitigation
+CURSOR_TIMEOUT_DURING_OPTIMIZE: int = 120
+
 
 class BasebackupOperation:
     """Creates a new basebackup. Provides callback for getting progress info, extracts
@@ -124,7 +128,9 @@ class BasebackupOperation:
         self._update_progress(estimated_progress=100)
 
     def _optimize_tables(self) -> None:
-        with mysql_cursor(**self.mysql_client_params) as cursor:
+        params = dict(self.mysql_client_params)
+        params["timeout"] = CURSOR_TIMEOUT_DURING_OPTIMIZE
+        with mysql_cursor(**params) as cursor:
             version = get_mysql_version(cursor)
             if LooseVersion(version) < LooseVersion("8.0.29"):
                 return
