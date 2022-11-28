@@ -77,6 +77,7 @@ class Controller(threading.Thread):
         mysql_data_directory,
         mysql_relay_log_index_file,
         mysql_relay_log_prefix,
+        optimize_tables_before_backup=False,
         restart_mysqld_callback,
         restore_max_binlog_bytes,
         server_id,
@@ -119,6 +120,7 @@ class Controller(threading.Thread):
         self.mysql_data_directory = mysql_data_directory
         self.mysql_relay_log_index_file = mysql_relay_log_index_file
         self.mysql_relay_log_prefix = mysql_relay_log_prefix
+        self.optimize_tables_before_backup = optimize_tables_before_backup
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
         self.restore_coordinator = None
@@ -622,6 +624,7 @@ class Controller(threading.Thread):
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
             normalized_backup_time=None,
+            optimize_tables_before_backup=self.optimize_tables_before_backup,
             rsa_public_key_pem=backup_site["encryption_keys"]["public"],
             remote_binlogs_state_file=self._remote_binlogs_state_file_from_stream_id(stream_id),
             server_id=self.server_id,
@@ -1474,6 +1477,7 @@ class Controller(threading.Thread):
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
             normalized_backup_time=normalized_backup_time,
+            optimize_tables_before_backup=self.optimize_tables_before_backup,
             rsa_public_key_pem=backup_site["encryption_keys"]["public"],
             remote_binlogs_state_file=self._remote_binlogs_state_file_from_stream_id(stream_id),
             server_id=self.server_id,

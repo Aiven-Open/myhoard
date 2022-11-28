@@ -171,6 +171,7 @@ def test_backup_with_non_optimized_tables(mysql_master: MySQLConfig) -> None:
         mysql_client_params=mysql_master.connect_options,
         mysql_config_file_name=mysql_master.config_name,
         mysql_data_directory=mysql_master.config_options.datadir,
+        optimize_tables_before_backup=True,
         progress_callback=None,
         stats=build_statsd_client(),
         stream_handler=stream_handler,
