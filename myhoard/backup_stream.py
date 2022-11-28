@@ -99,6 +99,7 @@ class BackupStream(threading.Thread):
         mysql_config_file_name,
         mysql_data_directory,
         normalized_backup_time,
+        optimize_tables_before_backup=False,
         rsa_public_key_pem,
         remote_binlogs_state_file,
         server_id,
@@ -129,6 +130,7 @@ class BackupStream(threading.Thread):
         self.mysql_client_params = mysql_client_params
         self.mysql_config_file_name = mysql_config_file_name
         self.mysql_data_directory = mysql_data_directory
+        self.optimize_tables_before_backup = optimize_tables_before_backup
         self.binlog_progress_tracker = binlog_progress_tracker
         # Keep track of remote binlogs so that we can drop binlogs containing only GTID
         # ranges that have already been backed up from our list of pending binlogs
@@ -823,6 +825,7 @@ class BackupStream(threading.Thread):
             stats=self.stats,
             stream_handler=self._basebackup_stream_handler,
             temp_dir=self.temp_dir,
+            optimize_tables_before_backup=self.optimize_tables_before_backup,
         )
         try:
             self.basebackup_operation.create_backup()

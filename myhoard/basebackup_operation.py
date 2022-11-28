@@ -40,6 +40,7 @@ class BasebackupOperation:
         mysql_client_params,
         mysql_config_file_name,
         mysql_data_directory,
+        optimize_tables_before_backup=False,
         progress_callback=None,
         stats,
         stream_handler,
@@ -60,6 +61,7 @@ class BasebackupOperation:
             self.mysql_config = config.read()
         self.mysql_data_directory = mysql_data_directory
         self.number_of_files = 0
+        self.optimize_tables_before_backup = optimize_tables_before_backup
         self.proc = None
         self.processed_original_bytes = 0
         self.progress_callback = progress_callback
@@ -76,7 +78,8 @@ class BasebackupOperation:
         self.abort_reason = None
         self.data_directory_size_start, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress()
-        self._optimize_tables()
+        if self.optimize_tables_before_backup:
+            self._optimize_tables()
 
         # Write encryption key to file to avoid having it on command line. NamedTemporaryFile has mode 0600
         with tempfile.NamedTemporaryFile(

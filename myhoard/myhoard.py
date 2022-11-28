@@ -201,6 +201,7 @@ class MyHoard:
             mysql_data_directory=mysql["data_directory"],
             mysql_relay_log_index_file=mysql["relay_log_index_file"],
             mysql_relay_log_prefix=mysql["relay_log_prefix"],
+            optimize_tables_before_backup=self.config.get("optimize_tables_before_backup", False),
             restart_mysqld_callback=self._restart_mysqld,
             restore_max_binlog_bytes=self.config["restore_max_binlog_bytes"],
             server_id=self.config["server_id"],
