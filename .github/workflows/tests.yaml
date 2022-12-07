@@ -74,7 +74,7 @@ jobs:
         run: make copyright
 
   unittest:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-${{ matrix.ubuntu-version }}
     strategy:
       fail-fast: false
       # this isn't a standard matrix because some version testing doesn't make sense
@@ -85,36 +85,47 @@ jobs:
           - mysql-version: "8.0.26"
             percona-version: "8.0.27-19-1.focal"
             python-version: "3.9"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.26"
             percona-version: "8.0.28-20-1.focal"
             python-version: "3.9"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.27"
             percona-version: "8.0.27-19-1.focal"
             python-version: "3.9"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.27"
             percona-version: "8.0.27-19-1.focal"
             python-version: "3.10"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.27"
             percona-version: "8.0.27-19-1.focal"
             python-version: "3.11"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.27"
             percona-version: "8.0.28-21-1.focal"
             python-version: "3.9"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.27"
             percona-version: "8.0.28-21-1.focal"
             python-version: "3.11"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.28"
             percona-version: "8.0.28-21-1.focal"
             python-version: "3.9"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.28"
             percona-version: "8.0.28-21-1.focal"
             python-version: "3.11"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.30"
             percona-version: "8.0.30-23-1.focal"
             python-version: "3.9"
+            ubuntu-version: "20.04"
           - mysql-version: "8.0.30"
             percona-version: "8.0.30-23-1.focal"
             python-version: "3.11"
+            ubuntu-version: "20.04"
 
     steps:
       - id: checkout-code
