@@ -14,7 +14,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
         # only use one version for the lint step
@@ -74,7 +74,7 @@ jobs:
         run: make copyright
 
   unittest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     strategy:
       fail-fast: false
       # this isn't a standard matrix because some version testing doesn't make sense
