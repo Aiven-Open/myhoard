@@ -1,5 +1,5 @@
 #!/bin/bash -e
-export VERSION_NAME="$(lsb_release -sc)"
+export VERSION_NAME=${VERSION_NAME:-"$(lsb_release -sc)"}
 export DEBIAN_FRONTEND="noninteractive"
 wget https://repo.percona.com/apt/percona-release_latest."${VERSION_NAME}"_all.deb
 set +e

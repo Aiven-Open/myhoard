@@ -9,11 +9,20 @@ sudo debconf-set-selections <<< 'mysql-community-server mysql-server/default-aut
 
 rm -f mysql-*.deb
 
-export VERSION_ID="$(lsb_release -r -s)"
-if [[ "$VERSION_ID" = *.* ]] ; then
+VENDOR="$(dpkg-vendor --query Vendor)"
+if [[ "${VENDOR}" = Ubuntu ]]; then
     DIST="ubuntu"
-else
+    VERSION_ID=$"$(lsb_release -r -s)"
+elif [[ "${VENDOR}" = "Debian" ]]; then
     DIST="debian"
+    VERSION_ID=$"$(lsb_release -r -s)"
+    if [[ "${VERSION_ID}" = "n/a" ]]; then
+        # Fall back to latest stable version on sid/testing
+        VERSION_ID="$(distro-info -r --stable)"
+    fi
+else
+    echo "Unknown vendor ${VENDOR}"
+    exit 1
 fi
 
 export mysql_debs=(
