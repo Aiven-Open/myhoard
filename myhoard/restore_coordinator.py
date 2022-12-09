@@ -1089,7 +1089,9 @@ class RestoreCoordinator(threading.Thread):
         # Should already be stopped but just to make sure
         cursor.execute("STOP SLAVE")
         cursor.execute("SHOW SLAVE STATUS")
-        initial_relay_log_file = cursor.fetchone()["Relay_Log_File"]
+        replica_status = cursor.fetchone()
+        # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
+        initial_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
 
         # Technically we'd want one fewer relay log file here but the server seems to have some
         # caching logic related to the current relay log and we need to make sure currently active
@@ -1111,7 +1113,9 @@ class RestoreCoordinator(threading.Thread):
                     index_file.write(("\n".join(names) + "\n").encode("utf-8"))
             self.update_state(last_flushed_index=last_flushed_index, write_relay_log_manually=False)
             cursor.execute("SHOW SLAVE STATUS")
-            final_relay_log_file = cursor.fetchone()["Relay_Log_File"]
+            replica_status = cursor.fetchone()
+            # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
+            final_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
             self.log.info(
                 "Flushed relay logs %d times, initial file was %r and current is %r",
                 flush_count,
