@@ -1,5 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .util import atomic_create_file
+from typing import Any, Generic, Iterable, List, TypeVar
 
 import io
 import json
@@ -7,8 +8,11 @@ import logging
 import os
 import threading
 
+# TODO: Any should really be JsonType. See https://github.com/python/typing/issues/182
+T = TypeVar("T", bound=Any)
 
-class AppendOnlyStateManager:
+
+class AppendOnlyStateManager(Generic[T]):
     """Disk backed state manager that stores a list of dict/JSON objects. Entries can only be added to the
     end of the list and removed from the beginning. The entire file is rewritten when sufficient number
     of entries have been removed from the beginning. Otherwise deletions are handled by writing invalidation
@@ -22,7 +26,9 @@ class AppendOnlyStateManager:
 
     MAX_DEAD_ENTRY_COUNT = 1000
 
-    def __init__(self, *, entries, lock=None, state_file):
+    entries: List[T]
+
+    def __init__(self, *, entries: List[T], lock=None, state_file):
         self.dead_entry_count = 0
         self.entries = entries
         self.lock = lock or threading.RLock()
@@ -31,10 +37,10 @@ class AppendOnlyStateManager:
         self.state_file = state_file
         self.read_state()
 
-    def append(self, entry):
+    def append(self, entry: T) -> None:
         self.append_many([entry])
 
-    def append_many(self, entries):
+    def append_many(self, entries: Iterable[T]):
         if not entries:
             return
 
@@ -44,7 +50,7 @@ class AppendOnlyStateManager:
                 f.write(full_data)
             self.entries.extend(entries)
 
-    def read_state(self):
+    def read_state(self) -> None:
         entries = []
         pos = 0
         if os.path.exists(self.state_file):
@@ -81,10 +87,10 @@ class AppendOnlyStateManager:
         )
         self.entries.extend(json.loads(entry.decode("utf-8")) for entry in entries[self.dead_entry_count :])
 
-    def remove_head(self):
+    def remove_head(self) -> None:
         self.remove_many_from_head(count=1)
 
-    def remove_many_from_head(self, count):
+    def remove_many_from_head(self, count: int) -> None:
         if count <= 0:
             return
         elif count > len(self.entries):
@@ -130,6 +136,6 @@ class AppendOnlyStateManager:
         with atomic_create_file(self.state_file, binary=True) as f:
             f.write(full_data)
 
-    def delete_state(self):
+    def delete_state(self) -> None:
         if os.path.exists(self.state_file):
             os.remove(self.state_file)
