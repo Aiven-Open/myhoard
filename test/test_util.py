@@ -11,7 +11,6 @@ import os
 import pytest
 import random
 import subprocess
-import sys
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -47,8 +46,6 @@ def test_rate_tracker_exception_handling():
     assert len(mock_logger.exception.call_args_list) == 0, mock_logger.exception.call_args_list
     mock_stats.gauge_int = lambda x: None
     sleep(1)
-    if sys.version_info.major == 3 and sys.version_info.minor == 7:
-        return  # 3.7 bug
     assert mock_logger.exception.call_args.args == ("Failed to update transfer rate 'foo'",)
 
 
@@ -63,8 +60,6 @@ def test_rate_tracker():
             rate_tracker.increment(50)
             sleep(0.1)
         call_args = mock_stats.gauge_int.call_args.args  # pylint: disable=no-member
-        if str(call_args) == "args":
-            return  # python3.7 bug
         actual_metric, actual_value = call_args
         assert actual_metric == "foo"
         assert 400 < actual_value < 600
@@ -73,8 +68,6 @@ def test_rate_tracker():
         sleep(1.1)
 
         call_args = mock_stats.gauge_int.call_args.args  # pylint: disable=no-member
-        if str(call_args) == "args":
-            return  # python3.7 bug
         actual_metric, actual_value = call_args
         assert actual_metric == "foo"
         assert actual_value < 50

@@ -35,6 +35,7 @@ setup(
     platforms=["POSIX"],
     description="MySQL streaming backup service",
     long_description=readme_text,
+    python_requires=">=3.9",
     url="https://github.com/aiven/myhoard/",
     classifiers=[
         "Development Status :: 5 - Production/Stable",

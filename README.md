@@ -135,7 +135,7 @@ backed up.
 
 # Requirements
 
-MyHoard requires Python 3.6 or later and some additional components to operate:
+MyHoard requires Python 3.9 or later and some additional components to operate:
 
 - [percona-xtrabackup](https://github.com/percona/percona-xtrabackup)
 - [python3-PyMySQL](https://github.com/PyMySQL/PyMySQL)
