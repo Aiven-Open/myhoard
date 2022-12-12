@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import collections
 import contextlib
@@ -81,7 +81,9 @@ def parse_fs_metadata(metadata):
     return json.loads(metadata["json"])
 
 
-def read_gtids_from_log(logfile, *, read_until_position=None, read_until_time=None):
+def read_gtids_from_log(
+    logfile: str, *, read_until_position: Optional[int] = None, read_until_time: Optional[int] = None
+) -> Iterator[tuple[int, int, str, int, int]]:
     """Yields all (timestamp, server_id (int), server_id (UUID str), GNO) tuples from GTID events in given log file.
     Running this for a 64 MiB binlog which has pathological data (only very small inserts) takes 2.0 seconds on an
     i7-7500U CPU @ 2.70GHz. There aren't any obvious optimizations (in Python) that make it considerably faster but
