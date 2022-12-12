@@ -9,6 +9,7 @@ from .util import (
     change_master_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
+    get_slave_status,
     GtidExecuted,
     GtidRangeDict,
     make_gtid_range_string,
@@ -587,18 +588,22 @@ class Controller(threading.Thread):
             # them. Same as with regular restoration.
             cursor.execute("STOP SLAVE")
             # Get current slave status so that we know which relay logs to reuse
-            cursor.execute("SHOW SLAVE STATUS")
-            slave_status = cursor.fetchone()
-            first_name = slave_status["Relay_Log_File"]
+            slave_status = get_slave_status(cursor)
+            if not slave_status:
+                first_name = None
+            else:
+                first_name = slave_status["Relay_Log_File"]
             if not first_name:
                 first_name = "relay.000001"
             if not self.state["promote_details"].get("relay_index_updated"):
                 first_index = int(first_name.split(".")[-1])
-                if (
-                    first_index == 1
-                    and not slave_status["Relay_Master_Log_File"]
-                    and not slave_status["Exec_Master_Log_Pos"]
-                    and not slave_status["Retrieved_Gtid_Set"]
+                if first_index == 1 and (
+                    not slave_status
+                    or (
+                        not slave_status["Relay_Master_Log_File"]
+                        and not slave_status["Exec_Master_Log_Pos"]
+                        and not slave_status["Retrieved_Gtid_Set"]
+                    )
                 ):
                     # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
                     self.log.info(
@@ -722,8 +727,7 @@ class Controller(threading.Thread):
         expected_ranges = self.state["promote_details"].get("expected_ranges")
 
         with mysql_cursor(**self.mysql_client_params) as cursor:
-            cursor.execute("SHOW SLAVE STATUS")
-            slave_status = cursor.fetchone()
+            slave_status = get_slave_status(cursor)
             current_file = slave_status["Relay_Log_File"]
             reached_target = True
             if current_file != expected_file:
@@ -966,8 +970,7 @@ class Controller(threading.Thread):
             cursor.execute("SELECT @@GLOBAL.read_only AS read_only")
             if not cursor.fetchone()["read_only"]:
                 raise Exception("System expected to be in read-only mode but isn't")
-            cursor.execute("SHOW SLAVE STATUS")
-            info = cursor.fetchone()
+            info = get_slave_status(cursor)
             if info is None:
                 # None happens if RESET SLAVE has been performed or if the slave never was running, e.g.
                 # because there were no binary logs to restore.

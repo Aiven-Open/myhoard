@@ -106,7 +106,7 @@ def parse_fs_metadata(metadata):
 
 
 def read_gtids_from_log(
-    logfile: os.PathLike[str], *, read_until_position: Optional[int] = None, read_until_time: Optional[int] = None
+    logfile: str, *, read_until_position: Optional[int] = None, read_until_time: Optional[int] = None
 ) -> Iterator[GtidRangeTuple]:
     """Yields all (timestamp, server_id (int), server_id (UUID str), GNO) tuples from GTID events in given log file.
     Running this for a 64 MiB binlog which has pathological data (only very small inserts) takes 2.0 seconds on an
@@ -478,7 +478,7 @@ def wait_for_port(*, host, port, timeout):
     raise Exception(f"Could not connect to {host}:{port} in {timeout} seconds")
 
 
-def relay_log_name(*, prefix: str, index: int, full_path: bool = True):
+def relay_log_name(*, prefix: str, index: int, full_path: bool = True) -> str:
     name = f"{prefix}.{index:06}"
     if not full_path:
         name = os.path.basename(name)
@@ -598,3 +598,22 @@ class RateTracker(threading.Thread):
                 self.stats.unexpected_exception(ex=exception, where="RateTracker.run")
                 self.stats.increase("myhoard.ratetracker.errors")
                 self._reset()
+
+
+class SlaveStatus(TypedDict):
+
+    Relay_Log_File: str
+    Relay_Master_Log_File: str
+    Exec_Master_Log_Pos: int
+    Retrieved_Gtid_Set: str
+    Slave_SQL_Running: str
+    Slave_SQL_Running_State: str
+
+
+def get_slave_status(cursor) -> Optional[SlaveStatus]:
+    """Retrieve the slave status
+
+    replica_status can be none if RESET REPLICA has been performed or if the replica never was running.
+    """
+    cursor.execute("SHOW SLAVE STATUS")
+    return cursor.fetchone()
