@@ -2,6 +2,7 @@
 from .append_only_state_manager import AppendOnlyStateManager
 from .state_manager import StateManager
 from .util import build_gtid_ranges, read_gtids_from_log
+from typing import List, Optional, Tuple, TypedDict
 
 import logging
 import os
@@ -9,14 +10,32 @@ import threading
 import time
 
 
+class BinlogInfo(TypedDict):
+    file_name: str
+    file_size: int
+    full_name: str
+    gtid_ranges: List[Tuple[int, int, str, int, int]]
+    local_index: int
+    processed_at: float
+    processing_time: float
+    server_id: str
+
+
 class BinlogScanner:
     """Looks for new (complete) and removed binlog files. Scans any new completed files
     for GTID details and maintains disk backed state of all GTID ranges in all complete
     binlogs that still exist on disk."""
 
-    def __init__(self, *, binlog_prefix, server_id, state_file, stats):
+    class State(TypedDict):
+        last_add: float
+        last_remove: Optional[float]
+        next_index: int
+        total_binlog_count: int
+        total_binlog_size: int
+
+    def __init__(self, *, binlog_prefix: str, server_id: str, state_file, stats):
         super().__init__()
-        binlogs = []
+        binlogs: List[BinlogInfo] = []
         lock = threading.RLock()
         self.binlog_prefix = binlog_prefix
         binlog_state_name = state_file.replace(".json", "") + ".binlogs"
@@ -27,7 +46,7 @@ class BinlogScanner:
         self.known_local_indexes = {binlog["local_index"] for binlog in self.binlogs}
         self.lock = lock
         self.log = logging.getLogger(self.__class__.__name__)
-        self.state = {
+        self.state: BinlogScanner.State = {
             "last_add": time.time(),
             "last_remove": None,
             "next_index": 1,
@@ -39,16 +58,16 @@ class BinlogScanner:
         self.server_id = server_id
 
     @property
-    def latest_complete_binlog_index(self):
+    def latest_complete_binlog_index(self) -> int:
         return self.state["next_index"] - 1
 
-    def scan_new(self, added_callback):
+    def scan_new(self, added_callback) -> List[BinlogInfo]:
         """Scan for any added binlogs. Passes any found binlogs to the given callback function
         before updating internal state."""
-        added = []
+        added: List[BinlogInfo] = []
         last_processed_at = time.time()
 
-        next_index = self.state["next_index"]
+        next_index: int = self.state["next_index"]
         while True:
             # We only scan completed files so expect the index following our next
             # index to be present as well
@@ -62,7 +81,7 @@ class BinlogScanner:
             file_size = os.path.getsize(full_name)
             duration = time.monotonic() - start_time
             last_processed_at = time.time()
-            binlog_info = {
+            binlog_info: BinlogInfo = {
                 "file_size": file_size,
                 "full_name": full_name,
                 "gtid_ranges": gtid_ranges,
