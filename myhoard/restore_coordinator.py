@@ -10,6 +10,7 @@ from .util import (
     build_gtid_ranges,
     change_master_to,
     ERR_TIMEOUT,
+    GtidRangeDict,
     make_gtid_range_string,
     mysql_cursor,
     parse_fs_metadata,
@@ -23,6 +24,7 @@ from .util import (
 from contextlib import suppress
 from pymysql import OperationalError
 from rohmu import errors as rohmu_errors, get_transfer
+from typing import Iterable
 
 import contextlib
 import enum
@@ -635,7 +637,7 @@ class RestoreCoordinator(threading.Thread):
     def update_state(self, **kwargs):
         self.state_manager.update_state(**kwargs)
 
-    def _are_all_gtids_executed(self, gtid_ranges):
+    def _are_all_gtids_executed(self, gtid_ranges: Iterable[GtidRangeDict]):
         """Returns True if all GTIDs in the given list of GTID ranges have already been applied"""
         gtid_executed = self.state["gtid_executed"] or self.state["basebackup_info"]["gtid_executed"]
         # Run the original set of executed GTIDs through the same function to ensure format is exactly
