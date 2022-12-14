@@ -1,16 +1,23 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .util import atomic_create_file
+from typing import Any, Generic, Mapping, TypeVar
 
 import errno
 import json
 import os
 import threading
 
+# TODO: Any should really be JsonType
+# https://github.com/python/typing/issues/182
+T = TypeVar("T", bound=Mapping[str, Any])
 
-class StateManager:
+
+class StateManager(Generic[T]):
     """Simple disk backed dict/JSON state manager"""
 
-    def __init__(self, *, allow_unknown_keys=False, lock=None, state, state_file):
+    state: T
+
+    def __init__(self, *, allow_unknown_keys=False, lock=None, state: T, state_file):
         self.allow_unknown_keys = allow_unknown_keys
         self.lock = lock or threading.RLock()
         self.state = state

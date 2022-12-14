@@ -39,7 +39,7 @@ class BinlogScanner:
         lock = threading.RLock()
         self.binlog_prefix = binlog_prefix
         binlog_state_name = state_file.replace(".json", "") + ".binlogs"
-        self.binlog_state = AppendOnlyStateManager(entries=binlogs, lock=lock, state_file=binlog_state_name)
+        self.binlog_state = AppendOnlyStateManager[BinlogInfo](entries=binlogs, lock=lock, state_file=binlog_state_name)
         self.binlogs = binlogs
         # Keep track of binlogs we have in the file listing local binlogs; if persisting the binlogs
         # succeeds but persisting other metadata fails we'd end up in bad state without this logic
@@ -53,7 +53,7 @@ class BinlogScanner:
             "total_binlog_count": 0,
             "total_binlog_size": 0,
         }
-        self.state_manager = StateManager(state=self.state, state_file=state_file)
+        self.state_manager = StateManager[BinlogScanner.State](state=self.state, state_file=state_file)
         self.stats = stats
         self.server_id = server_id
 
