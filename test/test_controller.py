@@ -3,8 +3,14 @@ from . import build_controller, DataGenerator, get_mysql_config_options, MySQLCo
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.restore_coordinator import RestoreCoordinator
-from myhoard.util import change_master_to, mysql_cursor, parse_gtid_range_string, partition_sort_and_combine_gtid_ranges
-from typing import List
+from myhoard.util import (
+    change_master_to,
+    GtidExecuted,
+    mysql_cursor,
+    parse_gtid_range_string,
+    partition_sort_and_combine_gtid_ranges,
+)
+from typing import Dict, List, Optional, Set
 from unittest.mock import MagicMock
 
 import contextlib
@@ -24,7 +30,8 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
     mcontroller, master = master_controller
     mysql_empty.connect_options["password"] = master.connect_options["password"]
 
-    new_master_controller = None
+    new_master_controller: Optional[Controller] = None
+
     master_dg = DataGenerator(connect_info=master.connect_options, make_temp_tables=False)
     try:
         master_dg.start()
@@ -53,6 +60,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         mcontroller.stop()
 
         new_master_controller = build_controller(
+            Controller,
             default_backup_site=default_backup_site,
             mysql_config=mysql_empty,
             session_tmpdir=session_tmpdir,
@@ -66,6 +74,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
         def restoration_is_complete():
+            assert new_master_controller
             return new_master_controller.restore_coordinator and new_master_controller.restore_coordinator.is_complete()
 
         wait_for_condition(restoration_is_complete, timeout=30, description="Restoration was not completed in time")
@@ -77,6 +86,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         # Need to re-create the controller because a controller that has been stopped once cannot be
         # started again
         mcontroller = build_controller(
+            Controller,
             default_backup_site=default_backup_site,
             mysql_config=master,
             session_tmpdir=session_tmpdir,
@@ -135,7 +145,8 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
     mcontroller, master = master_controller
     mysql_empty.connect_options["password"] = master.connect_options["password"]
 
-    new_master_controller = None
+    new_master_controller: Optional[Controller] = None
+
     try:
         mcontroller.switch_to_active_mode()
         mcontroller.stats = MagicMock()
@@ -187,6 +198,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         wait_for_condition(lambda: mcontroller.is_log_backed_up(log_index=wait_for_index), timeout=10)
 
         new_master_controller = build_controller(
+            Controller,
             default_backup_site=default_backup_site,
             mysql_config=mysql_empty,
             session_tmpdir=session_tmpdir,
@@ -200,6 +212,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
         def applying_binlogs():
+            assert new_master_controller
             return (
                 new_master_controller.restore_coordinator
                 and new_master_controller.restore_coordinator.phase == RestoreCoordinator.Phase.waiting_for_apply_to_finish
@@ -244,6 +257,7 @@ def create_fake_state_files(controller: Controller) -> List[str]:
 
 def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_empty, session_tmpdir):
     controller = build_controller(
+        Controller,
         default_backup_site=default_backup_site,
         mysql_config=mysql_empty,
         session_tmpdir=session_tmpdir,
@@ -251,7 +265,7 @@ def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_
     fake_file_names = create_fake_state_files(controller)
     controller.state["backups"] = [
         {
-            "basebackup_info": {},
+            "basebackup_info": {"end_ts": 0.0},
             "closed_at": None,
             "completed_at": None,
             "recovery_site": False,
@@ -267,6 +281,7 @@ def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_
 
 def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_empty, session_tmpdir):
     controller = build_controller(
+        Controller,
         default_backup_site=default_backup_site,
         mysql_config=mysql_empty,
         session_tmpdir=session_tmpdir,
@@ -274,7 +289,7 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
     fake_file_names = create_fake_state_files(controller)
     controller.state["backups"] = [
         {
-            "basebackup_info": {},
+            "basebackup_info": {"end_ts": 0.0},
             "closed_at": None,
             "completed_at": None,
             "recovery_site": False,
@@ -302,7 +317,7 @@ def test_3_node_service_failover_and_restore(
     mcontroller, master = master_controller
     s1controller, standby1 = standby1_controller
     s2controller, standby2 = standby2_controller
-    s3controller = []
+    s3controller: List[Controller] = []
 
     # Empty server will be initialized from backup that has been created from master so it'll use the same password
     # (normally all servers should be restored from same backup but we're not simulating that here now)
@@ -319,7 +334,6 @@ def test_3_node_service_failover_and_restore(
         controller.binlog_purge_settings["purge_interval"] = 0.1
 
     master_dg = DataGenerator(connect_info=master.connect_options, make_temp_tables=False)
-    new_master_dg = None
     try:
         master_dg.start()
 
@@ -425,6 +439,7 @@ def test_3_node_service_failover_and_restore(
                     state_dir = s3controller[0].state_dir if s3controller else None
                     temp_dir = s3controller[0].temp_dir if s3controller else None
                     new_controller = build_controller(
+                        Controller,
                         default_backup_site=default_backup_site,
                         mysql_config=mysql_empty,
                         session_tmpdir=session_tmpdir,
@@ -472,8 +487,8 @@ def test_3_node_service_failover_and_restore(
                 new_master_dg.start()
 
                 start_time = time.monotonic()
-                wait_increased = []
-                restart_times = []
+                wait_increased: List[bool] = []
+                restart_times: List[float] = []
 
                 def restore_complete():
                     # Re-create the restore coordinator a couple of times during restoration
@@ -534,17 +549,22 @@ def test_3_node_service_failover_and_restore(
                 assert own_indexes
 
                 duplicate_count = 0
-                all_old_master_ranges = []
+                all_old_master_ranges: List[List[List[int]]] = []
                 for binlog in remote_binlogs:
                     ranges = partition_sort_and_combine_gtid_ranges(binlog["gtid_ranges"])
                     old_master_ranges = ranges.get(original_server_uuid)
                     if not old_master_ranges:
                         continue
                     current_range_start = old_master_ranges[0][0]
-                    for ranges in all_old_master_ranges:
-                        last_range_end = ranges[-1][-1]
+                    for range_tuples in all_old_master_ranges:
+                        last_range_end = range_tuples[-1][-1]
                         if current_range_start <= last_range_end:
-                            print("Current binlog", binlog, "has range start that predates one of the seen ranges:", ranges)
+                            print(
+                                "Current binlog",
+                                binlog,
+                                "has range start that predates one of the seen ranges:",
+                                range_tuples,
+                            )
                             duplicate_count += 1
                             # Only count one duplicate range per file. The file that gets created after promotion might
                             # well have multiple duplicate ranges (which is expected behavior)
@@ -628,6 +648,7 @@ def test_empty_server_backup_and_restore(
         mcontroller.stop()
 
         s3controller = build_controller(
+            Controller,
             default_backup_site=default_backup_site,
             mysql_config=mysql_empty,
             session_tmpdir=session_tmpdir,
@@ -685,7 +706,7 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     state_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "state"))
     temp_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
     controller = build_controller(
-        cls=DummyController,
+        DummyController,
         default_backup_site=default_backup_site,
         mysql_config=MySQLConfig(
             config_options=get_mysql_config_options(
@@ -710,8 +731,24 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     # Can add backups but backup being restored is not the last one, does not try to look up new backups
     rc.can_add_binlog_streams.return_value = True
     controller.state["backups"] = [
-        {"completed_at": "2", "site": "a", "stream_id": "2"},
-        {"completed_at": "1", "site": "a", "stream_id": "1"},
+        {
+            "completed_at": 2.0,
+            "site": "a",
+            "stream_id": "2",
+            "basebackup_info": {"end_ts": 1.0},
+            "closed_at": 1.0,
+            "recovery_site": False,
+            "resumable": True,
+        },
+        {
+            "completed_at": 1.0,
+            "site": "a",
+            "stream_id": "1",
+            "basebackup_info": {"end_ts": 1.0},
+            "closed_at": 1.0,
+            "recovery_site": False,
+            "resumable": True,
+        },
     ]
     rc.binlog_streams = [
         {"site": "a", "stream_id": "1"},
@@ -725,9 +762,9 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
     ]
     rc.stream_id = "2"
     backups.return_value = [
-        {"completed_at": "2", "site": "a", "stream_id": "2"},
-        {"completed_at": "1", "site": "a", "stream_id": "1"},
-        {"completed_at": "0", "site": "a", "stream_id": "0"},
+        {"completed_at": 3.0, "site": "a", "stream_id": "2"},
+        {"completed_at": 2.0, "site": "a", "stream_id": "1"},
+        {"completed_at": 1.0, "site": "a", "stream_id": "0"},
     ]
     controller.extend_binlog_stream_list()
     backups.assert_called()
@@ -735,9 +772,9 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
 
     # Can add backups and restoring last backup, new backup is found and added to list of binlog streams to restore
     backups.return_value = [
-        {"completed_at": "3", "site": "a", "stream_id": "3"},
-        {"completed_at": "2", "site": "a", "stream_id": "2"},
-        {"completed_at": "1", "site": "a", "stream_id": "1"},
+        {"completed_at": 3.0, "site": "a", "stream_id": "3"},
+        {"completed_at": 2.0, "site": "a", "stream_id": "2"},
+        {"completed_at": 1.0, "site": "a", "stream_id": "1"},
     ]
     rc.add_new_binlog_streams.return_value = True
     controller.state["restore_options"] = {"binlog_streams": rc.binlog_streams, "foo": "abc"}
@@ -815,7 +852,7 @@ def test_manual_backup_creation(master_controller):
     while_asserts(streaming_binlogs, timeout=10)
 
     start_time = time.monotonic()
-    seen_backups = set()
+    seen_backups: Set[str] = set()
     # Create up to 10 backups so that we have enough to verify deleting backups when max count is exceeded works
     while time.monotonic() - start_time < 60 and len(seen_backups) < 10:
         current_backups = set(backup["stream_id"] for backup in mcontroller.state["backups"] if backup["completed_at"])
@@ -880,6 +917,7 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
     # Restore last backup to empty server. This should initially fail because basebackup is
     # broken but succeed because it then proceeds restoring the earlier backup
     new_controller = build_controller(
+        Controller,
         default_backup_site=default_backup_site,
         mysql_config=mysql_empty,
         session_tmpdir=session_tmpdir,
@@ -938,6 +976,7 @@ def test_new_binlog_stream_while_restoring(
         stream_id = mcontroller.backup_streams[0].stream_id
 
         s3controller = build_controller(
+            Controller,
             default_backup_site=default_backup_site,
             mysql_config=mysql_empty,
             session_tmpdir=session_tmpdir,
@@ -979,6 +1018,7 @@ def test_new_binlog_stream_while_restoring(
 
         # Backup restoration shouldn't have completed by now because we're blocking before one of
         # the basebackup restore operations
+        assert s3controller.restore_coordinator
         assert not s3controller.restore_coordinator.is_complete()
 
         binlog_uploaded = True
@@ -1159,7 +1199,7 @@ def test_collect_binlogs_to_purge():
     log.info.assert_any_call("No replication state set, assuming purging binlog %s is safe", 2)
 
     log = MagicMock()
-    replication_state = {
+    replication_state: Dict[str, GtidExecuted] = {
         "server1": {},
     }
     bs1.is_binlog_safe_to_delete.return_value = True

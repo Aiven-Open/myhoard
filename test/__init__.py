@@ -3,8 +3,9 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller
+from myhoard.controller import BackupSiteInfo, Controller
 from myhoard.statsd import StatsClient
+from typing import List, Optional, Type, TypeVar
 
 import asyncio
 import contextlib
@@ -24,17 +25,17 @@ class MySQLConfig:
     def __init__(
         self,
         *,
-        base_dir=None,
+        base_dir: Optional[str] = None,
         config=None,
         config_name=None,
         config_options=None,
         connect_options=None,
-        password=None,
-        port=None,
+        password: Optional[str] = None,
+        port: Optional[int] = None,
         proc=None,
-        server_id=None,
-        startup_command=None,
-        user=None,
+        server_id: Optional[int] = None,
+        startup_command: Optional[List[str]] = None,
+        user: Optional[str] = None,
     ):
         self.base_dir = base_dir
         self.config = config
@@ -49,9 +50,18 @@ class MySQLConfig:
         self.user = user
 
 
+T = TypeVar("T", bound="Controller")
+
+
 def build_controller(
-    *, cls=None, default_backup_site, mysql_config: MySQLConfig, session_tmpdir, state_dir=None, temp_dir=None
-):
+    cls: Type[T],
+    *,
+    default_backup_site: BackupSiteInfo,
+    mysql_config: MySQLConfig,
+    session_tmpdir,
+    state_dir: Optional[str] = None,
+    temp_dir: Optional[str] = None,
+) -> T:
     Controller.ITERATION_SLEEP = 0.1
     Controller.BACKUP_REFRESH_INTERVAL_BASE = 0.1
     Controller.BACKUP_REFRESH_ACTIVE_MULTIPLIER = 1
@@ -63,7 +73,6 @@ def build_controller(
     temp_dir = temp_dir or os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
     os.makedirs(temp_dir, exist_ok=True)
 
-    cls = cls or Controller
     controller = cls(
         backup_settings={
             "backup_age_days_max": 14,

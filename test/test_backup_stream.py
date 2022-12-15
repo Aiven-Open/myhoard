@@ -2,8 +2,9 @@
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
-from myhoard.controller import Controller
+from myhoard.controller import BackupSiteInfo, Controller
 from rohmu.object_storage.local import LocalTransfer
+from typing import Dict
 
 import json
 import myhoard.util as myhoard_util
@@ -131,7 +132,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         with open(state_file) as f:
             assert bs.state == json.load(f)
 
-        backup_sites = {
+        backup_sites: Dict[str, BackupSiteInfo] = {
             "default": {
                 "recovery_only": False,
                 "encryption_keys": {},

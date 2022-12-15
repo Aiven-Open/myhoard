@@ -187,6 +187,7 @@ class WebServer:
     async def stop(self):
         if not self.site:
             return
+        assert self.runner is not None
         self.log.info("Stopping web server")
         await self.runner.cleanup()
         self.log.info("Web server stopped")
