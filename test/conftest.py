@@ -8,6 +8,7 @@ from . import (
     MySQLConfig,
     random_basic_string,
 )
+from myhoard.controller import Controller
 from myhoard.util import atomic_create_file, change_master_to, mysql_cursor, wait_for_port
 from myhoard.web_server import WebServer
 from typing import Optional
@@ -257,6 +258,7 @@ def fixture_default_backup_site(session_tmpdir, encryption_keys):
 @pytest.fixture(scope="function", name="master_controller")
 def fixture_master_controller(session_tmpdir, mysql_master, default_backup_site):
     controller = build_controller(
+        Controller,
         default_backup_site=default_backup_site,
         mysql_config=mysql_master,
         session_tmpdir=session_tmpdir,
@@ -270,6 +272,7 @@ def fixture_master_controller(session_tmpdir, mysql_master, default_backup_site)
 @pytest.fixture(scope="function", name="standby1_controller")
 def fixture_standby1_controller(session_tmpdir, mysql_standby1, default_backup_site):
     controller = build_controller(
+        Controller,
         default_backup_site=default_backup_site,
         mysql_config=mysql_standby1,
         session_tmpdir=session_tmpdir,
@@ -283,6 +286,7 @@ def fixture_standby1_controller(session_tmpdir, mysql_standby1, default_backup_s
 @pytest.fixture(scope="function", name="standby2_controller")
 def fixture_standby2_controller(session_tmpdir, mysql_standby2, default_backup_site):
     controller = build_controller(
+        Controller,
         default_backup_site=default_backup_site,
         mysql_config=mysql_standby2,
         session_tmpdir=session_tmpdir,

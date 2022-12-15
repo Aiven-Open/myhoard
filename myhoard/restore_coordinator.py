@@ -60,6 +60,11 @@ class PendingBinlogInfo(TypedDict):
     remote_index: int
 
 
+class BinlogStream(TypedDict):
+    site: str
+    stream_id: str
+
+
 class RestoreCoordinator(threading.Thread):
     """Restores an existing backup. Starts by restoring the basebackup and then applies
     necessary binlogs on top of that.
@@ -145,7 +150,7 @@ class RestoreCoordinator(threading.Thread):
     def __init__(
         self,
         *,
-        binlog_streams,
+        binlog_streams: List[BinlogStream],
         file_storage_config,
         max_binlog_bytes=None,
         mysql_client_params,
@@ -159,7 +164,7 @@ class RestoreCoordinator(threading.Thread):
         site: str,
         state_file: str,
         stats: StatsClient,
-        stream_id: int,
+        stream_id: str,
         target_time=None,
         target_time_approximate_ok=None,
         temp_dir: str,
@@ -255,7 +260,7 @@ class RestoreCoordinator(threading.Thread):
         self.sql_thread_restart_count = 0
         self.sql_thread_restart_time: Optional[float] = None
 
-    def add_new_binlog_streams(self, new_binlog_streams: List[PendingBinlogInfo]) -> bool:
+    def add_new_binlog_streams(self, new_binlog_streams: List[BinlogStream]) -> bool:
         if not self.can_add_binlog_streams():
             return False
         self.binlog_streams = self.binlog_streams + new_binlog_streams

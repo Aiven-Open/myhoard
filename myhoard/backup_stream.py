@@ -137,7 +137,7 @@ class BackupStream(threading.Thread):
         remote_gtid_executed: GtidExecuted
         remote_read_errors: int
         remote_write_errors: int
-        stream_id: int
+        stream_id: str
         updated_at: float
         valid_local_binlog_found: bool
 
@@ -163,7 +163,7 @@ class BackupStream(threading.Thread):
         site: str,
         state_file: str,
         stats: "StatsClient",
-        stream_id: Optional[int] = None,
+        stream_id: Optional[str] = None,
         temp_dir: str,
     ) -> None:
         super().__init__()
@@ -460,7 +460,7 @@ class BackupStream(threading.Thread):
         return self.state["mode"]
 
     @staticmethod
-    def new_stream_id():
+    def new_stream_id() -> str:
         return f"{datetime.now(timezone.utc).isoformat()}Z_{uuid.uuid4()}"
 
     @property
@@ -573,7 +573,7 @@ class BackupStream(threading.Thread):
         self.log.info("Backup stream stopped")
 
     @property
-    def stream_id(self) -> int:
+    def stream_id(self) -> str:
         return self.state["stream_id"]
 
     def _basebackup_progress_callback(self, **kwargs):
@@ -975,8 +975,10 @@ class BackupStream(threading.Thread):
                 remote_gtid_executed=gtid_executed,
             )
             uncompressed_size = self.basebackup_operation.data_directory_size_end
-            self.stats.gauge_int("myhoard.basebackup.bytes_uncompressed", uncompressed_size)
-            self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
+            if uncompressed_size:
+                self.stats.gauge_int("myhoard.basebackup.bytes_uncompressed", uncompressed_size)
+            if compressed_size:
+                self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
             if uncompressed_size and compressed_size:
                 self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
         except (
