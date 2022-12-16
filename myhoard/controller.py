@@ -679,6 +679,7 @@ class Controller(threading.Thread):
                     if sql_thread_running != "Yes":
                         self.log.warning("Expected SQL thread to be running state is %s, starting it", sql_thread_running)
                         cursor.execute("START SLAVE SQL_THREAD")
+                        self.stats.increase("myhoard.unexpected_sql_thread_starts")
                     return
             else:
                 self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)

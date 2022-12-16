@@ -1184,6 +1184,7 @@ class RestoreCoordinator(threading.Thread):
         self.sql_thread_restart_time = time.monotonic()
         self.log.warning("SQL thread is not running. Running 'START SLAVE SQL_THREAD'")
         self.sql_thread_restart_count += 1
+        self.stats.increase("myhoard.unexpected_sql_thread_starts")
         with self._mysql_cursor() as cursor:
             cursor.execute("START SLAVE SQL_THREAD")
 
