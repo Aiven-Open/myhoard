@@ -18,6 +18,7 @@ from .util import (
     parse_gtid_range_string,
     read_gtids_from_log,
     relay_log_name,
+    restart_unexpected_dead_sql_thread,
     rsa_decrypt_bytes,
     SlaveStatus,
     sort_and_filter_binlogs,
@@ -1185,10 +1186,9 @@ class RestoreCoordinator(threading.Thread):
                     return
 
         self.sql_thread_restart_time = time.monotonic()
-        self.log.warning("SQL thread is not running. Running 'START SLAVE SQL_THREAD'")
         self.sql_thread_restart_count += 1
         with self._mysql_cursor() as cursor:
-            cursor.execute("START SLAVE SQL_THREAD")
+            restart_unexpected_dead_sql_thread(cursor, slave_status, self.stats, self.log)
 
     def _check_sql_slave_status(self) -> tuple[bool, int]:
         expected_range = self.state["current_executed_gtid_target"]

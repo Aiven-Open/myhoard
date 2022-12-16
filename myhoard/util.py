@@ -617,3 +617,17 @@ def get_slave_status(cursor) -> Optional[SlaveStatus]:
     """
     cursor.execute("SHOW SLAVE STATUS")
     return cursor.fetchone()
+
+
+def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
+    if slave_status["Last_SQL_Error"]:
+        log.warning(
+            "SQL Thread died, running 'START SLAVE SQL_THREAD'. Last reported error at %s: %d: %s",
+            slave_status["Last_SQL_Error_Timestamp"],
+            slave_status["Last_SQL_Errno"],
+            slave_status["Last_SQL_Error"],
+        )
+    else:
+        log.warning("Expected SQL thread to be running but it isn't. Running 'START SLAVE SQL_THREAD'")
+    stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": slave_status["Last_SQL_Errno"]})
+    cursor.execute("START SLAVE SQL_THREAD")
