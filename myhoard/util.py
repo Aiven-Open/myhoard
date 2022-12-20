@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -25,8 +25,32 @@ DEFAULT_MYSQL_TIMEOUT = 4.0
 ERR_TIMEOUT = 2013
 
 
+GtidRangeTuple = tuple[int, int, str, int, int]
+
+
+class GtidRangeDict(TypedDict):
+    end: int
+    end_ts: int
+    server_id: int
+    server_uuid: str
+    start: int
+    start_ts: int
+
+
+# Ideally the contents should be Tuple[int, int] rather than List[int],
+# but that clashes with json deserialization
+GtidExecuted = Dict[str, List[List[int]]]
+
+
 @contextlib.contextmanager
-def atomic_create_file(file_path, *, binary=False, perm=None, uidgid=None, inherit_owner_from_parent=False):
+def atomic_create_file(
+    file_path,
+    *,
+    binary: bool = False,
+    perm: Optional[int] = None,
+    uidgid: Optional[Tuple[int, int]] = None,
+    inherit_owner_from_parent: bool = False,
+):
     """Open a temporary file for writing, rename to final name when done"""
     mode = "wb" if binary else "w"
     # if perm or uidgid is not given, copy it/them from existing file if file exists
@@ -82,8 +106,8 @@ def parse_fs_metadata(metadata):
 
 
 def read_gtids_from_log(
-    logfile: str, *, read_until_position: Optional[int] = None, read_until_time: Optional[int] = None
-) -> Iterator[tuple[int, int, str, int, int]]:
+    logfile: os.PathLike[str], *, read_until_position: Optional[int] = None, read_until_time: Optional[int] = None
+) -> Iterator[GtidRangeTuple]:
     """Yields all (timestamp, server_id (int), server_id (UUID str), GNO) tuples from GTID events in given log file.
     Running this for a 64 MiB binlog which has pathological data (only very small inserts) takes 2.0 seconds on an
     i7-7500U CPU @ 2.70GHz. There aren't any obvious optimizations (in Python) that make it considerably faster but
@@ -152,12 +176,14 @@ def read_gtids_from_log(
     # before crashing.
 
 
-def build_gtid_ranges(iterator):
+def build_gtid_ranges(iterator: Iterable[GtidRangeTuple]) -> Iterator[GtidRangeDict]:
     """Yield dicts containing most compact representation of all (timestamp, UUID, GNO) tuples
     returned by given iterator. Ranges are returned in correct order and no gaps are allowed.
     If input contains uninterrupted sequence of events from a single server only one range is
     produced."""
-    current_range = {}
+    # Initialize to empty dict rather than None here to work around a pylint bug:
+    # https://github.com/PyCQA/pylint/issues/1498
+    current_range: Optional[GtidRangeDict] = {}  # type: ignore
     for timestamp, server_id, server_uuid, gno, _file_position in iterator:
         if current_range:
             if current_range["server_uuid"] == server_uuid and current_range["end"] + 1 == gno:
@@ -181,10 +207,10 @@ def build_gtid_ranges(iterator):
         yield current_range
 
 
-def partition_sort_and_combine_gtid_ranges(ranges):
+def partition_sort_and_combine_gtid_ranges(ranges: Iterable[GtidRangeDict]) -> GtidExecuted:
     """Partitions GTID ranges by UUID, sort them and then combine any duplicates / continuous ranges like
     [(1, 3), (2, 3), (5, 7), (6, 8), (8, 9)] => [(1, 3), (5, 9)]"""
-    tuples = collections.defaultdict(list)
+    tuples: GtidExecuted = collections.defaultdict(list)
     for rng in ranges:
         tuples[rng["server_uuid"]].append([rng["start"], rng["end"]])
     combined = {}
@@ -193,8 +219,8 @@ def partition_sort_and_combine_gtid_ranges(ranges):
         combined_ranges = []
         last_start = None
         last_end = None
-        for rng in server_ranges:
-            start, end = rng
+        for srng in server_ranges:
+            start, end = srng
             if last_start is None:
                 last_start = start
             if last_end is not None:
@@ -215,7 +241,7 @@ def partition_sort_and_combine_gtid_ranges(ranges):
     return combined
 
 
-def first_contains_gtids_not_in_second(first, second):
+def first_contains_gtids_not_in_second(first: Iterable[GtidRangeDict], second: Iterable[GtidRangeDict]) -> bool:
     """Returns True if list of GTIDs identified by `first` contains any entry that is not present in `second`.
     Because our binlog specific ranges only contain the actual GTIDs in a particular file this method assumes
     that all GNOs below current GNO have been included. So if second has uuid1:20 and first has uuid1:19 the
@@ -233,7 +259,7 @@ def first_contains_gtids_not_in_second(first, second):
     return False
 
 
-def make_gtid_range_string(ranges):
+def make_gtid_range_string(ranges: Iterable[GtidRangeDict]) -> str:
     """Produces minimal string representation of given list of GTID ranges. The string is
     compatible with MySQL's GTID functions (server_uuid1:gno1-gno2:gno3,server_uuid2:gno4)"""
     uuid_gnos = []
@@ -248,7 +274,7 @@ def make_gtid_range_string(ranges):
     return ",".join(uuid_gnos)
 
 
-def parse_gtid_range_string(input_range):
+def parse_gtid_range_string(input_range: Union[dict, str]) -> GtidExecuted:
     """Converts a string like "uuid1:id1-id2:id3:id4-id5, uuid2:id6" into a dict like
     {"uuid1": [[id1, id2], [id3, id3], [id4, id5]], "uuid2": [[id6, id6]]}. ID ranges are
     sorted from lowest to highest"""
@@ -258,7 +284,7 @@ def parse_gtid_range_string(input_range):
     elif not input_range or not input_range.strip():
         return {}
 
-    by_uuid = collections.defaultdict(list)
+    by_uuid: GtidExecuted = collections.defaultdict(list)
     for uuid_and_ranges in input_range.split(","):
         server_uuid, *ranges = uuid_and_ranges.strip().split(":")
         all_ranges = by_uuid[server_uuid.lower()]
@@ -271,26 +297,27 @@ def parse_gtid_range_string(input_range):
     return {server_uuid: sorted(ranges, key=lambda rng: rng[0]) for server_uuid, ranges in by_uuid.items()}
 
 
-def add_gtid_ranges_to_executed_set(existing_set, *new_ranges):
+def add_gtid_ranges_to_executed_set(existing_set: GtidExecuted, *new_ranges: Iterable[GtidRangeDict]) -> GtidExecuted:
     """Takes in a dict like {"uuid1": [[1, 4], [7, 12]], "uuid2": [[1, 100]]} (as returned by e.g. parse_gtid_range_string)
     and any number of lists of type [{"server_uuid": "uuid", "start": 1, "end": 3}, ...]. Adds all the ranges in the lists to
     the ranges in the dict and returns a new dict that contains minimal representation with both the old and new ranges."""
-    all_ranges = []
+    all_ranges: List[GtidRangeDict] = []
     for server_uuid, ranges in existing_set.items():
         for rng in ranges:
             all_ranges.append(
-                {
+                # ignore type issues: missing a few keys not required for partition_sort_and_combine_gtid_ranges
+                {  # type: ignore
                     "end": rng[1],
                     "server_uuid": server_uuid,
                     "start": rng[0],
                 }
             )
-    for rng in new_ranges:
-        all_ranges.extend(rng)
+    for nrng in new_ranges:
+        all_ranges.extend(nrng)
     return partition_sort_and_combine_gtid_ranges(all_ranges)
 
 
-def truncate_gtid_executed(gtid_executed, truncate_to):
+def truncate_gtid_executed(gtid_executed: GtidExecuted, truncate_to: GtidExecuted) -> None:
     """Truncates (in place) the gtid_executed dict so that gtid_executed does not include any transactions that are not
     included in the truncate_to string (which must be in the format "server_uuid1:gno1,server_uuid2:gno2"). The
     truncation is only performed for servers included in the truncate_to string, for other servers the executed
@@ -423,7 +450,7 @@ def sort_and_filter_binlogs(*, binlogs, last_index, log, promotions):
     return valid_binlogs
 
 
-def detect_running_process_id(command) -> Tuple[Optional[int], bytes]:
+def detect_running_process_id(command: str) -> Tuple[Optional[int], bytes]:
     """Find a process with matching command owned by the same user as current process and return
     its pid. Returns None if no such process is found or if multiple processes match."""
     # This is mainly used in tests. Actual use should rely on systemd and if non-Linux operating systems
@@ -451,7 +478,7 @@ def wait_for_port(*, host, port, timeout):
     raise Exception(f"Could not connect to {host}:{port} in {timeout} seconds")
 
 
-def relay_log_name(*, prefix, index, full_path=True):
+def relay_log_name(*, prefix: str, index: int, full_path: bool = True):
     name = f"{prefix}.{index:06}"
     if not full_path:
         name = os.path.basename(name)

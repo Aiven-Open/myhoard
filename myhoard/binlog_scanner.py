@@ -1,8 +1,8 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .append_only_state_manager import AppendOnlyStateManager
 from .state_manager import StateManager
-from .util import build_gtid_ranges, read_gtids_from_log
-from typing import List, Optional, Tuple, TypedDict
+from .util import build_gtid_ranges, GtidRangeDict, read_gtids_from_log
+from typing import List, Optional, TypedDict
 
 import logging
 import os
@@ -14,7 +14,7 @@ class BinlogInfo(TypedDict):
     file_name: str
     file_size: int
     full_name: str
-    gtid_ranges: List[Tuple[int, int, str, int, int]]
+    gtid_ranges: List[GtidRangeDict]
     local_index: int
     processed_at: float
     processing_time: float
