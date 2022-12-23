@@ -1056,10 +1056,16 @@ class Controller(threading.Thread):
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()
-        last_normalized_backup_time = None
         most_recent_scheduled = None
+        last_normalized_backup_time = None
         if self.backup_streams:
-            last_normalized_backup_time = max(stream.state["normalized_backup_time"] for stream in self.backup_streams)
+            normalized_backup_times = [
+                stream.state["normalized_backup_time"]
+                for stream in self.backup_streams
+                if stream.state["normalized_backup_time"]
+            ]
+            if normalized_backup_times:
+                last_normalized_backup_time = max(normalized_backup_times)
             scheduled_streams = [
                 stream
                 for stream in self.backup_streams
