@@ -9,6 +9,8 @@ from .util import (
     change_master_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
+    GtidExecuted,
+    GtidRangeDict,
     make_gtid_range_string,
     mysql_cursor,
     parse_fs_metadata,
@@ -23,6 +25,7 @@ from rohmu.encryptor import DecryptSink
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
+from typing import Any, Dict, List, Optional, TypedDict
 
 import contextlib
 import datetime
@@ -38,6 +41,41 @@ import time
 
 ERR_CANNOT_CONNECT = 2003
 ERR_BACKUP_IN_PROGRESS = 4085
+
+
+class BaseBackup(TypedDict):
+    pass
+
+
+class Backup(TypedDict):
+
+    basebackup_info: BaseBackup
+    closed_at: Optional[float]
+    completed_at: Optional[float]
+    recovery_site: bool
+    stream_id: str
+    resumable: bool
+    site: str
+
+
+class BackupRequest(TypedDict):
+    backup_reason: BackupStream.BackupReason
+    normalized_backup_time: str
+
+
+class BinlogStream(TypedDict):
+    site: str
+    stream_id: int
+
+
+class RestoreOptions(TypedDict):
+    binlog_streams: List[BinlogStream]
+    pending_binlogs_state_file: str
+    state_file: str
+    stream_id: int
+    site: str
+    target_time: float
+    target_time_approximate_ok: bool
 
 
 class Controller(threading.Thread):
@@ -64,6 +102,25 @@ class Controller(threading.Thread):
     BACKUP_REFRESH_ACTIVE_MULTIPLIER = 10.0
     BINLOG_TRANSFER_RATE_CALCULATION_WINDOW = 30.0
     ITERATION_SLEEP = 1.0
+
+    class State(TypedDict):
+        backup_request: Optional[BackupRequest]
+        backups: List[Backup]
+        backups_fetched_at: int
+        binlogs_purged_at: int
+        errors: int
+        force_promote: bool
+        last_binlog_purge: float
+        last_binlog_rotation: float
+        last_could_have_purged: float
+        mode: "Controller.Mode"
+        owned_stream_ids: List[int]
+        promote_details: Dict[str, Any]
+        promote_on_restore_completion: bool
+        replication_state: Dict[str, GtidExecuted]
+        restore_options: dict
+        server_uuid: Optional[str]
+        uploaded_binlogs: list
 
     def __init__(
         self,
@@ -124,10 +181,10 @@ class Controller(threading.Thread):
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
         self.restore_coordinator = None
-        self.seen_basebackup_infos = {}
+        self.seen_basebackup_infos: Dict[str, BaseBackup] = {}
         self.server_id = server_id
         self.site_transfers = {}
-        self.state = {
+        self.state: Controller.State = {
             "backup_request": {},
             "backups": [],
             "backups_fetched_at": 0,
@@ -148,21 +205,21 @@ class Controller(threading.Thread):
         }
         self.state_dir = state_dir
         state_file = os.path.join(state_dir, "myhoard_controller_state.json")
-        self.state_manager = StateManager(lock=self.lock, state=self.state, state_file=state_file)
+        self.state_manager = StateManager[Controller.State](lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
         self.temp_dir = temp_dir
         self.wakeup_event = threading.Event()
         self._get_upload_backup_site()
         self._update_mode_tag()
 
-    def is_log_backed_up(self, *, log_index):
+    def is_log_backed_up(self, *, log_index: int):
         return all(
             # Only consider streams that are actively backing up binlogs
             not backup_stream.is_streaming_binlogs() or backup_stream.is_log_backed_up(log_index=log_index)
             for backup_stream in self.backup_streams
         )
 
-    def is_safe_to_reload(self):
+    def is_safe_to_reload(self) -> bool:
         restore_coordinator = self.restore_coordinator
         if restore_coordinator and restore_coordinator.phase == RestoreCoordinator.Phase.restoring_basebackup:
             return False
@@ -172,27 +229,31 @@ class Controller(threading.Thread):
                     return False
         return True
 
-    def mark_backup_requested(self, *, backup_reason, normalized_backup_time=None):
-        normalized_backup_time = normalized_backup_time or self._current_normalized_backup_timestamp()
-        new_request = {"backup_reason": backup_reason, "normalized_backup_time": normalized_backup_time}
+    def mark_backup_requested(
+        self, *, backup_reason: BackupStream.BackupReason, normalized_backup_time: Optional[str] = None
+    ) -> None:
+        new_request: BackupRequest = {
+            "backup_reason": backup_reason,
+            "normalized_backup_time": normalized_backup_time or self._current_normalized_backup_timestamp(),
+        }
         with self.lock:
-            old = self.state["backup_request"]
-            if old:
+            if self.state["backup_request"]:
+                old_request: BackupRequest = self.state["backup_request"]
                 if (
-                    old == new_request
-                    or normalized_backup_time < old["normalized_backup_time"]
+                    old_request == new_request
+                    or new_request["normalized_backup_time"] < old_request["normalized_backup_time"]
                     # Prefer storing "scheduled" as backup reason since that reduces chance of trying to correct
                     # backup schedule too quickly in case of backup time has been changed and manual backup is created
                     or (
-                        normalized_backup_time == old["normalized_backup_time"]
-                        and old["backup_reason"] == BackupStream.BackupReason.scheduled
+                        new_request["normalized_backup_time"] == old_request["normalized_backup_time"]
+                        and old_request["backup_reason"] == BackupStream.BackupReason.scheduled
                     )
                 ):
                     return
             self.state_manager.update_state(backup_request=new_request)
 
     @property
-    def mode(self):
+    def mode(self) -> Mode:
         return self.state["mode"]
 
     def restore_backup(self, *, site, stream_id, target_time=None, target_time_approximate_ok=None):
@@ -514,12 +575,12 @@ class Controller(threading.Thread):
                 )
         return backups
 
-    def _apply_downloaded_remote_binlogs(self):
+    def _apply_downloaded_remote_binlogs(self) -> None:
         to_apply = self.state["promote_details"].get("binlogs_to_apply")
         if self.state["promote_details"].get("binlogs_applying") or not to_apply:
             return
 
-        expected_ranges = []
+        expected_ranges: List[GtidRangeDict] = []
         with mysql_cursor(**self.mysql_client_params) as cursor:
             # Stop IO and SQL slaves so that we can flush relay logs and retain the old log files. This allows
             # us to replace the empty files with ones that have actual content and make the SQL thread apply
@@ -581,9 +642,9 @@ class Controller(threading.Thread):
             change_master_to(cursor=cursor, options=options)
             cursor.execute("START SLAVE SQL_THREAD")
             expected_file = self._relay_log_name(index=first_index + len(to_apply), full_path=False)
-            expected_ranges = make_gtid_range_string(expected_ranges)
+            expected_ranges_str = make_gtid_range_string(expected_ranges)
             self.log.info(
-                "Started SQL thread, waiting for file %r and GTID range %r to be reached", expected_file, expected_ranges
+                "Started SQL thread, waiting for file %r and GTID range %r to be reached", expected_file, expected_ranges_str
             )
             self.state_manager.update_state(
                 promote_details={
@@ -591,7 +652,7 @@ class Controller(threading.Thread):
                     "binlogs_applying": to_apply,
                     "binlogs_to_apply": [],
                     "expected_file": expected_file,
-                    "expected_ranges": expected_ranges,
+                    "expected_ranges": expected_ranges_str,
                 }
             )
 
@@ -701,8 +762,8 @@ class Controller(threading.Thread):
         if len(self.backup_streams) >= 2:
             return
         with self.lock:
-            request = self.state["backup_request"]
-            if request:
+            if self.state["backup_request"]:
+                request = self.state["backup_request"]
                 self._start_new_backup(
                     backup_reason=request["backup_reason"],
                     normalized_backup_time=request["normalized_backup_time"],
@@ -1467,7 +1528,7 @@ class Controller(threading.Thread):
 
         return True
 
-    def _start_new_backup(self, *, backup_reason, normalized_backup_time):
+    def _start_new_backup(self, *, backup_reason: BackupStream.BackupReason, normalized_backup_time: str) -> None:
         stream_id = BackupStream.new_stream_id()
         site_id, backup_site = self._get_upload_backup_site()
         stream = BackupStream(
