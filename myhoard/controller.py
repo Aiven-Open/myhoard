@@ -17,6 +17,7 @@ from .util import (
     parse_fs_metadata,
     RateTracker,
     relay_log_name,
+    restart_unexpected_dead_sql_thread,
 )
 from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
@@ -742,8 +743,7 @@ class Controller(threading.Thread):
                 else:
                     sql_thread_running = slave_status["Slave_SQL_Running"]
                     if sql_thread_running != "Yes":
-                        self.log.warning("Expected SQL thread to be running state is %s, starting it", sql_thread_running)
-                        cursor.execute("START SLAVE SQL_THREAD")
+                        restart_unexpected_dead_sql_thread(cursor, slave_status, self.stats, self.log)
                     return
             else:
                 self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)

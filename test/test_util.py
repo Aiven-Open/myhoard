@@ -280,3 +280,33 @@ class TestDetectRunningProcessId:
             raise AssertionError(f"Could not match command or matched twice:\n{output_bytes.decode('ascii')}")
         no_id, output_bytes = myhoard_util.detect_running_process_id("certainlynosuchprocesscurrentlyrunning")
         assert no_id is None
+
+
+def test_restart_unexpected_dead_sql_thread() -> None:
+    # The thread died
+    slave_status = {
+        "Slave_SQL_Running": "No",
+        "Last_SQL_Error_Timestamp": "2210102 09:42:42",
+        "Last_SQL_Errno": "1023",
+        "Last_SQL_Error": "Ran out of memory",
+    }
+    mock_stats = Mock()
+    mock_logger = Mock()
+    mock_cursor = Mock()
+    myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, slave_status, mock_stats, mock_logger)
+    assert mock_stats.increase.call_args.args == ("myhoard.unexpected_sql_thread_starts",)
+    assert mock_cursor.execute.call_args.args == ("START SLAVE SQL_THREAD",)
+
+    # It's not running, but MySQL doesn't report a reason it's died
+    slave_status = {
+        "Slave_SQL_Running": "No",
+        "Last_SQL_Error_Timestamp": "2210102 09:42:42",
+        "Last_SQL_Errno": "0",
+        "Last_SQL_Error": "",
+    }
+    mock_stats = Mock()
+    mock_logger = Mock()
+    mock_cursor = Mock()
+    myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, slave_status, mock_stats, mock_logger)
+    assert mock_stats.increase.call_args.args == ("myhoard.unexpected_sql_thread_starts",)
+    assert mock_cursor.execute.call_args.args == ("START SLAVE SQL_THREAD",)

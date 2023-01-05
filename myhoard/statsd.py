@@ -81,7 +81,7 @@ class StatsClient:
             raise ValueError(f"Invalid int value for {metric}: {value!r}")
         self._send(metric, b"g", int(value), tags)
 
-    def increase(self, metric: str, inc_value=1, tags=None) -> None:
+    def increase(self, metric: str, inc_value: int = 1, tags=None) -> None:
         self._send(metric, b"c", inc_value, tags)
 
     def timing(self, metric: str, value: Union[float, int, datetime.timedelta], tags=None) -> None:
