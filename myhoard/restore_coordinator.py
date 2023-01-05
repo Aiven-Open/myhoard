@@ -10,6 +10,7 @@ from .util import (
     build_gtid_ranges,
     change_master_to,
     ERR_TIMEOUT,
+    get_slave_status,
     GtidRangeDict,
     make_gtid_range_string,
     mysql_cursor,
@@ -18,6 +19,7 @@ from .util import (
     read_gtids_from_log,
     relay_log_name,
     rsa_decrypt_bytes,
+    SlaveStatus,
     sort_and_filter_binlogs,
     track_rate,
 )
@@ -368,7 +370,7 @@ class RestoreCoordinator(threading.Thread):
         finally:
             self.basebackup_restore_operation = None
 
-    def refresh_binlogs(self):
+    def refresh_binlogs(self) -> None:
         self._fetch_more_binlog_infos(force=True)
         if not self.pending_binlogs:
             self.log.info("No binary logs available, marking restore completed immediately")
@@ -376,7 +378,7 @@ class RestoreCoordinator(threading.Thread):
         else:
             self.update_state(phase=self.Phase.applying_binlogs)
 
-    def apply_binlogs(self):
+    def apply_binlogs(self) -> None:
         binlogs = self._get_binlogs_to_apply()
         if not binlogs:
             return
@@ -539,7 +541,7 @@ class RestoreCoordinator(threading.Thread):
             )
             self.pending_binlog_manager.remove_many_from_head(len(binlogs))
 
-    def wait_for_apply_to_finish(self):
+    def wait_for_apply_to_finish(self) -> bool:
         if self.state["force_complete"]:
             self.log.warning("Force completion requested. Treating binlog restoration as complete")
             self.update_state(
@@ -602,7 +604,7 @@ class RestoreCoordinator(threading.Thread):
             self.update_state(binlog_name_offset=offset, phase=phase)
         return apply_finished
 
-    def finalize_restoration(self):
+    def finalize_restoration(self) -> None:
         # If there were no binary logs to restore MySQL server has not been started yet and trying
         # to connect to it would fail. If it hasn't been started (no mysql_params specified) it also
         # doesn't have slave configured or running so we can just skip the calls below.
@@ -617,7 +619,7 @@ class RestoreCoordinator(threading.Thread):
         self.update_state(phase=self.Phase.completed)
         self.log.info("Backup restoration completed")
 
-    def read_queue(self):
+    def read_queue(self) -> None:
         try:
             result = self.queue_in.get(timeout=self._get_iteration_sleep())
             # Empty results may be posted to wake up the thread
@@ -634,7 +636,7 @@ class RestoreCoordinator(threading.Thread):
         except queue.Empty:
             pass
 
-    def update_state(self, **kwargs):
+    def update_state(self, **kwargs) -> None:
         self.state_manager.update_state(**kwargs)
 
     def _are_all_gtids_executed(self, gtid_ranges: Iterable[GtidRangeDict]):
@@ -1090,8 +1092,7 @@ class RestoreCoordinator(threading.Thread):
     def _generate_updated_relay_log_index(self, binlogs, names, cursor):
         # Should already be stopped but just to make sure
         cursor.execute("STOP SLAVE")
-        cursor.execute("SHOW SLAVE STATUS")
-        replica_status = cursor.fetchone()
+        replica_status = get_slave_status(cursor)
         # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
         initial_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
 
@@ -1115,7 +1116,7 @@ class RestoreCoordinator(threading.Thread):
                     index_file.write(("\n".join(names) + "\n").encode("utf-8"))
             self.update_state(last_flushed_index=last_flushed_index, write_relay_log_manually=False)
             cursor.execute("SHOW SLAVE STATUS")
-            replica_status = cursor.fetchone()
+            replica_status = get_slave_status(cursor)
             # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
             final_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
             self.log.info(
@@ -1168,7 +1169,7 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index - 1
         self.update_state(last_flushed_index=last_renamed_index, last_renamed_index=last_renamed_index)
 
-    def _start_sql_thread_if_not_running(self, slave_status):
+    def _start_sql_thread_if_not_running(self, slave_status: SlaveStatus):
         # Sometimes mysqld can be OOM-killed during the backup restoration.
         # In that case we should check if SQL thread is running and try restarting it if it is not.
         if slave_status["Slave_SQL_Running"] == "Yes":
@@ -1189,13 +1190,16 @@ class RestoreCoordinator(threading.Thread):
         with self._mysql_cursor() as cursor:
             cursor.execute("START SLAVE SQL_THREAD")
 
-    def _check_sql_slave_status(self):
+    def _check_sql_slave_status(self) -> tuple[bool, int]:
         expected_range = self.state["current_executed_gtid_target"]
         expected_index = self.state["current_relay_log_target"]
 
         with self._mysql_cursor() as cursor:
-            cursor.execute("SHOW SLAVE STATUS")
-            slave_status = cursor.fetchone()
+            slave_status = get_slave_status(cursor)
+            if not slave_status:
+                raise Exception(
+                    "No status available from SHOW SLAVE STATUS, perhaps MySQL was restarted while applying binlog."
+                )
             current_file = slave_status["Relay_Log_File"]
             sql_running_state = slave_status["Slave_SQL_Running_State"]
             current_index = int(current_file.rsplit(".", 1)[-1])
@@ -1265,15 +1269,19 @@ class RestoreCoordinator(threading.Thread):
                 cursor.execute("STOP SLAVE")
                 # Current file could've been updated since we checked it the first time before slave was stopped.
                 # Get the latest value here so that we're sure to start from correct index
-                cursor.execute("SHOW SLAVE STATUS")
-                current_file = cursor.fetchone()["Relay_Log_File"]
+                replica_status = get_slave_status(cursor)
+                if not replica_status:
+                    raise Exception(
+                        "No status available from SHOW SLAVE STATUS, perhaps MySQL was restarted while applying binlog."
+                    )
+                current_file = replica_status["Relay_Log_File"]
                 last_index = int(current_file.rsplit(".", 1)[-1])
                 if last_index > current_index:
                     self.log.info("Relay index incremented from %s to %s after STOP SLAVE", current_index, last_index)
                     current_index = last_index
             return found, current_index
 
-    def _ensure_mysql_server_is_started(self, *, with_binlog, with_gtids):
+    def _ensure_mysql_server_is_started(self, *, with_binlog: bool, with_gtids: bool) -> None:
         if self.state["mysql_params"] == {"with_binlog": with_binlog, "with_gtids": with_gtids}:
             return
 
@@ -1285,7 +1293,7 @@ class RestoreCoordinator(threading.Thread):
                 server_uuid = cursor.fetchone()["server_uuid"]
         self.update_state(mysql_params={"with_binlog": with_binlog, "with_gtids": with_gtids}, server_uuid=server_uuid)
 
-    def _patch_gtid_executed(self, binlog):
+    def _patch_gtid_executed(self, binlog) -> None:
         if self.state["gtids_patched"]:
             return
 
@@ -1346,10 +1354,10 @@ class RestoreCoordinator(threading.Thread):
 
         self.state.update(gtids_patched=True)
 
-    def _relay_log_name(self, *, index, full_path=True):
+    def _relay_log_name(self, *, index, full_path=True) -> str:
         return relay_log_name(prefix=self.mysql_relay_log_prefix, index=index, full_path=full_path)
 
-    def _relay_log_prefetch_name(self, *, index):
+    def _relay_log_prefetch_name(self, *, index: int) -> str:
         local_name = self._relay_log_name(index=index)
         return f"{local_name}.prefetch"
 
@@ -1366,7 +1374,7 @@ class RestoreCoordinator(threading.Thread):
         for worker in self.worker_processes:
             worker.start()
 
-    def _switch_to_next_binlog_stream(self):
+    def _switch_to_next_binlog_stream(self) -> bool:
         current_index = self.state["current_binlog_stream_index"]
         if current_index + 1 >= len(self.binlog_streams):
             return False
