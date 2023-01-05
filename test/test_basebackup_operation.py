@@ -4,6 +4,7 @@ from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.basebackup_operation import BasebackupOperation
 from typing import IO
 from unittest import SkipTest
+from unittest.mock import mock_open, patch
 
 import myhoard.util as myhoard_util
 import os
@@ -180,3 +181,76 @@ def test_backup_with_non_optimized_tables(mysql_master: MySQLConfig) -> None:
         temp_dir=mysql_master.base_dir,
     )
     op.create_backup()
+
+
+BACKUP_INFO_FILE_TEMPLATE = """
+uuid = 4fe5defe-900a-11ed-9921-0261ecef4636
+name = blah
+tool_name = xtrabackup
+tool_command = --defaults-file=/tmp/mysql.conf --backup --compress --no-version-check --stream xbstream --target-dir /tmp/ --extra-lsndir=/lsn/
+tool_version = 8.0.30-23.1.aiven
+ibbackup_version = 8.0.30-23.1.aiven
+server_version = 8.0.30
+start_time = 2023-01-09 10:42:26
+end_time = 2023-01-09 10:42:28
+lock_time = 1
+{binlog_line}
+innodb_from_lsn = 0
+innodb_to_lsn = 31122960
+partial = N
+incremental = N
+format = xbstream
+compressed = compressed
+encrypted = N
+"""
+
+
+def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
+    op = BasebackupOperation(
+        encryption_algorithm="AES256",
+        encryption_key=os.urandom(24),
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
+        optimize_tables_before_backup=True,
+        progress_callback=None,
+        stats=build_statsd_client(),
+        stream_handler=None,
+        temp_dir=mysql_master.base_dir,
+    )
+    # lsn_dir is not specified
+    with pytest.raises(AssertionError):
+        op._process_binlog_info()  # pylint: disable=protected-access
+    assert op.binlog_info is None
+
+    op.lsn_dir = "/tmp/lsn-dir"
+    with patch("builtins.open", side_effect=FileNotFoundError):
+        with pytest.raises(FileNotFoundError):
+            op._process_binlog_info()  # pylint: disable=protected-access
+        assert op.binlog_info is None
+
+    line = "abrakadabra"
+    with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
+        op._process_binlog_info()  # pylint: disable=protected-access
+    assert op.binlog_info is None
+
+    line = (
+        "binlog_pos = filename 'binlog.000220', position '236', GTID of the last change "
+        "'00006582-5ce4-11ea-9748-22f28f5a4c51:1-55419,00ae3f16-75ce-11ea-9b71-7266f0f43b98:1-4104'"
+    )
+    with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
+        op._process_binlog_info()  # pylint: disable=protected-access
+    assert op.binlog_info == {
+        "file_name": "binlog.000220",
+        "file_position": 236,
+        "gtid": "00006582-5ce4-11ea-9748-22f28f5a4c51:1-55419,00ae3f16-75ce-11ea-9b71-7266f0f43b98:1-4104",
+    }
+
+    line = "binlog_pos = filename 'binlog.000221', position '238'"
+    with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
+        op._process_binlog_info()  # pylint: disable=protected-access
+    assert op.binlog_info == {
+        "file_name": "binlog.000221",
+        "file_position": 238,
+        "gtid": None,
+    }
