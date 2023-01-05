@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .backup_stream import BackupStream
 from .binlog_scanner import BinlogScanner
-from .errors import BadRequest
+from .errors import BadRequest, UnknownBackupSite
 from .restore_coordinator import RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
@@ -673,9 +673,16 @@ class Controller(threading.Thread):
             }
             self.state_manager.update_state(uploaded_binlogs=self.state["uploaded_binlogs"] + [binlog_info])
 
+    def _lookup_backup_site(self, site_name):
+        try:
+            return self.backup_sites[site_name]
+        except KeyError:
+            self.stats.increase("myhoard.unknown_backup_site", tags={"backup_site": site_name})
+            raise UnknownBackupSite(site_name, list(self.backup_sites.keys()))
+
     def _build_backup_stream(self, backup):
         stream_id = backup["stream_id"]
-        backup_site = self.backup_sites[backup["site"]]
+        backup_site = self._lookup_backup_site(backup["site"])
         # Some of the values being passed here like backup_reason will be set correctly either based on
         # data stored in local state file if available or in backup file storage if local state is not available
         return BackupStream(
@@ -778,7 +785,7 @@ class Controller(threading.Thread):
             return
 
         options = self.state["restore_options"]
-        backup_site = self.backup_sites[options["site"]]
+        backup_site = self._lookup_backup_site(options["site"])
         storage_config = backup_site["object_storage"]
         self.log.info("Creating new restore coordinator")
         self.restore_coordinator = RestoreCoordinator(
