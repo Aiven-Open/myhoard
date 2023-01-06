@@ -222,12 +222,12 @@ class BasebackupOperation:
                     raise Exception(f"Operation abort requested: {self.abort_reason}")
 
             pending_output += self.proc.stderr.read() or b""
-            if exit_code == 0 and pending_output:
+            if exit_code is not None and pending_output:
                 for line in pending_output.splitlines():
                     self._process_output_line(line)
             # Process has exited but reader thread might still be processing stdout. Wait for
             # the thread to exit before proceeding
-            if exit_code == 0:
+            if exit_code is not None:
                 self.log.info("Process has exited, joining reader thread")
                 reader_thread.join()
                 reader_thread = None
