@@ -21,6 +21,14 @@ import threading
 CURSOR_TIMEOUT_DURING_OPTIMIZE: int = 120
 
 
+class AbortRequested(Exception):
+    """The base backup operation was aborted by request."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"reason: {reason}")
+        self.reason = reason
+
+
 class BasebackupOperation:
     """Creates a new basebackup. Provides callback for getting progress info, extracts
     details of the created backup (like the binlog position up to which the backup has
@@ -219,7 +227,7 @@ class BasebackupOperation:
                 if reader_thread.exception:
                     raise reader_thread.exception  # pylint: disable=raising-bad-type
                 if self.abort_reason:
-                    raise Exception(f"Operation abort requested: {self.abort_reason}")
+                    raise AbortRequested(self.abort_reason)
 
             pending_output += self.proc.stderr.read() or b""
             if exit_code == 0 and pending_output:
@@ -231,6 +239,9 @@ class BasebackupOperation:
                 self.log.info("Process has exited, joining reader thread")
                 reader_thread.join()
                 reader_thread = None
+        except AbortRequested as ex:
+            self.log.info("Abort requested: %s", ex.reason)
+            raise
         except Exception as ex:
             pending_output += self.proc.stderr.read() or b""
             self.log.error("Error %r occurred while creating backup, output: %r", ex, pending_output)
