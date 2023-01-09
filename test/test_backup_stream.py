@@ -61,6 +61,8 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         temp_dir=mysql_master.base_dir,
     )
 
+    assert mysql_master.server_id is not None
+
     scanner = BinlogScanner(
         binlog_prefix=mysql_master.config_options.binlog_file_prefix,
         server_id=mysql_master.server_id,
@@ -131,10 +133,12 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
 
         backup_sites = {
             "default": {
+                "recovery_only": False,
+                "encryption_keys": {},
                 "object_storage": {
                     "directory": backup_target_location,
                     "storage_type": "local",
-                }
+                },
             }
         }
         backups = Controller.get_backup_list(backup_sites)

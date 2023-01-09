@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
+from .binlog_scanner import BinlogInfo
 from .errors import XtraBackupError
 from .state_manager import StateManager
 from .util import (
@@ -9,10 +10,12 @@ from .util import (
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
     first_contains_gtids_not_in_second,
+    GtidExecuted,
     make_fs_metadata,
     mysql_cursor,
     parse_fs_metadata,
     parse_gtid_range_string,
+    RateTracker,
     rsa_encrypt_bytes,
     sort_and_filter_binlogs,
     track_rate,
@@ -29,6 +32,7 @@ from rohmu.object_storage.s3 import S3Transfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
+from typing import Any, Callable, cast, Dict, Iterable, Iterator, List, Optional, Set, Tuple, TYPE_CHECKING, TypedDict
 
 import contextlib
 import enum
@@ -40,7 +44,29 @@ import threading
 import time
 import uuid
 
+if TYPE_CHECKING:
+    from .statsd import StatsClient
+    from rohmu.object_storage.base import BaseTransfer
+
+
 BINLOG_BUCKET_SIZE = 500
+
+
+class RemoteBinlogInfo(BinlogInfo):
+    remote_index: int
+    remote_key: str
+    compression_algorithm: str
+
+
+class Compression(TypedDict):
+    algorithm: Optional[str]
+    level: int
+
+
+class PromotionInfo(TypedDict):
+    promoted_at: float
+    server_id: int
+    start_index: int
 
 
 class BackupStream(threading.Thread):
@@ -84,47 +110,77 @@ class BackupStream(threading.Thread):
         requested = "requested"
         scheduled = "scheduled"
 
+    class State(TypedDict):
+        active_details: Dict
+        backup_errors: int
+        basebackup_errors: int
+        basebackup_file_metadata: Optional[Dict]
+        basebackup_info: Dict
+        closed_info: Dict
+        completed_info: Dict
+        backup_reason: Optional["BackupStream.BackupReason"]
+        created_at: float
+        immediate_scan_required: bool
+        initial_latest_complete_binlog_index: Optional[int]
+        last_binlog_upload_time: int
+        last_processed_local_index: Optional[int]
+        last_remote_state_check: int
+        # Map of local index to remote key entries for binary logs we have not yet uploaded. Can be used to
+        # perform server side copy of the file instead of local upload
+        local_index_to_remote_key: Dict[int, str]
+        mode: "BackupStream.Mode"
+        next_index: int
+        normalized_backup_time: Optional[str]
+        pending_binlogs: List[BinlogInfo]
+        prepare_details: Dict
+        # Set of GTIDs that have been stored persistently to file storage.
+        remote_gtid_executed: GtidExecuted
+        remote_read_errors: int
+        remote_write_errors: int
+        stream_id: int
+        updated_at: float
+        valid_local_binlog_found: bool
+
     def __init__(
         self,
         *,
-        backup_reason,
-        binlog_progress_tracker=None,
-        binlogs=None,
-        compression=None,
-        file_storage_setup_fn,
+        backup_reason: Optional["BackupStream.BackupReason"],
+        binlog_progress_tracker: Optional[RateTracker] = None,
+        binlogs: Optional[List[BinlogInfo]] = None,
+        compression: Optional[Compression] = None,
+        file_storage_setup_fn: Callable[[], "BaseTransfer"],
         file_uploaded_callback=None,
-        latest_complete_binlog_index=None,
-        mode,
+        latest_complete_binlog_index: Optional[int] = None,
+        mode: "BackupStream.Mode",
         mysql_client_params,
-        mysql_config_file_name,
-        mysql_data_directory,
-        normalized_backup_time,
+        mysql_config_file_name: str,
+        mysql_data_directory: str,
+        normalized_backup_time: Optional[str],
         optimize_tables_before_backup=False,
         rsa_public_key_pem,
         remote_binlogs_state_file,
-        server_id,
-        site,
-        state_file,
-        stats,
-        stream_id=None,
-        temp_dir,
-    ):
+        server_id: int,
+        site: str,
+        state_file: str,
+        stats: "StatsClient",
+        stream_id: Optional[int] = None,
+        temp_dir: str,
+    ) -> None:
         super().__init__()
         stream_id = stream_id or self.new_stream_id()
         self.basebackup_bytes_uploaded = 0
-        self.basebackup_operation = None
-        self.basebackup_progress = None
+        self.basebackup_operation: Optional[BasebackupOperation] = None
+        self.basebackup_progress: Optional[Dict[str, Any]] = None
         self.compression = compression
-        self.current_upload_index = None
+        self.current_upload_index: Optional[int] = None
         # This file storage object must only be called from BackupStream's own thread. Calls from
         # other threads must use file_storage_setup_fn to create new file storage instance
-        self.file_storage = None
         self.file_storage_setup_fn = file_storage_setup_fn
+        self.file_storage: Optional["BaseTransfer"] = None
         self.file_uploaded_callback = file_uploaded_callback
         self.is_running = True
         self.iteration_sleep = BackupStream.ITERATION_SLEEP
-        self.known_remote_binlogs = set()
-        self.last_basebackup_attempt = None
+        self.last_basebackup_attempt: Optional[float] = None
         self.lock = threading.RLock()
         self.log = logging.getLogger(f"{self.__class__.__name__}/{stream_id}")
         self.mysql_client_params = mysql_client_params
@@ -134,12 +190,12 @@ class BackupStream(threading.Thread):
         self.binlog_progress_tracker = binlog_progress_tracker
         # Keep track of remote binlogs so that we can drop binlogs containing only GTID
         # ranges that have already been backed up from our list of pending binlogs
-        remote_binlogs = []
-        self.remote_binlog_manager = AppendOnlyStateManager(
+        remote_binlogs: List[RemoteBinlogInfo] = []
+        self.remote_binlog_manager = AppendOnlyStateManager[RemoteBinlogInfo](
             entries=remote_binlogs, lock=self.lock, state_file=remote_binlogs_state_file
         )
         self.remote_binlogs = remote_binlogs
-        self.known_remote_binlogs = {binlog["remote_index"] for binlog in self.remote_binlogs}
+        self.known_remote_binlogs: Set[int] = {binlog["remote_index"] for binlog in self.remote_binlogs}
         self.remote_poll_interval = BackupStream.REMOTE_POLL_INTERVAL
         if not isinstance(rsa_public_key_pem, bytes):
             rsa_public_key_pem = rsa_public_key_pem.encode("ascii")
@@ -151,7 +207,7 @@ class BackupStream(threading.Thread):
         active_details = {}
         if mode == self.Mode.active:
             active_details["phase"] = self.ActivePhase.basebackup
-        self.state = {
+        self.state: BackupStream.State = {
             "active_details": active_details,
             "backup_errors": 0,
             "basebackup_errors": 0,
@@ -194,7 +250,7 @@ class BackupStream(threading.Thread):
         yield
         self.stop()
 
-    def activate(self):
+    def activate(self) -> None:
         with self.lock:
             if self.mode != self.Mode.promoted:
                 raise ValueError(f"Only promoted streams can be activated, current mode is {self.mode}")
@@ -209,13 +265,13 @@ class BackupStream(threading.Thread):
             self.wakeup_event.set()
 
     @property
-    def active_phase(self):
+    def active_phase(self) -> Optional["BackupStream.ActivePhase"]:
         with self.lock:
             if self.mode != self.Mode.active:
                 return None
             return self.state["active_details"]["phase"]
 
-    def add_binlogs(self, binlogs):
+    def add_binlogs(self, binlogs: Iterable[BinlogInfo]) -> None:
         if not self.is_immediate_scan_required() and not binlogs:
             return
         # If the stream has been closed we don't care about tracking binlogs for it anymore
@@ -234,7 +290,7 @@ class BackupStream(threading.Thread):
         if binlogs and self.is_streaming_binlogs():
             self.wakeup_event.set()
 
-    def add_remote_reference(self, *, local_index, remote_key):
+    def add_remote_reference(self, *, local_index: int, remote_key: str) -> None:
         with self.lock:
             if local_index in self.state["local_index_to_remote_key"] or local_index == self.current_upload_index:
                 return
@@ -251,13 +307,13 @@ class BackupStream(threading.Thread):
             )
 
     @property
-    def binlog_upload_age(self):
+    def binlog_upload_age(self) -> float:
         last_upload = self.state["last_binlog_upload_time"]
         if self.is_streaming_binlogs():
             return time.time() - last_upload
         else:
             # If we're not supposed to be streaming binlogs then report age as 0
-            return 0
+            return 0.0
 
     @property
     def binlog_upload_delay(self) -> int:
@@ -273,14 +329,14 @@ class BackupStream(threading.Thread):
         return int(now - oldest_mtime)
 
     @property
-    def created_at(self):
+    def created_at(self) -> float:
         return self.state["created_at"]
 
     @property
-    def highest_processed_local_index(self):
+    def highest_processed_local_index(self) -> int:
         return self.state["last_processed_local_index"] or -1
 
-    def is_binlog_safe_to_delete(self, binlog, *, exclude_uuid=None):
+    def is_binlog_safe_to_delete(self, binlog: BinlogInfo, *, exclude_uuid: Optional[str] = None) -> bool:
         """This function is somewhat similar to is_log_backed_up but performs a more advanced check of whether
         a specific binlog, given full log info, has been backed up. This method can be called both on active
         and observe nodes (as opposed to is_log_backed_up, which is only for active streams). This can be used
@@ -313,20 +369,20 @@ class BackupStream(threading.Thread):
 
         return backed_up
 
-    def is_immediate_scan_required(self):
+    def is_immediate_scan_required(self) -> bool:
         return self.state["immediate_scan_required"]
 
-    def is_log_backed_up(self, *, log_index):
+    def is_log_backed_up(self, *, log_index: int) -> bool:
         return log_index <= self.highest_processed_local_index
 
-    def is_streaming_binlogs(self):
+    def is_streaming_binlogs(self) -> bool:
         with self.lock:
             if self.mode != BackupStream.Mode.active:
                 return False
             phase = self.state["active_details"]["phase"]
             return phase in {BackupStream.ActivePhase.binlog_catchup, BackupStream.ActivePhase.binlog}
 
-    def iterate_remote_binlogs(self, *, reverse=False):
+    def iterate_remote_binlogs(self, *, reverse: bool = False) -> Iterator[BinlogInfo]:
         with self.lock:
             if reverse:
                 binlogs = self.remote_binlogs[::-1]
@@ -335,7 +391,7 @@ class BackupStream(threading.Thread):
         for binlog in binlogs:
             yield binlog
 
-    def mark_as_closed(self):
+    def mark_as_closed(self) -> None:
         if self.state["closed_info"]:
             self.log.warning("Stream %s marked as closed multiple times", self.stream_id)
             return
@@ -351,7 +407,8 @@ class BackupStream(threading.Thread):
         )
         self.wakeup_event.set()
 
-    def _handle_pending_mark_as_closed(self):
+    def _handle_pending_mark_as_closed(self) -> None:
+        assert self.file_storage is not None
         self.log.info("Handling pending mark as closed request for stream %r", self.stream_id)
         closed_info = self.state["closed_info"]
         try:
@@ -366,7 +423,7 @@ class BackupStream(threading.Thread):
             self.state_manager.update_state(remote_write_errors=self.state["remote_write_errors"] + 1)
             self.stats.increase("myhoard.remote_write_errors")
 
-    def mark_as_completed(self):
+    def mark_as_completed(self) -> None:
         if self.state["completed_info"]:
             self.log.warning("Stream %s marked as completed multiple times", self.stream_id)
             return
@@ -382,7 +439,8 @@ class BackupStream(threading.Thread):
         )
         self.wakeup_event.set()
 
-    def _handle_pending_mark_as_completed(self):
+    def _handle_pending_mark_as_completed(self) -> None:
+        assert self.file_storage is not None
         self.log.info("Handling pending mark as completed request for stream %r", self.stream_id)
         completed_info = self.state["completed_info"]
         try:
@@ -398,7 +456,7 @@ class BackupStream(threading.Thread):
             self.stats.increase("myhoard.remote_write_errors")
 
     @property
-    def mode(self):
+    def mode(self) -> "BackupStream.Mode":
         return self.state["mode"]
 
     @staticmethod
@@ -406,16 +464,16 @@ class BackupStream(threading.Thread):
         return f"{datetime.now(timezone.utc).isoformat()}Z_{uuid.uuid4()}"
 
     @property
-    def pending_binlog_bytes(self):
+    def pending_binlog_bytes(self) -> int:
         with self.lock:
             return sum(binlog["file_size"] for binlog in self.state["pending_binlogs"])
 
     @property
-    def pending_binlog_count(self):
+    def pending_binlog_count(self) -> int:
         with self.lock:
             return len(self.state["pending_binlogs"])
 
-    def remove(self):
+    def remove(self) -> None:
         self.stop()
         file_storage = self.file_storage_setup_fn()
         self.delete_state()
@@ -427,11 +485,11 @@ class BackupStream(threading.Thread):
             self.log.error("Removing remote backup failed: %r", ex)
             self.stats.unexpected_exception(ex=ex, where="BackupStream.remove")
 
-    def delete_state(self):
+    def delete_state(self) -> None:
         self.state_manager.delete_state()
         self.remote_binlog_manager.delete_state()
 
-    def remove_binlogs(self, binlogs):
+    def remove_binlogs(self, binlogs: Iterable[BinlogInfo]) -> None:
         # If the stream has been closed we don't care about tracking binlogs for it anymore
         if not binlogs or self.state["closed_info"]:
             return
@@ -452,7 +510,7 @@ class BackupStream(threading.Thread):
                 self.log.info("Removed %s binlogs from stream %r", remove_count, self.stream_id)
                 self.state_manager.update_state(pending_binlogs=self.state["pending_binlogs"][remove_count:])
 
-    def run(self):
+    def run(self) -> None:
         self.log.info("Backup stream %r running", self.stream_id)
         consecutive_errors = 0
         while self.is_running:
@@ -494,7 +552,7 @@ class BackupStream(threading.Thread):
                 consecutive_errors += 1
                 time.sleep(sleep_time)
 
-    def start_preparing_for_promotion(self):
+    def start_preparing_for_promotion(self) -> None:
         with self.lock:
             if self.mode != BackupStream.Mode.observe:
                 raise ValueError(f"Invalid request to prepare promotion while in mode {self.mode}")
@@ -502,7 +560,7 @@ class BackupStream(threading.Thread):
             self.state_manager.update_state(mode=self.Mode.prepare_promotion)
             self.wakeup_event.set()
 
-    def stop(self):
+    def stop(self) -> None:
         self.log.info("Stopping backup stream")
         self.is_running = False
         self.wakeup_event.set()
@@ -515,7 +573,7 @@ class BackupStream(threading.Thread):
         self.log.info("Backup stream stopped")
 
     @property
-    def stream_id(self):
+    def stream_id(self) -> int:
         return self.state["stream_id"]
 
     def _basebackup_progress_callback(self, **kwargs):
@@ -554,12 +612,14 @@ class BackupStream(threading.Thread):
         )
         self.state_manager.update_state(basebackup_file_metadata=metadata)
 
-    def _build_full_name(self, name):
+    def _build_full_name(self, name: str) -> str:
         return f"{self.site}/{self.stream_id}/{name}"
 
-    def _cache_basebackup_info(self):
+    def _cache_basebackup_info(self) -> bool:
         if self.state["basebackup_info"]:
             return True
+
+        assert self.file_storage is not None
 
         try:
             info_str, _ = self.file_storage.get_contents_to_string(self._build_full_name("basebackup.json"))
@@ -579,9 +639,12 @@ class BackupStream(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
             return False
 
-    def _cache_file_metadata(self, *, missing_ok=True, remote_name, setting_name):
-        if self.state[setting_name]:
+    def _cache_file_metadata(self, *, missing_ok: bool = True, remote_name: str, setting_name: str) -> bool:
+        # There is no type for TypedDict keys, see: https://github.com/python/mypy/issues/7178
+        if self.state[setting_name]:  # type: ignore
             return True
+
+        assert self.file_storage is not None
 
         try:
             metadata = self.file_storage.get_metadata_for_key(self._build_full_name(remote_name))
@@ -596,11 +659,11 @@ class BackupStream(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
             raise
 
-    def _cache_remote_binlogs(self, *, ignore_own_promotion):
+    def _cache_remote_binlogs(self, *, ignore_own_promotion: bool) -> None:
         next_index = self.state["next_index"] or 1
         last_index = next_index - 1
         bucket = next_index // BINLOG_BUCKET_SIZE
-        new_binlogs = []
+        new_binlogs: List[RemoteBinlogInfo] = []
         highest_index = 0
         start_time = time.monotonic()
 
@@ -650,7 +713,7 @@ class BackupStream(threading.Thread):
                 next_index=new_binlogs[-1]["remote_index"] + 1, remote_gtid_executed=gtid_executed
             )
 
-    def _check_remote_state(self, *, force=False, ignore_own_promotion=False):
+    def _check_remote_state(self, *, force: bool = False, ignore_own_promotion: bool = False) -> None:
         last_check = self.state["last_remote_state_check"]
         # Don't fetch remote state if we've already done so or we're in active
         # backup mode, in which case we don't expect external changes
@@ -667,7 +730,7 @@ class BackupStream(threading.Thread):
 
         self.state_manager.update_state(last_remote_state_check=time.time())
 
-    def _get_iteration_sleep(self):
+    def _get_iteration_sleep(self) -> float:
         # Sleep less when in prepare_promotion mode because this should complete as soon as
         # possible to reduce downtime
         if self.mode == self.Mode.prepare_promotion:
@@ -675,8 +738,9 @@ class BackupStream(threading.Thread):
         else:
             return self.iteration_sleep
 
-    def _get_promotions(self, *, ignore_own_promotion):
-        promotions = {}
+    def _get_promotions(self, *, ignore_own_promotion: bool) -> Dict[int, int]:
+        promotions: Dict[int, PromotionInfo] = {}
+        assert self.file_storage is not None
         try:
             for info in self.file_storage.list_iter(self._build_full_name("promotions")):
                 # There could theoretically be multiple promotions with the same
@@ -705,9 +769,11 @@ class BackupStream(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
             raise
 
-    def _get_remote_basebackup_metadata(self):
+    def _get_remote_basebackup_metadata(self) -> bool:
         if self.state["basebackup_file_metadata"]:
             return True
+
+        assert self.file_storage is not None
 
         try:
             metadata = self.file_storage.get_metadata_for_key(self._build_full_name("basebackup.xbstream"))
@@ -723,9 +789,12 @@ class BackupStream(threading.Thread):
             self.stats.increase("myhoard.remove_read_errors")
             return False
 
-    def _list_new_binlogs_in_bucket(self, bucket, *, highest_index, next_index):
+    def _list_new_binlogs_in_bucket(
+        self, bucket: int, *, highest_index: int, next_index: int
+    ) -> Tuple[List[RemoteBinlogInfo], int]:
         """Most of the time there are no new files. Using list_iter with metadata is heavy for S3 so if file
         storage is S3 start by listing files without metadata and only fetch metadata for the new files."""
+        assert self.file_storage is not None
         full_bucket_name = self._build_full_name(f"binlogs/{bucket}")
         # If we're at the beginning of the bucket then just get everything with metadata
         # because our conditional metadata fetching optimization cannot make this any faster
@@ -751,7 +820,7 @@ class BackupStream(threading.Thread):
             new_binlogs.append(binlog)
         return new_binlogs, highest_index
 
-    def _mark_upload_completed(self, *, binlog, upload_time):
+    def _mark_upload_completed(self, *, binlog: RemoteBinlogInfo, upload_time: float) -> None:
         with self.lock:
             remote_keys = self.state["local_index_to_remote_key"]
             if binlog["local_index"] in remote_keys:
@@ -764,7 +833,7 @@ class BackupStream(threading.Thread):
                 pending_binlogs=self.state["pending_binlogs"][1:],
             )
 
-    def _prepare_promotion(self):
+    def _prepare_promotion(self) -> None:
         # Need to perform two-phased creation of promotion file:
         # 1. Update state
         # 2. Create promotion file with the next_index from step 1
@@ -794,10 +863,11 @@ class BackupStream(threading.Thread):
             )
         self.state_manager.update_state(mode=self.Mode.promoted, prepare_details={})
 
-    def _should_list_with_metadata(self, *, next_index):
+    def _should_list_with_metadata(self, *, next_index: int) -> bool:
         return next_index % BINLOG_BUCKET_SIZE == 0 or next_index == 1 or not isinstance(self.file_storage, S3Transfer)
 
-    def _take_basebackup(self):
+    def _take_basebackup(self) -> None:
+        assert self.file_storage is not None
         if self.last_basebackup_attempt is not None:
             fail_count = self.state["basebackup_errors"]
             # Max 14 means we'll eventually retry ~ every 50 minutes
@@ -934,7 +1004,7 @@ class BackupStream(threading.Thread):
         finally:
             self.basebackup_operation = None
 
-    def _upload_binlogs(self):
+    def _upload_binlogs(self) -> None:
         while True:
             with self.lock:
                 pending_binlogs = self.state["pending_binlogs"]
@@ -1000,7 +1070,8 @@ class BackupStream(threading.Thread):
             if not self._upload_binlog(binlog):
                 return
 
-    def _upload_binlog(self, binlog):
+    def _upload_binlog(self, binlog: BinlogInfo) -> bool:
+        assert self.file_storage is not None
         next_index = self.state["next_index"]
         if next_index == 0:
             # Newly promoted master will as part of the promotion sequence figure out which was the last
@@ -1023,30 +1094,33 @@ class BackupStream(threading.Thread):
         # pylint: disable=consider-using-ternary
         compression_algorithm = (self.compression and self.compression.get("algorithm")) or "snappy"
         compression_level = (self.compression and self.compression.get("level")) or 0
-        binlog = dict(binlog)
-        binlog["remote_index"] = next_index
-        binlog["remote_key"] = index_name
-        binlog["compression_algorithm"] = compression_algorithm
-        metadata = make_fs_metadata(binlog)
-        self.current_upload_index = binlog["local_index"]
+
+        # Unfortunately we have to cast here, since TypedDict doesn't seem smart enough to recognize that
+        # RemoteBinlogInfo is the same as BinlogInfo with some additional keys (despite the inheritance)
+        remote_binlog: RemoteBinlogInfo = cast(
+            RemoteBinlogInfo,
+            dict(binlog, remote_index=next_index, remote_key=index_name, compression_algorithm=compression_algorithm),
+        )
+        metadata = make_fs_metadata(remote_binlog)
+        self.current_upload_index = remote_binlog["local_index"]
         try:
             start = time.monotonic()
             start_wall = time.time()
             # We might have already uploaded this file but just partially failed to update state. Check if that's the case
             if next_index in self.known_remote_binlogs:
-                self.log.warning("Binary log %r seems to have already been uploaded by us", binlog)
-                self._mark_upload_completed(binlog=binlog, upload_time=start_wall)
+                self.log.warning("Binary log %r seems to have already been uploaded by us", remote_binlog)
+                self._mark_upload_completed(binlog=remote_binlog, upload_time=start_wall)
             else:
                 log_action = "uploaded local"
                 existing_remote_key = self.state["local_index_to_remote_key"].get(self.current_upload_index)
                 if existing_remote_key:
                     log_action = "remote copied"
                     self.file_storage.copy_file(
-                        source_key=existing_remote_key, destination_key=binlog["remote_key"], metadata=metadata
+                        source_key=existing_remote_key, destination_key=remote_binlog["remote_key"], metadata=metadata
                     )
                     self.stats.increase("myhoard.binlog.remote_copy")
                 else:
-                    with open(binlog["full_name"], "rb") as input_file:
+                    with open(remote_binlog["full_name"], "rb") as input_file:
                         compress_stream = CompressionStream(input_file, compression_algorithm, compression_level)
                         encrypt_stream = EncryptorStream(compress_stream, self.rsa_public_key_pem)
                         self.file_storage.store_file_object(
@@ -1060,18 +1134,18 @@ class BackupStream(threading.Thread):
                         self.stats.increase("myhoard.binlog.upload")
                     if self.file_uploaded_callback:
                         self.file_uploaded_callback(
-                            local_index=binlog["local_index"], remote_key=binlog["remote_key"], stream=self
+                            local_index=remote_binlog["local_index"], remote_key=remote_binlog["remote_key"], stream=self
                         )
                 with self.lock:
-                    self.remote_binlog_manager.append(binlog)
-                    self.known_remote_binlogs.add(binlog["remote_index"])
-                    self._mark_upload_completed(binlog=binlog, upload_time=start_wall)
+                    self.remote_binlog_manager.append(remote_binlog)
+                    self.known_remote_binlogs.add(remote_binlog["remote_index"])
+                    self._mark_upload_completed(binlog=remote_binlog, upload_time=start_wall)
                 elapsed = time.monotonic() - start
                 self.log.info(
                     "Successfully %s binlog index %s as remote index %s in %.1f seconds",
                     log_action,
-                    binlog["local_index"],
-                    binlog["remote_index"],
+                    remote_binlog["local_index"],
+                    remote_binlog["remote_index"],
                     elapsed,
                 )
             return True
@@ -1084,14 +1158,14 @@ class BackupStream(threading.Thread):
             ServerNotFoundError,
             SSLEOFError,
         ) as ex:
-            self.log.exception("Network error while uploading binlog %s", binlog)
+            self.log.exception("Network error while uploading binlog %s", remote_binlog)
             self.state_manager.increment_counter(name="remote_write_errors")
             self.stats.increase(
                 "myhoard.binlog.upload_errors", tags={"reason": "network_error", "ex": ex.__class__.__name__}
             )
             return False
         except Exception as ex:  # pylint: disable=broad-except
-            self.log.exception("Failed to upload binlog %r", binlog)
+            self.log.exception("Failed to upload binlog %r", remote_binlog)
             self.stats.unexpected_exception(ex=ex, where="BackupStream._upload_binlog")
             self.state_manager.increment_counter(name="remote_write_errors")
             self.stats.increase("myhoard.binlog.upload_errors", tags={"ex": ex.__class__.__name__})
@@ -1099,8 +1173,9 @@ class BackupStream(threading.Thread):
         finally:
             self.current_upload_index = None
 
-    def _write_promotion_info(self, *, promoted_at, start_index):
-        promotion_info = {
+    def _write_promotion_info(self, *, promoted_at: float, start_index: int) -> None:
+        assert self.file_storage is not None
+        promotion_info: PromotionInfo = {
             "promoted_at": promoted_at,
             "server_id": self.server_id,
             "start_index": start_index,
