@@ -71,7 +71,7 @@ class BasebackupOperation:
         self.progress_callback = progress_callback
         self.stats = stats
         self.stream_handler = stream_handler
-        self.temp_dir = None
+        self.temp_dir: Optional[str] = None
         self.temp_dir_base = temp_dir
 
     def abort(self, reason):
@@ -189,6 +189,9 @@ class BasebackupOperation:
         return total_size, total_filtered_size
 
     def _process_input_output(self):
+        assert self.proc is not None
+        assert self.proc.stdout is not None
+        assert self.proc.stderr is not None
         increase_pipe_capacity(self.proc.stdout, self.proc.stderr)
         set_stream_nonblocking(self.proc.stderr)
 
@@ -249,7 +252,8 @@ class BasebackupOperation:
             if reader_thread:
                 reader_thread.join()
             self.log.info("Thread joined")
-            shutil.rmtree(self.temp_dir)
+            if self.temp_dir:
+                shutil.rmtree(self.temp_dir)
             self.proc = None
 
         if exit_code != 0:
@@ -333,7 +337,7 @@ class BasebackupOperation:
         return match
 
     def _update_progress(self, *, last_file_name=None, last_file_size=None, estimated_progress=None):
-        estimated_total_bytes = self.data_directory_filtered_size
+        estimated_total_bytes = self.data_directory_filtered_size or 0
 
         if estimated_progress is None:
             estimated_progress = 0

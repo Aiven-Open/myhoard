@@ -79,6 +79,7 @@ def test_basic_backup(mysql_master, extra_uuid):
     for db_index in range(15):
         assert f"./test{db_index}/foo{db_index}.ibd" in backed_up_files, f"Couldn't find index {db_index}"
 
+    assert op.binlog_info
     assert op.binlog_info["gtid"] == master_status["Executed_Gtid_Set"]
 
     # Taking basebackup might flush binary logs
@@ -86,6 +87,7 @@ def test_basic_backup(mysql_master, extra_uuid):
         cursor.execute("SHOW MASTER STATUS")
         master_status = cursor.fetchone()
 
+    assert op.binlog_info
     assert op.binlog_info["file_name"] == master_status["File"]
     assert op.binlog_info["file_position"] == master_status["Position"]
 

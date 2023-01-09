@@ -171,6 +171,9 @@ class BasebackupRestoreOperation:
         return total_size
 
     def _process_output_loop(self, operation, loop_fn, output_fn):
+        assert self.proc is not None
+        assert self.proc.stderr is not None
+        assert self.proc.stdout is not None
         set_stream_nonblocking(self.proc.stderr)
         set_stream_nonblocking(self.proc.stdout)
 
@@ -225,11 +228,13 @@ class BasebackupRestoreOperation:
             raise Exception(f"Operation {operation} failed with code {exit_code}")
 
     def _process_move_input_output(self):
+        assert self.proc is not None
         increase_pipe_capacity(self.proc.stdout, self.proc.stderr)
 
         self._process_output_loop("xtrabackup-move", None, self._process_move_output_line)
 
     def _process_prepare_input_output(self):
+        assert self.proc is not None
         increase_pipe_capacity(self.proc.stdout, self.proc.stderr)
 
         self._process_output_loop("xtrabackup-prepare", None, self._process_prepare_output_line)
@@ -238,6 +243,7 @@ class BasebackupRestoreOperation:
             raise Exception("Could not read prepared lsn from xtrabackup output")
 
     def _process_xbstream_input_output(self):
+        assert self.proc is not None
         increase_pipe_capacity(self.proc.stdin, self.proc.stdout, self.proc.stderr)
 
         sender_thread = InputSenderThread(stats=self.stats, stream_handler=self.stream_handler, stream=self.proc.stdin)
@@ -251,7 +257,8 @@ class BasebackupRestoreOperation:
             self._process_output_loop("xbstream-extract", loop_fn, self._process_xbstream_output_line)
         finally:
             with suppress(Exception):
-                self.proc.stdin.close()
+                if self.proc.stdin:
+                    self.proc.stdin.close()
             self.log.info("Joining output reader thread...")
             # We've closed stdin so the thread is bound to exit without any other calls
             sender_thread.join()
