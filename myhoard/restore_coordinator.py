@@ -5,12 +5,14 @@ from .basebackup_restore_operation import BasebackupRestoreOperation
 from .binlog_downloader import download_binlog
 from .errors import BadRequest
 from .state_manager import StateManager
+from .statsd import StatsClient
 from .util import (
     add_gtid_ranges_to_executed_set,
     build_gtid_ranges,
     change_master_to,
     ERR_TIMEOUT,
     get_slave_status,
+    GtidExecuted,
     GtidRangeDict,
     make_gtid_range_string,
     mysql_cursor,
@@ -27,7 +29,8 @@ from .util import (
 from contextlib import suppress
 from pymysql import OperationalError
 from rohmu import errors as rohmu_errors, get_transfer
-from typing import Iterable
+from rohmu.object_storage.base import BaseTransfer
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 import contextlib
 import enum
@@ -44,6 +47,17 @@ import time
 # Happens when using multithreaded SQL apply and provided relay logs do not contain sufficient data to
 # initialize the threads.
 ER_MASTER_INFO = 1201
+
+
+class PendingBinlogInfo(TypedDict):
+    adjusted_remote_index: int
+    adjusted_index: int
+    file_size: int
+    gtid_ranges: List[GtidRangeDict]
+    compression_algorithm: str
+    remote_key: str
+    remote_size: int
+    remote_index: int
 
 
 class RestoreCoordinator(threading.Thread):
@@ -89,6 +103,43 @@ class RestoreCoordinator(threading.Thread):
         # Terminal state for a RestoreCoordinator instance but restoring an earlier backup may be an option
         failed_basebackup = "failed_basebackup"
 
+    class State(TypedDict):
+        applying_binlogs: List[PendingBinlogInfo]
+        binlogs_picked_for_apply: int
+        basebackup_info: Dict
+        basebackup_restore_duration: Optional[float]
+        basebackup_restore_errors: int
+        binlog_name_offset: int
+        # Corrected binlog position to use instead of the position stored in basebackup info.
+        binlog_position: Optional[int]
+        binlog_stream_offset: int
+        binlogs_restored: int
+        completed_info: Optional[Dict]
+        current_binlog_bucket: int
+        current_binlog_stream_index: int
+        current_executed_gtid_target: Optional[GtidRangeDict]
+        current_relay_log_target: Optional[int]
+        # This is required so that we can correctly update pending_binlogs state file if updating that
+        # fails after the main state has already been updated
+        expected_first_pending_binlog_remote_index: Optional[int]
+        gtid_executed: Optional[GtidExecuted]
+        gtids_patched: bool
+        file_fail_counters: Dict
+        force_complete: bool
+        last_flushed_index: int
+        last_poll: Optional[float]
+        last_processed_index: Optional[int]
+        last_renamed_index: int
+        mysql_params: Optional[Dict[str, Any]]
+        phase: "RestoreCoordinator.Phase"
+        prefetched_binlogs: Dict
+        promotions: List
+        remote_read_errors: int
+        restore_errors: int
+        server_uuid: Optional[str]
+        target_time_reached: bool
+        write_relay_log_manually: bool
+
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
     def __init__(
@@ -105,24 +156,24 @@ class RestoreCoordinator(threading.Thread):
         pending_binlogs_state_file,
         restart_mysqld_callback,
         rsa_private_key_pem,
-        site,
-        state_file,
-        stats,
-        stream_id,
+        site: str,
+        state_file: str,
+        stats: StatsClient,
+        stream_id: int,
         target_time=None,
         target_time_approximate_ok=None,
-        temp_dir,
+        temp_dir: str,
     ):
         super().__init__()
         self.basebackup_bytes_downloaded = 0
-        self.basebackup_restore_operation = None
+        self.basebackup_restore_operation: Optional[BasebackupRestoreOperation] = None
         self.binlog_poll_interval = self.BINLOG_POLL_INTERVAL
         # Binary logs may be fetched from multiple consecutive backup streams. This is utilized if restoring
         # a basebackup fails for any reason but earlier backups are available and basebackup from one of those
         # can be successfully restored.
         self.binlog_streams = binlog_streams
         self.current_file = None
-        self.file_storage = None
+        self.file_storage: Optional[BaseTransfer] = None
         self.file_storage_config = file_storage_config
         self.is_running = True
         self.iteration_sleep_long = self.ITERATION_SLEEP_LONG
@@ -140,11 +191,11 @@ class RestoreCoordinator(threading.Thread):
         self.mysql_data_directory = mysql_data_directory
         self.mysql_relay_log_index_file = mysql_relay_log_index_file
         self.mysql_relay_log_prefix = mysql_relay_log_prefix
-        self.ongoing_prefetch_operations = {}
+        self.ongoing_prefetch_operations: Dict[str, PendingBinlogInfo] = {}
         # Number of pending binlogs can be potentially very large. Store those to separate file to avoid
         # the frequently updated main state growing so large that saving it causes noticeable overhead
-        pending_binlogs = []
-        self.pending_binlog_manager = AppendOnlyStateManager(
+        pending_binlogs: List[PendingBinlogInfo] = []
+        self.pending_binlog_manager = AppendOnlyStateManager[PendingBinlogInfo](
             entries=pending_binlogs, lock=self.lock, state_file=pending_binlogs_state_file
         )
         self.pending_binlogs = pending_binlogs
@@ -157,7 +208,7 @@ class RestoreCoordinator(threading.Thread):
         self.site = site
         # State contains variables that should be persisted over process restart
         # so that the operation resumes from where it was left (whenever possible)
-        self.state = {
+        self.state: RestoreCoordinator.State = {
             "applying_binlogs": [],
             "binlogs_picked_for_apply": 0,
             "basebackup_info": {},
@@ -171,7 +222,7 @@ class RestoreCoordinator(threading.Thread):
             "completed_info": None,
             "current_binlog_bucket": 0,
             "current_binlog_stream_index": 0,
-            "current_executed_gtid_target": {},
+            "current_executed_gtid_target": None,
             "current_relay_log_target": None,
             # This is required so that we can correctly update pending_binlogs state file if updating that
             # fails after the main state has already been updated
@@ -194,37 +245,37 @@ class RestoreCoordinator(threading.Thread):
             "target_time_reached": False,
             "write_relay_log_manually": False,
         }
-        self.state_manager = StateManager(lock=self.lock, state=self.state, state_file=state_file)
+        self.state_manager = StateManager[RestoreCoordinator.State](lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
         self.stream_id = stream_id
         self.target_time = target_time
         self.target_time_approximate_ok = target_time_approximate_ok
         self.temp_dir = temp_dir
-        self.worker_processes = []
+        self.worker_processes: List = []
         self.sql_thread_restart_count = 0
-        self.sql_thread_restart_time = None
+        self.sql_thread_restart_time: Optional[float] = None
 
-    def add_new_binlog_streams(self, new_binlog_streams):
+    def add_new_binlog_streams(self, new_binlog_streams: List[PendingBinlogInfo]) -> bool:
         if not self.can_add_binlog_streams():
             return False
         self.binlog_streams = self.binlog_streams + new_binlog_streams
         return True
 
     @property
-    def basebackup_bytes_total(self):
+    def basebackup_bytes_total(self) -> int:
         return self.state["basebackup_info"].get("compressed_size") or 0
 
     @property
-    def binlogs_being_restored(self):
+    def binlogs_being_restored(self) -> int:
         return len(self.state["applying_binlogs"] or [])
 
     @property
-    def binlogs_pending(self):
+    def binlogs_pending(self) -> int:
         with self.lock:
             return len(self.pending_binlogs)
 
     @property
-    def binlogs_restored(self):
+    def binlogs_restored(self) -> int:
         return self.state["binlogs_restored"]
 
     def can_add_binlog_streams(self):
@@ -241,14 +292,14 @@ class RestoreCoordinator(threading.Thread):
         else:
             raise BadRequest("Completion can only be forced while waiting for binlog apply to finish")
 
-    def is_complete(self):
+    def is_complete(self) -> bool:
         return self.phase == self.Phase.completed
 
     @property
-    def phase(self):
+    def phase(self) -> "RestoreCoordinator.Phase":
         return self.state["phase"]
 
-    def run(self):
+    def run(self) -> None:
         self.log.info("Restore coordinator running")
         self._start_process_pool()
         # If we're in a state where binary logs should be downloaded ensure we have appropriate
@@ -297,10 +348,10 @@ class RestoreCoordinator(threading.Thread):
         self.is_running = False
 
     @property
-    def server_uuid(self):
+    def server_uuid(self) -> Optional[str]:
         return self.state["server_uuid"]
 
-    def stop(self):
+    def stop(self) -> None:
         self.log.info("Stopping restore coordinator")
         self.is_running = False
         self.queue_in.put(None)
@@ -314,7 +365,7 @@ class RestoreCoordinator(threading.Thread):
         self.worker_processes = []
         self.log.info("Restore coordinator stopped")
 
-    def get_backup_info(self):
+    def get_backup_info(self) -> None:
         if not self.state["completed_info"]:
             completed_info = self._load_file_data("completed.json")
             if not completed_info:
@@ -331,11 +382,11 @@ class RestoreCoordinator(threading.Thread):
             phase=self.Phase.initiating_binlog_downloads,
         )
 
-    def initiate_binlog_downloads(self):
+    def initiate_binlog_downloads(self) -> None:
         self._fetch_more_binlog_infos()
         self.update_state(phase=self.Phase.restoring_basebackup)
 
-    def restore_basebackup(self):
+    def restore_basebackup(self) -> None:
         start_time = time.monotonic()
         encryption_key = rsa_decrypt_bytes(
             self.rsa_private_key_pem, bytes.fromhex(self.state["basebackup_info"]["encryption_key"])
@@ -394,7 +445,7 @@ class RestoreCoordinator(threading.Thread):
             if binlog["gtid_ranges"]:
                 last_range = binlog["gtid_ranges"][-1]
         last_remote_index = binlogs[-1]["adjusted_remote_index"]
-        relay_log_target = last_remote_index + self.state["binlog_name_offset"] + 1
+        relay_log_target: Optional[int] = last_remote_index + self.state["binlog_name_offset"] + 1
 
         mysql_params = {"with_binlog": False, "with_gtids": True}
         mysql_started = self.state["mysql_params"] == mysql_params
@@ -640,7 +691,7 @@ class RestoreCoordinator(threading.Thread):
     def update_state(self, **kwargs) -> None:
         self.state_manager.update_state(**kwargs)
 
-    def _are_all_gtids_executed(self, gtid_ranges: Iterable[GtidRangeDict]):
+    def _are_all_gtids_executed(self, gtid_ranges: Iterable[GtidRangeDict]) -> bool:
         """Returns True if all GTIDs in the given list of GTID ranges have already been applied"""
         gtid_executed = self.state["gtid_executed"] or self.state["basebackup_info"]["gtid_executed"]
         # Run the original set of executed GTIDs through the same function to ensure format is exactly
@@ -649,7 +700,7 @@ class RestoreCoordinator(threading.Thread):
         set2 = add_gtid_ranges_to_executed_set(gtid_executed, gtid_ranges)
         return set1 == set2
 
-    def _process_work_queue_result(self, result):
+    def _process_work_queue_result(self, result) -> None:
         key = result["remote_key"]
         binlog = self.ongoing_prefetch_operations.pop(key)
         fail_counters = self.state["file_fail_counters"]
@@ -683,16 +734,17 @@ class RestoreCoordinator(threading.Thread):
                 )
                 self.update_state(file_fail_counters=fail_counters, phase=self.Phase.failed)
 
-    def _build_binlog_full_name(self, name):
+    def _build_binlog_full_name(self, name: str) -> str:
         binlog_stream = self.binlog_streams[self.state["current_binlog_stream_index"]]
         site = binlog_stream["site"]
         stream_id = binlog_stream["stream_id"]
         return f"{site}/{stream_id}/{name}"
 
-    def _build_full_name(self, name):
+    def _build_full_name(self, name: str) -> str:
         return f"{self.site}/{self.stream_id}/{name}"
 
     def _load_file_data(self, name, missing_ok=False):
+        assert self.file_storage
         try:
             info_str, _ = self.file_storage.get_contents_to_string(self._build_full_name(name))
             return json.loads(info_str)
@@ -709,7 +761,7 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
         return None
 
-    def _basebackup_data_provider(self, target_stream):
+    def _basebackup_data_provider(self, target_stream) -> None:
         name = self._build_full_name("basebackup.xbstream")
         compressed_size = self.state["basebackup_info"].get("compressed_size")
         file_storage = get_transfer(self.file_storage_config)
@@ -736,7 +788,7 @@ class RestoreCoordinator(threading.Thread):
 
         file_storage.get_contents_to_fileobj(name, target_stream, progress_callback=download_progress)
 
-    def _get_iteration_sleep(self):
+    def _get_iteration_sleep(self) -> float:
         if self.phase in self.POLL_PHASES:
             return self.iteration_sleep_short
         else:
@@ -753,13 +805,16 @@ class RestoreCoordinator(threading.Thread):
 
         return sorted(infos, key=build_sort_key)
 
-    def _list_binlogs_in_bucket(self, bucket):
+    def _list_binlogs_in_bucket(
+        self, bucket: int
+    ) -> Tuple[Optional[List[PendingBinlogInfo]], Optional[int], Optional[bool]]:
         last_processed_index = self.state["last_processed_index"]
         new_binlogs = []
         highest_index = 0
         start_time = time.monotonic()
         target_time_reached_by_server = set()
 
+        assert self.file_storage
         self.log.debug("Listing binlogs in bucket %s", bucket)
         try:
             list_iter = self.file_storage.list_iter(self._build_binlog_full_name(f"binlogs/{bucket}"))
@@ -819,7 +874,7 @@ class RestoreCoordinator(threading.Thread):
         self.log.info("Found %s binlogs from bucket %s in %.2f seconds", len(new_binlogs), bucket, duration)
         return new_binlogs, highest_index, bool(target_time_reached_by_server)
 
-    def _fetch_more_binlog_infos(self, force=False):
+    def _fetch_more_binlog_infos(self, force: bool = False) -> None:
         if self.state["target_time_reached"]:
             return
         if not force and self.state["last_poll"] and time.time() - self.state["last_poll"] < self.binlog_poll_interval:
@@ -829,7 +884,7 @@ class RestoreCoordinator(threading.Thread):
         while not self.state["target_time_reached"] and self._switch_to_next_binlog_stream():
             self._fetch_more_binlogs_infos_for_current_stream()
 
-    def _fetch_more_binlogs_infos_for_current_stream(self):
+    def _fetch_more_binlogs_infos_for_current_stream(self) -> None:
         bucket = self.state["current_binlog_bucket"]
         new_binlogs = []
         while True:
@@ -837,6 +892,8 @@ class RestoreCoordinator(threading.Thread):
             binlogs, highest_index, target_time_reached = self._list_binlogs_in_bucket(bucket)
             if binlogs is None:
                 break
+
+            assert highest_index is not None, "binlogs was set but highest_index is None"
 
             # Move to next bucket of BINLOG_BUCKET_SIZE binlogs if the listing contained last binlog that
             # is expected to be found from current bucket
@@ -860,7 +917,8 @@ class RestoreCoordinator(threading.Thread):
 
         # Also refresh promotions list so that we know which of the remote
         # binlogs are actually valid
-        promotions = {}
+        assert self.file_storage
+        promotions: Dict[int, Any] = {}
         try:
             for info in self.file_storage.list_iter(self._build_binlog_full_name("promotions")):
                 # There could theoretically be multiple promotions with the same
@@ -935,6 +993,7 @@ class RestoreCoordinator(threading.Thread):
             if not last_existing_index or binlog["adjusted_remote_index"] > last_existing_index:
                 actual_new_binlogs.append(binlog)
 
+        last_processed_index: Optional[int]
         with self.lock:
             self.pending_binlog_manager.append_many(actual_new_binlogs)
             if new_binlogs:
@@ -955,7 +1014,7 @@ class RestoreCoordinator(threading.Thread):
         self._fetch_more_binlog_infos(force=force)
         self._queue_prefetch_operations(force=True)
 
-    def _queue_prefetch_operations(self, *, force=False):
+    def _queue_prefetch_operations(self, *, force: bool = False) -> None:
         on_disk_binlog_count = (
             len(self.ongoing_prefetch_operations)
             + len(self.state["prefetched_binlogs"])
@@ -1000,7 +1059,7 @@ class RestoreCoordinator(threading.Thread):
         ) as cursor:
             yield cursor
 
-    def _parse_gtid_executed_ranges(self, binlog):
+    def _parse_gtid_executed_ranges(self, binlog: PendingBinlogInfo) -> List[GtidRangeDict]:
         binlog_position = self.state["basebackup_info"]["binlog_position"]
         if not binlog["gtid_ranges"] or not binlog_position:
             return []
@@ -1048,7 +1107,7 @@ class RestoreCoordinator(threading.Thread):
             gtid_infos.append(gtid_info)
         return list(build_gtid_ranges(gtid_infos))
 
-    def _get_binlogs_to_apply(self):
+    def _get_binlogs_to_apply(self) -> Optional[List[PendingBinlogInfo]]:
         binlogs = []
         binlogs_picked_for_apply = self.state["binlogs_picked_for_apply"]
 
@@ -1090,7 +1149,7 @@ class RestoreCoordinator(threading.Thread):
         self.update_state(binlogs_picked_for_apply=len(binlogs))
         return binlogs
 
-    def _generate_updated_relay_log_index(self, binlogs, names, cursor):
+    def _generate_updated_relay_log_index(self, binlogs: List[PendingBinlogInfo], names: List[str], cursor) -> None:
         # Should already be stopped but just to make sure
         cursor.execute("STOP SLAVE")
         replica_status = get_slave_status(cursor)
@@ -1129,7 +1188,7 @@ class RestoreCoordinator(threading.Thread):
 
         self._rename_prefetched_binlogs(binlogs)
 
-    def _rename_prefetched_binlogs(self, binlogs):
+    def _rename_prefetched_binlogs(self, binlogs: List[PendingBinlogInfo]) -> None:
         last_renamed_index = self.state["last_renamed_index"]
         for binlog in binlogs:
             remote_index = binlog["adjusted_remote_index"]
@@ -1143,7 +1202,7 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index
         self.update_state(last_renamed_index=last_renamed_index)
 
-    def _purge_old_slave_data(self):
+    def _purge_old_slave_data(self) -> None:
         # Remove potentially conflicting slave data from backup (unfortunately it's not possible to exclude these tables
         # from the backup using xtrabackup at the moment). In some cases, e.g. when rotate event appears in the relay
         # log (coming from master binlog) and mysql has some information about non-existing replication in these tables,
@@ -1156,7 +1215,7 @@ class RestoreCoordinator(threading.Thread):
             cursor.execute("DELETE FROM mysql.slave_worker_info")
             cursor.execute("COMMIT")
 
-    def _rename_prefetched_binlogs_back(self, binlogs):
+    def _rename_prefetched_binlogs_back(self, binlogs: List[PendingBinlogInfo]) -> None:
         last_renamed_index = self.state["last_renamed_index"]
         for binlog in reversed(binlogs):
             remote_index = binlog["adjusted_remote_index"]
@@ -1170,7 +1229,7 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index - 1
         self.update_state(last_flushed_index=last_renamed_index, last_renamed_index=last_renamed_index)
 
-    def _start_sql_thread_if_not_running(self, slave_status: SlaveStatus):
+    def _start_sql_thread_if_not_running(self, slave_status: SlaveStatus) -> None:
         # Sometimes mysqld can be OOM-killed during the backup restoration.
         # In that case we should check if SQL thread is running and try restarting it if it is not.
         if slave_status["Slave_SQL_Running"] == "Yes":
@@ -1293,7 +1352,7 @@ class RestoreCoordinator(threading.Thread):
                 server_uuid = cursor.fetchone()["server_uuid"]
         self.update_state(mysql_params={"with_binlog": with_binlog, "with_gtids": with_gtids}, server_uuid=server_uuid)
 
-    def _patch_gtid_executed(self, binlog) -> None:
+    def _patch_gtid_executed(self, binlog: PendingBinlogInfo) -> None:
         if self.state["gtids_patched"]:
             return
 
@@ -1352,16 +1411,16 @@ class RestoreCoordinator(threading.Thread):
                 )
                 cursor.execute("COMMIT")
 
-        self.state.update(gtids_patched=True)
+        self.state.update({"gtids_patched": True})
 
-    def _relay_log_name(self, *, index, full_path=True) -> str:
+    def _relay_log_name(self, *, index: int, full_path: bool = True) -> str:
         return relay_log_name(prefix=self.mysql_relay_log_prefix, index=index, full_path=full_path)
 
     def _relay_log_prefetch_name(self, *, index: int) -> str:
         local_name = self._relay_log_name(index=index)
         return f"{local_name}.prefetch"
 
-    def _start_process_pool(self):
+    def _start_process_pool(self) -> None:
         process_count = max(multiprocessing.cpu_count() - 1, 1)
         config = {
             "object_storage": self.file_storage_config,
