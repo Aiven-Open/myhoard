@@ -2,6 +2,7 @@
 from . import generate_rsa_key_pair
 from datetime import datetime
 from time import sleep
+from typing import List
 from unittest.mock import Mock
 
 import copy
@@ -16,7 +17,7 @@ pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
 def test_rate_tracking_ndigits_calculation():
-    window = 10000
+    window = 10000.0
     while window > 0.0001:
         ndigits = myhoard_util.RateTracker.calculate_default_ndigits(window=window)
         # Generate 1000 timestamps over the range of one window
@@ -38,9 +39,9 @@ def test_rate_tracker_exception_handling():
     # this exception is raised in the main thread, so doesn't need special handling
     with pytest.raises(TypeError):
         rate_tracker.increment(0)
-        rate_tracker.increment("banana")
+        rate_tracker.increment("banana")  # type: ignore
         rate_tracker.increment(0)
-        rate_tracker.increment("banana")
+        rate_tracker.increment("banana")  # type: ignore
 
     # ensure no exceptions have been logged yet
     assert len(mock_logger.exception.call_args_list) == 0, mock_logger.exception.call_args_list
@@ -167,40 +168,50 @@ def test_build_gtid_ranges():
     assert ranges == expected_ranges
 
 
+def build_range_dict(uuid: str, start: int, end: int) -> myhoard_util.GtidRangeDict:
+    return {"server_uuid": uuid, "start": start, "end": end, "server_id": 3, "end_ts": 2, "start_ts": 1}
+
+
 def test_partition_sort_and_combine_gtid_ranges():
-    ranges = [
-        {"server_uuid": "uuid1", "start": 1, "end": 3},
-        {"server_uuid": "uuid1", "start": 6, "end": 7},
-        {"server_uuid": "uuid1", "start": 8, "end": 8},
-        {"server_uuid": "uuid2", "start": 10, "end": 12},
-        {"server_uuid": "uuid2", "start": 4, "end": 9},
-        {"server_uuid": "uuid1", "start": 2, "end": 2},
-        {"server_uuid": "uuid1", "start": 2, "end": 4},
+    ranges: List[myhoard_util.GtidRangeDict] = [
+        build_range_dict(uuid, start, end)
+        for (uuid, start, end) in [
+            ("uuid1", 1, 3),
+            ("uuid1", 6, 7),
+            ("uuid1", 8, 8),
+            ("uuid2", 10, 12),
+            ("uuid2", 4, 9),
+            ("uuid1", 2, 2),
+            ("uuid1", 2, 4),
+        ]
     ]
     result = myhoard_util.partition_sort_and_combine_gtid_ranges(ranges)
     assert result == {"uuid1": [[1, 4], [6, 8]], "uuid2": [[4, 12]]}
 
 
 def test_first_contains_gtids_not_in_second():
-    first = [
-        {"server_uuid": "uuid1", "start": 1, "end": 3},
-        {"server_uuid": "uuid1", "start": 6, "end": 7},
-        {"server_uuid": "uuid1", "start": 8, "end": 8},
-        {"server_uuid": "uuid2", "start": 10, "end": 12},
-        {"server_uuid": "uuid2", "start": 4, "end": 9},
-        {"server_uuid": "uuid1", "start": 2, "end": 2},
-        {"server_uuid": "uuid1", "start": 2, "end": 4},
+    first: List[myhoard_util.GtidRangeDict] = [
+        build_range_dict(uuid, start, end)
+        for (uuid, start, end) in [
+            ("uuid1", 1, 3),
+            ("uuid1", 6, 7),
+            ("uuid1", 8, 8),
+            ("uuid2", 10, 12),
+            ("uuid2", 4, 9),
+            ("uuid1", 2, 2),
+            ("uuid1", 2, 4),
+        ]
     ]
     second = copy.deepcopy(first)
     assert not myhoard_util.first_contains_gtids_not_in_second(first, second)
-    second.append({"server_uuid": "uuid3", "start": 1, "end": 1})
+    second.append(build_range_dict("uuid3", 1, 1))
     assert not myhoard_util.first_contains_gtids_not_in_second(first, second)
-    first.append({"server_uuid": "uuid4", "start": 1, "end": 1})
+    first.append(build_range_dict("uuid4", 1, 1))
     assert myhoard_util.first_contains_gtids_not_in_second(first, second)
     first.pop()
     first[0]["end"] = 11
     assert myhoard_util.first_contains_gtids_not_in_second(first, second)
-    second.append({"server_uuid": "uuid1", "start": 1, "end": 12})
+    second.append(build_range_dict("uuid1", 1, 12))
     assert not myhoard_util.first_contains_gtids_not_in_second(first, second)
 
 

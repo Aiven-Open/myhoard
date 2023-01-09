@@ -1,11 +1,11 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
+from typing import Dict, Iterable, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -317,7 +317,7 @@ def add_gtid_ranges_to_executed_set(existing_set: GtidExecuted, *new_ranges: Ite
     return partition_sort_and_combine_gtid_ranges(all_ranges)
 
 
-def truncate_gtid_executed(gtid_executed: GtidExecuted, truncate_to: GtidExecuted) -> None:
+def truncate_gtid_executed(gtid_executed: GtidExecuted, truncate_to: str) -> None:
     """Truncates (in place) the gtid_executed dict so that gtid_executed does not include any transactions that are not
     included in the truncate_to string (which must be in the format "server_uuid1:gno1,server_uuid2:gno2"). The
     truncation is only performed for servers included in the truncate_to string, for other servers the executed
@@ -394,12 +394,16 @@ def mysql_cursor(*, ca_file=None, db="mysql", host="127.0.0.1", password, port, 
 
 def rsa_encrypt_bytes(rsa_public_key_pem, data):
     rsa_public_key = serialization.load_pem_public_key(rsa_public_key_pem, backend=default_backend())
+    if not isinstance(rsa_public_key, rsa.RSAPublicKey):
+        raise TypeError(rsa_public_key)
     pad = padding.OAEP(mgf=padding.MGF1(algorithm=SHA1()), algorithm=SHA1(), label=None)
     return rsa_public_key.encrypt(data, pad)
 
 
 def rsa_decrypt_bytes(rsa_private_key_pem, data):
     rsa_private_key = serialization.load_pem_private_key(data=rsa_private_key_pem, password=None, backend=default_backend())
+    if not isinstance(rsa_private_key, rsa.RSAPrivateKey):
+        raise TypeError(rsa_private_key)
     pad = padding.OAEP(mgf=padding.MGF1(algorithm=SHA1()), algorithm=SHA1(), label=None)
     return rsa_private_key.decrypt(data, pad)
 
@@ -606,7 +610,8 @@ class SlaveStatus(TypedDict):
     Relay_Master_Log_File: str
     Exec_Master_Log_Pos: int
     Retrieved_Gtid_Set: str
-    Slave_SQL_Running: str
+    Slave_IO_Running: Literal["Yes", "No"]
+    Slave_SQL_Running: Literal["Yes", "No"]
     Slave_SQL_Running_State: str
 
 
