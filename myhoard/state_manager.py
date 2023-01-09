@@ -17,7 +17,7 @@ class StateManager(Generic[T]):
 
     state: T
 
-    def __init__(self, *, allow_unknown_keys=False, lock=None, state: T, state_file):
+    def __init__(self, *, allow_unknown_keys: bool = False, lock=None, state: T, state_file):
         self.allow_unknown_keys = allow_unknown_keys
         self.lock = lock or threading.RLock()
         self.state = state
@@ -32,36 +32,36 @@ class StateManager(Generic[T]):
         self.state_file = state_file
         self.read_state()
 
-    def delete_state(self):
+    def delete_state(self) -> None:
         if os.path.exists(self.state_file):
             os.remove(self.state_file)
 
-    def increment_counter(self, *, name, increment=1):
+    def increment_counter(self, *, name: str, increment: int = 1) -> None:
         with self.lock:
             assert name in self.state
-            self.state[name] = self.state[name] + increment
+            self.state[name] = self.state[name] + increment  # type: ignore
             self.write_state()
 
-    def read_state(self):
+    def read_state(self) -> None:
         if os.path.exists(self.state_file):
             with open(self.state_file, "r") as f:
-                self.state.clear()
-                self.state.update(**json.load(f))
+                self.state.clear()  # type: ignore
+                self.state.update(**json.load(f))  # type: ignore
         else:
             self.write_state()
 
-    def update_state(self, **kwargs):
+    def update_state(self, **kwargs) -> None:
         with self.lock:
             changes = False
             for name, value in kwargs.items():
                 if not self.allow_unknown_keys:
                     assert name in self.state
                 if self.state.get(name) != value:
-                    self.state[name] = value
+                    self.state[name] = value  # type: ignore
                     changes = True
             if changes:
                 self.write_state()
 
-    def write_state(self):
+    def write_state(self) -> None:
         with atomic_create_file(self.state_file) as f:
             json.dump(self.state, f)

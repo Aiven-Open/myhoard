@@ -1,5 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from myhoard.append_only_state_manager import AppendOnlyStateManager
+from typing import Dict, List
 
 import os
 import pytest
@@ -9,7 +10,7 @@ pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 def test_basic_operations(session_tmpdir):
     state_file_name = os.path.join(session_tmpdir().strpath, "aosm.txt")
-    entries = []
+    entries: List[Dict] = []
     aosm = AppendOnlyStateManager(entries=entries, state_file=state_file_name)
     assert aosm.entries == []
     file_size = os.stat(state_file_name).st_size
@@ -36,7 +37,7 @@ def test_basic_operations(session_tmpdir):
     assert new_file_size > file_size
     file_size = new_file_size
 
-    entries2 = []
+    entries2: List[Dict] = []
     AppendOnlyStateManager(entries=entries2, state_file=state_file_name)
 
     assert set(entry["foo"] for entry in entries) == {f"bar{index}" for index in range(1000, 1011)}
