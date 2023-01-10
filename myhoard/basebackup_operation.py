@@ -31,7 +31,7 @@ class BasebackupOperation:
 
     current_file_re = re.compile(r" Compressing, encrypting and streaming (.*?)( to <STDOUT>)?( up to position \d+)?$")
     binlog_info_re = re.compile(
-        r"MySQL binlog position: filename '(?P<fn>.+)', position '(?P<pos>\d+)'(, GTID of the last change '(?P<gtid>.+)')?$"
+        r"binlog_pos = filename '(?P<fn>.+)', position '(?P<pos>\d+)'(, GTID of the last change '(?P<gtid>.+)')?$"
     )
     lsn_re = re.compile(r" Transaction log of lsn \((\d+)\) to \((\d+)\) was copied.$")
     progress_file_re = re.compile(r"(ib_buffer_pool$)|(ibdata\d+$)|(.*\.CSM$)|(.*\.CSV$)|(.*\.ibd$)|(.*\.sdi$)|(undo_\d+$)")
@@ -59,6 +59,7 @@ class BasebackupOperation:
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
         self.log = logging.getLogger(self.__class__.__name__)
+        self.lsn_dir = None
         self.lsn_info = None
         self.mysql_client_params = mysql_client_params
         with open(mysql_config_file_name, "r") as config:
@@ -103,6 +104,7 @@ class BasebackupOperation:
                 mysql_config_file.flush()
 
                 self.temp_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackup")
+                self.lsn_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackupmeta")
                 command_line = [
                     "xtrabackup",
                     # defaults file must be given with --defaults-file=foo syntax, space here does not work
@@ -118,6 +120,8 @@ class BasebackupOperation:
                     "xbstream",
                     "--target-dir",
                     self.temp_dir,
+                    "--extra-lsndir",
+                    self.lsn_dir,
                 ]
 
                 with self.stats.timing_manager("myhoard.basebackup.xtrabackup_backup"):
@@ -234,6 +238,10 @@ class BasebackupOperation:
                 self.log.info("Process has exited, joining reader thread")
                 reader_thread.join()
                 reader_thread = None
+
+                if exit_code == 0:
+                    self._process_binlog_info()
+
         except Exception as ex:
             pending_output += self.proc.stderr.read() or b""
             self.log.error("Error %r occurred while creating backup, output: %r", ex, pending_output)
@@ -252,6 +260,8 @@ class BasebackupOperation:
             if reader_thread:
                 reader_thread.join()
             self.log.info("Thread joined")
+            if self.lsn_dir:
+                shutil.rmtree(self.lsn_dir)
             if self.temp_dir:
                 shutil.rmtree(self.temp_dir)
             self.proc = None
@@ -278,7 +288,6 @@ class BasebackupOperation:
         if (
             not self._process_output_line_new_file(line)
             and not self._process_output_line_file_finished(line)
-            and not self._process_output_line_binlog_info(line)
             and not self._process_output_line_lsn_info(line)
         ):
             if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
@@ -315,16 +324,23 @@ class BasebackupOperation:
         self.current_file = None
         return True
 
-    def _process_output_line_binlog_info(self, line):
-        match = self.binlog_info_re.search(line)
-        if match:
-            self.binlog_info = {
-                "file_name": match.group("fn"),
-                "file_position": int(match.group("pos")),
-                "gtid": match.group("gtid"),
-            }
-            self.log.info("binlog info: %r", self.binlog_info)
-        return match
+    def _process_binlog_info(self) -> None:
+        assert self.lsn_dir
+
+        binlog_file_path = os.path.join(self.lsn_dir, "xtrabackup_info")
+        with open(binlog_file_path, "r") as binlog_file:
+            for line in binlog_file.readlines():
+                match = self.binlog_info_re.search(line)
+                if match:
+                    self.binlog_info = {
+                        "file_name": match.group("fn"),
+                        "file_position": int(match.group("pos")),
+                        "gtid": match.group("gtid"),
+                    }
+                    self.log.info("binlog info: %r", self.binlog_info)
+                    break
+            else:
+                self.log.warning("binlog info wasn't found in `xtrabackup_info` file")
 
     def _process_output_line_lsn_info(self, line):
         match = self.lsn_re.search(line)
