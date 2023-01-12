@@ -18,7 +18,7 @@ class BinlogInfo(TypedDict):
     local_index: int
     processed_at: float
     processing_time: float
-    server_id: str
+    server_id: int
 
 
 class BinlogScanner:
@@ -33,7 +33,7 @@ class BinlogScanner:
         total_binlog_count: int
         total_binlog_size: int
 
-    def __init__(self, *, binlog_prefix: str, server_id: str, state_file, stats):
+    def __init__(self, *, binlog_prefix: str, server_id: int, state_file, stats):
         super().__init__()
         binlogs: List[BinlogInfo] = []
         lock = threading.RLock()
@@ -131,7 +131,7 @@ class BinlogScanner:
         """Scan for any removed binlogs. Passes any removed binlogs to the given callback function
         before updating internal state."""
         removed_size = 0
-        removed = []
+        removed: List[BinlogInfo] = []
 
         try:
             with self.lock:

@@ -22,7 +22,7 @@ setup(
     ],
     extras_require={},
     dependency_links=[],
-    package_data={},
+    package_data={"myhoard": ["py.typed"]},
     entry_points={
         "console_scripts": [
             "myhoard = myhoard.myhoard:main",

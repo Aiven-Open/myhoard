@@ -62,8 +62,8 @@ class BasebackupOperation:
         self.binlog_info = None
         self.current_file = None
         self.data_directory_filtered_size = None
-        self.data_directory_size_end = None
-        self.data_directory_size_start = None
+        self.data_directory_size_end: Optional[int] = None
+        self.data_directory_size_start: Optional[int] = None
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
         self.log = logging.getLogger(self.__class__.__name__)
