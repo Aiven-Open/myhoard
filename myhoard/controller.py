@@ -142,6 +142,7 @@ class Controller(threading.Thread):
         backup_settings,
         backup_sites: Dict[str, BackupSiteInfo],
         binlog_purge_settings,
+        disable_basebackups,
         mysql_binlog_prefix,
         mysql_client_params,
         mysql_config_file_name,
@@ -182,6 +183,7 @@ class Controller(threading.Thread):
             state_file=scanner_state_file,
             stats=stats,
         )
+        self.disable_basebackups = disable_basebackups
         self.is_running = True
         self.iteration_sleep = self.ITERATION_SLEEP
         self.lock = threading.RLock()
@@ -797,6 +799,8 @@ class Controller(threading.Thread):
         # one catches up with the first, the first is marked as closed, and removed from our list.
         if len(self.backup_streams) >= 2:
             return
+        if self.disable_basebackups:
+            return
         with self.lock:
             if self.state["backup_request"]:
                 request: BackupRequest = self.state["backup_request"]
@@ -1220,6 +1224,8 @@ class Controller(threading.Thread):
                 stream.remove_binlogs(binlogs)
 
     def _purge_old_backups(self):
+        if self.disable_basebackups: # don't want to purge while we aren't taking more.
+            return
         purgeable = [backup for backup in self.state["backups"] if backup["completed_at"]]
         if len(purgeable) <= self.backup_settings["backup_count_min"]:
             return

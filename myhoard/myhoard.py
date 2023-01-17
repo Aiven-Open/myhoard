@@ -195,6 +195,7 @@ class MyHoard:
             backup_settings=self.config["backup_settings"],
             backup_sites=self.config["backup_sites"],
             binlog_purge_settings=self.config["binlog_purge_settings"],
+            disable_basebackups=self.config.get("disable_basebackups", False),
             mysql_binlog_prefix=mysql["binlog_prefix"],
             mysql_client_params=mysql["client_params"],
             mysql_config_file_name=mysql["config_file_name"],
