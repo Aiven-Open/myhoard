@@ -16,6 +16,79 @@ import subprocess
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
+def test_progress():
+    log = Mock()
+    __progress_values: list[float] = []
+
+    def on_update(v):
+        __progress_values.append(v)
+
+    def current():
+        return __progress_values[-1]
+
+    p = myhoard_util.SequentialProgress(
+        on_update=on_update, log=log, phase_weights={"p1": 10, "p2": 3, "p3": 7, "p4": 0}, multistep_phases={"p2"}
+    )
+
+    # phase 1 spans [0, 0.5]
+    p.update(0)
+    assert current() == 0
+    p.update(0.5)
+    assert current() == 0.25
+    p.update(1)
+    assert current() == 0.5
+
+    # Phase 2 starts at 0.5, goes to 0.65
+    # .. but because it's multistep, step 1 goes half that way
+    p.set_phase("p2")
+    p.update(0)
+    assert current() == 0.5
+    p.update(1)
+    assert current() == 0.575
+    # step 2
+    p.next_step()
+    assert current() == 0.575
+    p.update(0)
+    assert current() == 0.575
+    p.update(1)
+    assert current() == 0.6125
+    # After many steps, we get very close to 0.65
+    for _ in range(100):
+        p.next_step()
+    p.update(0)
+    assert 0.65 - current() < 0.0001
+
+    # Phase 3 goes from 0.65 to 1.0
+    p.set_phase("p3")
+    p.update(0)
+    assert current() == 0.65
+
+    # Create a child, which defines its own phases within p3
+    child = p.create_child(phase_weights={"foo": 3, "bar": 4})
+    child.set_phase("foo")
+    child.update(0)
+    assert current() == 0.65
+    child.update(1)
+    assert current() == 0.8
+    child.set_phase("bar")
+    assert current() == 0.8
+    child.update(0.5)
+    assert abs(current() - 0.9) < 0.000001
+
+    p.update(1)
+    assert current() == 1.0
+
+    p.set_phase("p4")
+
+    # Should not be able to set child progress now we are not in p3 any more
+    with pytest.raises(ValueError):
+        child.update(0.8)
+
+    # This phase isn't defined
+    with pytest.raises(ValueError):
+        p.set_phase("p5")
+
+
 def test_rate_tracking_ndigits_calculation():
     window = 10000.0
     while window > 0.0001:

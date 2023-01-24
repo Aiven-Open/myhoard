@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
-from typing import Dict, Iterable, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Callable, Dict, Iterable, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+
 
 DEFAULT_MYSQL_TIMEOUT = 4.0
 ERR_TIMEOUT = 2013
@@ -636,3 +637,116 @@ def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
         log.warning("Expected SQL thread to be running but it isn't. Running 'START SLAVE SQL_THREAD'")
     stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": slave_status["Last_SQL_Errno"]})
     cursor.execute("START SLAVE SQL_THREAD")
+
+
+OnUpdate = Callable[[float], None]
+
+
+class SequentialProgress:
+    _step: int
+    _phase_base_percent: float
+    _phase_scale: float
+
+    def __init__(
+        self,
+        *,
+        phase_weights: dict[str, int],
+        on_update: OnUpdate,
+        log: Logger,
+        multistep_phases: Optional[set[str]] = None,
+        monotonic: bool = True,
+    ):
+        self._phase: str = ""
+        self.on_update = on_update
+        self.monotonic = monotonic
+        self.phase_weights: dict[str, int] = phase_weights
+        self.multistep_phases: set[str] = multistep_phases or set()
+        self._step_used = False
+        self.log = log
+        # Start in the first phase
+        self.set_phase(next(iter(self.phase_weights)), update_progress=False)
+        self._current_value: float = 0
+
+    def create_child(
+        self, *, phase_weights: dict[str, int], multistep_phases: Optional[set[str]] = None
+    ) -> "SequentialProgress":
+        child_phase = self._phase
+
+        def on_update(progress: float) -> None:
+            if child_phase != self._phase:
+                raise ValueError(
+                    f"Child progress tracker was created for phase {child_phase} but current phase is {self._phase}"
+                )
+            self.update(progress)
+
+        return SequentialProgress(
+            phase_weights=phase_weights, on_update=on_update, log=self.log, multistep_phases=multistep_phases
+        )
+
+    def set_phase(self, phase_name: str, update_progress: bool = True) -> None:
+        """Change the current phase.
+
+        If there are substeps (ie: multiple passes for the current step),
+        provide it. Setting `substeps` to zero means we don't know how
+        many substeps there will be in advance.
+        """
+        if phase_name == self._phase:
+            self.log.debug("Already in phase %s", phase_name)
+            return
+        phase_weight_total = sum(self.phase_weights.values())
+        cumulative_phase_weight: int = 0
+        for _name, _weight in self.phase_weights.items():
+            if _name == phase_name:
+                break
+            cumulative_phase_weight += _weight
+        else:
+            raise ValueError(f"Could not find phase {phase_name!r}")
+
+        self._phase = phase_name
+        self._phase_base_percent = cumulative_phase_weight / phase_weight_total
+        self._phase_scale = _weight / phase_weight_total
+        self._multistep = phase_name in self.multistep_phases
+        self._step_used = False
+        self._step = 0
+        self.log.debug("Switching phase to %s: %s/%s", self._phase, self._phase_base_percent, self._phase_scale)
+
+        if update_progress:
+            self.update(0)
+
+    def calculate_progress(self, progress: float) -> float:
+        if self._multistep:
+            # Step 0 goes from 0 -> 0.5. Step 1 goes from 0.5 -> 0.75, etc
+            step_base = 1 - 0.5**self._step
+            step_scale = (1 - step_base) / 2
+            self.log.debug(
+                "Multistep[%s] rescaled from %0.4f to %0.4f", self._step, progress, step_base + progress * step_scale
+            )
+            progress = step_base + progress * step_scale
+        return self._phase_base_percent + progress * self._phase_scale
+
+    def next_step(self) -> None:
+        if not self._step_used:
+            self.log.debug("Staying in current step as no progress has yet been sent.")
+            return
+        if self._multistep:
+            self._step += 1
+        else:
+            self.log.warning("Phase %r is not a multistep phase.", self._phase)
+
+    def update(self, progress: float) -> None:
+        if progress > 1.0:
+            self.log.warning("Received progress value greater than 1: %s. Discarding it.", progress)
+            return
+        if progress > 0:
+            self._step_used = True
+        new_value = self.calculate_progress(progress)
+        if new_value >= self._current_value or not self.monotonic:
+            self._current_value = new_value
+            self.on_update(self._current_value)
+        else:
+            self.log.info(
+                "%s: Not updating progress value of %0.4f as it is less than %0.4f",
+                self._phase,
+                new_value,
+                self._current_value,
+            )
