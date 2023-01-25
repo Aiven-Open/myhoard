@@ -731,6 +731,52 @@ Current phase of backup restoration. Possible options are these:
   automatically but it may fail repeatedly and analyzing logs to get more
   details regarding the failure is advisable.
 
+# Metrics
+
+The following metrics are exported by myhoard:
+
+**myhoard.backup_stream.basebackup_bytes_uploaded**
+**myhoard.backup_stream.basebackup_requested**
+**myhoard.backup_stream.basebackup_upload_rate**
+**myhoard.backup_stream.binlog_upload_rate**
+**myhoard.backup_stream.errors**
+**myhoard.basebackup.bytes_compressed**
+**myhoard.basebackup.bytes_uncompressed**
+**myhoard.basebackup.compression_ratio**
+**myhoard.basebackup.errors**
+**myhoard.basebackup.estimated_progress**
+**myhoard.basebackup.optimize_table**
+**myhoard.basebackup.xtrabackup_backup**
+**myhoard.basebackup_broken**
+**myhoard.basebackup_restore.xbstream_extract**
+**myhoard.basebackup_restore.xtrabackup_move**
+**myhoard.basebackup_restore.xtrabackup_prepare**
+**myhoard.binlog.count**
+**myhoard.binlog.count_new**
+**myhoard.binlog.remote_copy**
+**myhoard.binlog.removed**
+**myhoard.binlog.size**
+**myhoard.binlog.size_new**
+**myhoard.binlog.upload**
+**myhoard.binlog.upload_errors**
+**myhoard.generic_errors**
+**myhoard.http.{name}**
+**myhoard.network_errors**
+**myhoard.pending_binlog_bytes_max**
+**myhoard.pending_binlog_bytes_min**
+**myhoard.pending_binlog_count_max**
+**myhoard.pending_binlog_count_min**
+**myhoard.ratetracker.errors**
+**myhoard.remote_read_errors**
+**myhoard.remote_write_errors**
+**myhoard.restore.basebackup_bytes_downloaded**
+**myhoard.restore.binlogs_restored**
+**myhoard.restore.cannot_reset**
+**myhoard.restore.change_master_to_failed**
+**myhoard.restore.pending_binlogs**
+**myhoard.restore.unexpected_extra_relay_log**
+**myhoard.restore_errors**
+
 # Running container-based tests
 
 Make sure docker is installed (podman currently untested) and just run:
