@@ -22,6 +22,7 @@ from .util import (
     relay_log_name,
     restart_unexpected_dead_sql_thread,
     rsa_decrypt_bytes,
+    SequentialProgress,
     SlaveStatus,
     sort_and_filter_binlogs,
     track_rate,
@@ -108,6 +109,17 @@ class RestoreCoordinator(threading.Thread):
         # Terminal state for a RestoreCoordinator instance but restoring an earlier backup may be an option
         failed_basebackup = "failed_basebackup"
 
+    phase_weights: dict[Phase, int] = {
+        Phase.getting_backup_info: 1,
+        Phase.initiating_binlog_downloads: 1,
+        Phase.restoring_basebackup: 10,
+        Phase.refreshing_binlogs: 1,
+        Phase.applying_binlogs: 40,
+        Phase.finalizing: 1,
+        Phase.completed: 0,
+    }
+    multistep_phases: set[Phase] = {Phase.applying_binlogs}
+
     class State(TypedDict):
         applying_binlogs: List[PendingBinlogInfo]
         binlogs_picked_for_apply: int
@@ -171,7 +183,6 @@ class RestoreCoordinator(threading.Thread):
     ):
         super().__init__()
         self.basebackup_bytes_downloaded = 0
-        self.basebackup_restore_operation: Optional[BasebackupRestoreOperation] = None
         self.binlog_poll_interval = self.BINLOG_POLL_INTERVAL
         # Binary logs may be fetched from multiple consecutive backup streams. This is utilized if restoring
         # a basebackup fails for any reason but earlier backups are available and basebackup from one of those
@@ -259,6 +270,16 @@ class RestoreCoordinator(threading.Thread):
         self.worker_processes: List = []
         self.sql_thread_restart_count = 0
         self.sql_thread_restart_time: Optional[float] = None
+        self.progress = SequentialProgress(
+            phase_weights={p.value: weight for p, weight in self.phase_weights.items()},
+            on_update=self.on_progress_update,
+            log=self.log,
+            multistep_phases={p.value for p in self.multistep_phases},
+        )
+
+    def on_progress_update(self, v: float) -> None:
+        if self.stats is not None:
+            self.stats.gauge_float(metric="basebackup_restore_progress_percent", value=100 * v)
 
     def add_new_binlog_streams(self, new_binlog_streams: List[BinlogStream]) -> bool:
         if not self.can_add_binlog_streams():
@@ -329,6 +350,9 @@ class RestoreCoordinator(threading.Thread):
                     self.refresh_binlogs()
                 if self.phase == self.Phase.applying_binlogs:
                     self.apply_binlogs()
+                    if self.phase == self.Phase.applying_binlogs:
+                        # there will be another pass of applying binlogs
+                        self.progress.next_step()
                 if self.phase == self.Phase.waiting_for_apply_to_finish:
                     if self.wait_for_apply_to_finish():
                         continue
@@ -396,7 +420,7 @@ class RestoreCoordinator(threading.Thread):
         encryption_key = rsa_decrypt_bytes(
             self.rsa_private_key_pem, bytes.fromhex(self.state["basebackup_info"]["encryption_key"])
         )
-        self.basebackup_restore_operation = BasebackupRestoreOperation(
+        basebackup_restore_operation = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             mysql_config_file_name=self.mysql_config_file_name,
@@ -404,9 +428,10 @@ class RestoreCoordinator(threading.Thread):
             stats=self.stats,
             stream_handler=self._basebackup_data_provider,
             temp_dir=self.temp_dir,
+            progress_creator=self.progress.create_child,
         )
         try:
-            self.basebackup_restore_operation.restore_backup()
+            basebackup_restore_operation.restore_backup()
             duration = time.monotonic() - start_time
             self.log.info("Basebackup restored in %.2f seconds", duration)
             self.update_state(
@@ -424,8 +449,6 @@ class RestoreCoordinator(threading.Thread):
                 )
                 self.update_state(phase=self.Phase.failed_basebackup)
                 self.stats.increase("myhoard.basebackup_broken")
-        finally:
-            self.basebackup_restore_operation = None
 
     def refresh_binlogs(self) -> None:
         self._fetch_more_binlog_infos(force=True)
@@ -639,6 +662,11 @@ class RestoreCoordinator(threading.Thread):
                 binlogs_restored=self.binlogs_restored + applied_binlog_count,
                 gtid_executed=gtid_executed,
             )
+            self.log.info("PBM entries: %s/%s. ", self.binlogs_restored, len(self.pending_binlog_manager.entries))
+            if self.binlogs_restored > 0:
+                self.progress.update(
+                    self.binlogs_restored / (self.binlogs_restored + len(self.pending_binlog_manager.entries))
+                )
             self.stats.increase("myhoard.restore.binlogs_restored", applied_binlog_count)
             self._queue_prefetch_operations()
         if apply_finished:
@@ -674,6 +702,7 @@ class RestoreCoordinator(threading.Thread):
                 cursor.execute("RESET SLAVE")
         self._ensure_mysql_server_is_started(with_binlog=True, with_gtids=True)
         self.update_state(phase=self.Phase.completed)
+        self.progress.update(1)
         self.log.info("Backup restoration completed")
 
     def read_queue(self) -> None:
@@ -694,6 +723,10 @@ class RestoreCoordinator(threading.Thread):
             pass
 
     def update_state(self, **kwargs) -> None:
+        if phase := kwargs.get("phase"):
+            if phase != self.Phase.waiting_for_apply_to_finish:
+                # `waiting_for_apply_to_finish` is a temporary state, after which it reverts to `applying_binlogs`
+                self.progress.set_phase(phase.value)
         self.state_manager.update_state(**kwargs)
 
     def _are_all_gtids_executed(self, gtid_ranges: Iterable[GtidRangeDict]) -> bool:
@@ -766,7 +799,7 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
         return None
 
-    def _basebackup_data_provider(self, target_stream) -> None:
+    def _basebackup_data_provider(self, target_stream, percent_complete_callback=None) -> None:
         name = self._build_full_name("basebackup.xbstream")
         compressed_size = self.state["basebackup_info"].get("compressed_size")
         file_storage = get_transfer(self.file_storage_config)
@@ -776,20 +809,23 @@ class RestoreCoordinator(threading.Thread):
         self.basebackup_bytes_downloaded = 0
 
         def download_progress(progress, max_progress):
-            if progress and max_progress and compressed_size:
-                # progress may be the actual number of bytes or it may be percentages
-                self.basebackup_bytes_downloaded = int(compressed_size * progress / max_progress)
-                # Track both absolute number and explicitly calculated rate. The rate can be useful as
-                # a separate measurement because downloads are not ongoing all the time and calculating
-                # rate based on raw byte counter requires knowing when the operation started and ended
-                self.stats.gauge_int("myhoard.restore.basebackup_bytes_downloaded", self.basebackup_bytes_downloaded)
-                last_value[0], last_time[0] = track_rate(
-                    current=self.basebackup_bytes_downloaded,
-                    last_recorded=last_value[0],
-                    last_recorded_time=last_time[0],
-                    metric_name="myhoard.restore.basebackup_download_rate",
-                    stats=self.stats,
-                )
+            if progress and max_progress:
+                if max_progress > 0 and percent_complete_callback is not None:
+                    percent_complete_callback(progress / max_progress)
+                if compressed_size:
+                    # progress may be the actual number of bytes or it may be percentages
+                    self.basebackup_bytes_downloaded = int(compressed_size * progress / max_progress)
+                    # Track both absolute number and explicitly calculated rate. The rate can be useful as
+                    # a separate measurement because downloads are not ongoing all the time and calculating
+                    # rate based on raw byte counter requires knowing when the operation started and ended
+                    self.stats.gauge_int("myhoard.restore.basebackup_bytes_downloaded", self.basebackup_bytes_downloaded)
+                    last_value[0], last_time[0] = track_rate(
+                        current=self.basebackup_bytes_downloaded,
+                        last_recorded=last_value[0],
+                        last_recorded_time=last_time[0],
+                        metric_name="myhoard.restore.basebackup_download_rate",
+                        stats=self.stats,
+                    )
 
         file_storage.get_contents_to_fileobj(name, target_stream, progress_callback=download_progress)
 

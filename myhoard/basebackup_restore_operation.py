@@ -32,6 +32,7 @@ class BasebackupRestoreOperation:
         stats,
         stream_handler,
         temp_dir,
+        progress_creator,
     ):
         self.current_file = None
         self.data_directory_size_end = None
@@ -49,6 +50,8 @@ class BasebackupRestoreOperation:
         self.temp_dir = None
         self.temp_dir_base = temp_dir
 
+        self.progress = progress_creator(phase_weights={"extract": 10, "prepare": 1, "move": 1})
+
     def restore_backup(self):
         if os.path.exists(self.mysql_data_directory):
             raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists")
@@ -63,6 +66,7 @@ class BasebackupRestoreOperation:
             self.temp_dir = tempfile.mkdtemp(dir=self.temp_dir_base)
 
             try:
+                self.progress.set_phase("extract")
                 command_line = [
                     "xbstream",
                     # TODO: Check if it made sense to restore directly to MySQL data directory so that
@@ -105,6 +109,7 @@ class BasebackupRestoreOperation:
                     "--target-dir",
                     self.temp_dir,
                 ]
+                self.progress.set_phase("prepare")
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -130,6 +135,7 @@ class BasebackupRestoreOperation:
                         if os.path.exists(binlog_name):
                             os.remove(binlog_name)
 
+                self.progress.set_phase("move")
                 command_line = [
                     "xtrabackup",
                     # defaults file must be given with --defaults-file=foo syntax, space here does not work
@@ -145,6 +151,7 @@ class BasebackupRestoreOperation:
                     ) as move_back:
                         self.proc = move_back
                         self._process_move_input_output()
+                self.progress.update(1)
             finally:
                 shutil.rmtree(self.temp_dir)
 
