@@ -253,7 +253,12 @@ class BasebackupRestoreOperation:
         assert self.proc is not None
         increase_pipe_capacity(self.proc.stdin, self.proc.stdout, self.proc.stderr)
 
-        sender_thread = InputSenderThread(stats=self.stats, stream_handler=self.stream_handler, stream=self.proc.stdin)
+        sender_thread = InputSenderThread(
+            stats=self.stats,
+            stream_handler=self.stream_handler,
+            stream=self.proc.stdin,
+            percent_complete_callback=self.progress.update,
+        )
         sender_thread.start()
 
         def loop_fn():
@@ -328,16 +333,17 @@ class BasebackupRestoreOperation:
 
 
 class InputSenderThread(threading.Thread):
-    def __init__(self, *, stats, stream_handler, stream):
+    def __init__(self, *, stats, stream_handler, stream, percent_complete_callback):
         super().__init__()
         self.exception = None
         self.stats = stats
         self.stream_handler = stream_handler
         self.stream = stream
+        self.percent_complete_callback = percent_complete_callback
 
     def run(self):
         try:
-            self.stream_handler(self.stream)
+            self.stream_handler(self.stream, percent_complete_callback=self.percent_complete_callback)
             # Must ensure the stream is closed since xbstream does not exit before it reaches EOF
             with suppress(Exception):
                 self.stream.close()
