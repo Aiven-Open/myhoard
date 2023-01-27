@@ -204,6 +204,7 @@ class MyHoard:
             optimize_tables_before_backup=self.config.get("optimize_tables_before_backup", False),
             restart_mysqld_callback=self._restart_mysqld,
             restore_max_binlog_bytes=self.config["restore_max_binlog_bytes"],
+            restore_free_memory_percentage=self.config.get("restore_free_memory_percentage"),
             server_id=self.config["server_id"],
             state_dir=self.config["state_directory"],
             stats=statsd,

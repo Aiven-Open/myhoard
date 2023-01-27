@@ -155,6 +155,7 @@ class Controller(threading.Thread):
         state_dir,
         stats,
         temp_dir,
+        restore_free_memory_percentage=None,
     ):
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -194,6 +195,7 @@ class Controller(threading.Thread):
         self.optimize_tables_before_backup = optimize_tables_before_backup
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
+        self.restore_free_memory_percentage: Optional[int] = restore_free_memory_percentage
         self.restore_coordinator: Optional[RestoreCoordinator] = None
         self.seen_basebackup_infos: Dict[str, BaseBackup] = {}
         self.server_id = server_id
@@ -817,6 +819,7 @@ class Controller(threading.Thread):
             binlog_streams=options["binlog_streams"],
             file_storage_config=storage_config,
             max_binlog_bytes=self.restore_max_binlog_bytes,
+            free_memory_percentage=self.restore_free_memory_percentage,
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,

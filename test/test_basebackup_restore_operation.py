@@ -52,6 +52,7 @@ def test_basic_restore(mysql_master, mysql_empty):
         restore_op = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
+            free_memory_percentage=80,
             mysql_config_file_name=mysql_empty.config_name,
             mysql_data_directory=mysql_empty.config_options.datadir,
             stats=build_statsd_client(),

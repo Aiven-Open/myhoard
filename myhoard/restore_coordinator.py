@@ -152,6 +152,7 @@ class RestoreCoordinator(threading.Thread):
         *,
         binlog_streams: List[BinlogStream],
         file_storage_config,
+        free_memory_percentage,
         max_binlog_bytes=None,
         mysql_client_params,
         mysql_config_file_name,
@@ -180,6 +181,7 @@ class RestoreCoordinator(threading.Thread):
         self.current_file = None
         self.file_storage: Optional[BaseTransfer] = None
         self.file_storage_config = file_storage_config
+        self.free_memory_percentage = free_memory_percentage
         self.is_running = True
         self.iteration_sleep_long = self.ITERATION_SLEEP_LONG
         self.iteration_sleep_short = self.ITERATION_SLEEP_SHORT
@@ -404,6 +406,7 @@ class RestoreCoordinator(threading.Thread):
             stats=self.stats,
             stream_handler=self._basebackup_data_provider,
             temp_dir=self.temp_dir,
+            free_memory_percentage=self.free_memory_percentage,
         )
         try:
             self.basebackup_restore_operation.restore_backup()
