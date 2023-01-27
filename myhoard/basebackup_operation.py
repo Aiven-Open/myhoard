@@ -296,6 +296,8 @@ class BasebackupOperation:
         except UnicodeDecodeError:
             line = line.decode("iso-8859-1")
 
+        self.stats.gauge_int("myhoard.basebackup.progressing", 1)
+
         if (
             not self._process_output_line_new_file(line)
             and not self._process_output_line_file_finished(line)

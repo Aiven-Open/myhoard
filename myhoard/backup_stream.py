@@ -908,6 +908,7 @@ class BackupStream(threading.Thread):
             # use longer than normal timeout here with multiple retries and increasing timeout.
             connect_params = dict(self.mysql_client_params)
             for retry, multiplier in [(True, 1), (True, 2), (False, 3)]:
+                self.stats.gauge_int("myhoard.basebackup.progressing", 1)
                 try:
                     connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5 * multiplier
                     with mysql_cursor(**connect_params) as cursor:
