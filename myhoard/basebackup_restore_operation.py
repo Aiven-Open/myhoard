@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .util import get_xtrabackup_version
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
 from typing import Optional
@@ -108,7 +109,7 @@ class BasebackupRestoreOperation:
                     "--target-dir",
                     self.temp_dir,
                 ]
-                if self.free_memory_percentage is not None:
+                if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 30):
                     command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(

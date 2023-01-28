@@ -24,6 +24,12 @@ import time
 DEFAULT_MYSQL_TIMEOUT = 4.0
 ERR_TIMEOUT = 2013
 
+# The follow lines used to split a version string which might
+# start with something like:
+# xtrabackup version 8.0.30-23.3.aiven
+XTRABACKUP_VERSION_REGEX = re.compile(r"^xtrabackup version ([\d\.\-]).+")
+VERSION_SPLITTING_REGEX = re.compile(r"[\.-]")
+
 
 GtidRangeTuple = tuple[int, int, str, int, int]
 
@@ -636,3 +642,12 @@ def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
         log.warning("Expected SQL thread to be running but it isn't. Running 'START SLAVE SQL_THREAD'")
     stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": slave_status["Last_SQL_Errno"]})
     cursor.execute("START SLAVE SQL_THREAD")
+
+
+def get_xtrabackup_version() -> Tuple[int, ...]:
+    result = subprocess.run(["xtrabackup", "--version"], capture_output=True, encoding="utf-8", check=True)
+    version_line = result.stderr.strip().split("\n")[-1]
+    matches = XTRABACKUP_VERSION_REGEX.match(version_line)
+    if matches is None:
+        raise Exception(f"Cannot extract xtrabackup version number from {result.stderr!r}")
+    return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(matches[1]) if len(x) > 0)
