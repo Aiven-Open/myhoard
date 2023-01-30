@@ -321,3 +321,8 @@ def test_restart_unexpected_dead_sql_thread() -> None:
     myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, slave_status, mock_stats, mock_logger)
     assert mock_stats.increase.call_args.args == ("myhoard.unexpected_sql_thread_starts",)
     assert mock_cursor.execute.call_args.args == ("START SLAVE SQL_THREAD",)
+
+
+def test_trabackup_version() -> None:
+    version = myhoard_util.get_xtrabackup_version()
+    assert version < (99, 99, 99), "version is higher than expected"

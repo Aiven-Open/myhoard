@@ -1,6 +1,8 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .util import get_xtrabackup_version
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
+from typing import Optional
 
 import base64
 import fnmatch
@@ -27,6 +29,7 @@ class BasebackupRestoreOperation:
         *,
         encryption_algorithm,
         encryption_key,
+        free_memory_percentage,
         mysql_config_file_name,
         mysql_data_directory,
         stats,
@@ -38,6 +41,7 @@ class BasebackupRestoreOperation:
         self.data_directory_size_start = None
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
+        self.free_memory_percentage: Optional[int] = free_memory_percentage
         self.log = logging.getLogger(self.__class__.__name__)
         self.mysql_config_file_name = mysql_config_file_name
         self.mysql_data_directory = mysql_data_directory
@@ -105,6 +109,8 @@ class BasebackupRestoreOperation:
                     "--target-dir",
                     self.temp_dir,
                 ]
+                if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 30):
+                    command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE

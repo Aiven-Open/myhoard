@@ -342,6 +342,12 @@ The full path and file name prefix of relay logs. This must be the same as the
 corresponding MySQL configuration option except full path is always required
 here.
 
+**restore_free_memory_percentage**
+
+Maximum percentage of system memory to allow xtrabackup to use while
+preparing a basebackup for restoration. If not defined, use xtrabackup's
+default value.
+
 **restore_max_binlog_bytes**
 
 Maximum amount of disk space to use for binary logs including pre-fetched logs
