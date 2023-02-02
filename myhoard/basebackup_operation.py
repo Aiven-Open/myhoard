@@ -1,5 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
+from datetime import datetime, timedelta
 from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.errors import XtraBackupError
 from myhoard.util import get_mysql_version, mysql_cursor
@@ -61,6 +62,10 @@ class BasebackupOperation:
         self.abort_reason = None
         self.binlog_info = None
         self.current_file = None
+        self.current_progress: float = 0.00
+        self.current_progress_incremental_delta: float = 0.01
+        self.current_progress_report_interval_seconds: int = 30
+        self.current_progress_update_time: datetime = datetime.now()
         self.data_directory_filtered_size = None
         self.data_directory_size_end: Optional[int] = None
         self.data_directory_size_start: Optional[int] = None
@@ -305,6 +310,13 @@ class BasebackupOperation:
                 self.log.error("xtrabackup: %r", line)
             else:
                 self.log.info("xtrabackup: %r", line)
+                if datetime.now() - self.current_progress_update_time > timedelta(
+                    seconds=self.current_progress_report_interval_seconds
+                ):
+
+                    self.current_progress += self.current_progress_incremental_delta
+                    self._update_progress(estimated_progress=self.current_progress)
+                    self.current_progress_update_time = datetime.now()
 
     def _process_output_line_new_file(self, line):
         match = self.current_file_re.search(line)
@@ -327,7 +339,7 @@ class BasebackupOperation:
             try:
                 file_size = os.path.getsize(full_name)
                 self.processed_original_bytes += file_size
-                self._update_progress(last_file_name=self.current_file, last_file_size=file_size)
+                self.current_progress = self._update_progress(last_file_name=self.current_file, last_file_size=file_size)
                 self.log.info("Processing %r finished, file size %s bytes", self.current_file, file_size)
             except OSError as ex:
                 self.log.warning("Failed to get size for %r to update progress: %r", full_name, ex)
@@ -363,7 +375,7 @@ class BasebackupOperation:
             self.log.info("Transaction log lsn info: %r", self.lsn_info)
         return match
 
-    def _update_progress(self, *, last_file_name=None, last_file_size=None, estimated_progress=None):
+    def _update_progress(self, *, last_file_name=None, last_file_size=None, estimated_progress=None) -> float:
         estimated_total_bytes = self.data_directory_filtered_size or 0
 
         if estimated_progress is None:
@@ -387,6 +399,8 @@ class BasebackupOperation:
                 last_file_size=last_file_size,
                 processed_original_bytes=self.processed_original_bytes,
             )
+
+        return estimated_progress
 
 
 class OutputReaderThread(threading.Thread):
