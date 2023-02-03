@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 from unittest.mock import MagicMock, patch
 
 import contextlib
+import datetime
 import os
 import pytest
 import random
@@ -1285,6 +1286,75 @@ def test_collect_binlogs_to_purge():
     assert binlogs_to_purge == binlogs
     assert only_inapplicable_binlogs is False
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 3)
+
+
+def test_periodic_backup_based_on_exceeded_intervals(time_machine, master_controller) -> None:
+    # pylint: disable=protected-access
+    time_machine.move_to("2023-01-02T18:00:00")
+
+    # By default backup_hour = 3, backup_interval_minutes = 1440
+    m_controller, master = master_controller
+
+    m_controller.switch_to_active_mode()
+    m_controller.start()
+
+    def streaming_binlogs(controller: Controller, expected_completed_backups: int):
+        assert controller.backup_streams
+        assert controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+
+        complete_backups = [backup for backup in controller.state["backups"] if backup["completed_at"]]
+        assert len(complete_backups) == expected_completed_backups
+
+    def flush_binlogs():
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("FLUSH BINARY LOGS")
+
+    # write some data for the first backup
+    flush_binlogs()
+    # first backup for 2023-01-02 3:00 should be generated at 6pm (time we started the service)
+    while_asserts(lambda: streaming_binlogs(m_controller, 1), timeout=10)
+
+    # generate more data for second backup
+    flush_binlogs()
+
+    # second backup ideally should be done at 2023-01-03 03:00, but following the
+    # "half of interval" rule (at least 12 hours of difference between most recent scheduled and current time)
+    # therefore, it should be actually scheduled at 2023-01-03 06:00
+    time_machine.move_to("2023-01-03T03:00:00+00:00")
+
+    expected_normalized_time = datetime.datetime(2023, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    assert m_controller._current_normalized_backup_timestamp() == expected_normalized_time.isoformat()
+
+    # no new backup should be scheduled
+    time.sleep(1)
+    min_created_at = datetime.datetime(2023, 1, 3, 3, tzinfo=datetime.timezone.utc).timestamp()
+    assert not any(bs.created_at >= min_created_at for bs in m_controller.backup_streams)
+
+    time_machine.move_to("2023-01-03T06:00:00+00:00")
+    while_asserts(lambda: streaming_binlogs(m_controller, 2), timeout=10)
+
+    # generate more data for third backup
+    flush_binlogs()
+
+    # After second backup, the next scheduled one should be at 2023-02-04 03:00:00, but let's change
+    # backup_interval_minutes to 2880 (48 hours)
+    m_controller.backup_settings["backup_interval_minutes"] = 2880
+
+    time_machine.move_to("2023-01-04T06:00:00+00:00")
+
+    expected_normalized_time = datetime.datetime(2023, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    assert m_controller._current_normalized_backup_timestamp() == expected_normalized_time.isoformat()
+
+    time.sleep(1)
+    # no new backup should be scheduled
+    min_created_at = datetime.datetime(2023, 1, 4, 3, tzinfo=datetime.timezone.utc).timestamp()
+    assert not any(bs.created_at >= min_created_at for bs in m_controller.backup_streams)
+
+    time_machine.move_to("2023-01-05T03:00:00+00:00")
+    expected_normalized_time = datetime.datetime(2023, 1, 5, 3, tzinfo=datetime.timezone.utc)
+
+    assert m_controller._current_normalized_backup_timestamp() == expected_normalized_time.isoformat()
+    while_asserts(lambda: streaming_binlogs(m_controller, 3), timeout=10)
 
 
 @patch.object(RestoreCoordinator, "MAX_BASEBACKUP_ERRORS", 2)

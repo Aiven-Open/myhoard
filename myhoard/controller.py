@@ -851,6 +851,17 @@ class Controller(threading.Thread):
         else:
             self.log.info("Newly created restore coordinator is already in completed state")
 
+    def _previous_normalized_backup_timestamp(self) -> Optional[str]:
+        normalized_backup_times = [
+            stream.state["normalized_backup_time"]
+            for stream in self.backup_streams
+            if stream.state["normalized_backup_time"]
+        ]
+
+        if not normalized_backup_times:
+            return None
+        return max(normalized_backup_times)
+
     def _current_normalized_backup_timestamp(self) -> str:
         """Returns the closest historical backup time that current time matches to (or current time if it matches).
         E.g. if backup hour is 13, backup minute is 50, current time is 15:40 and backup interval is 60 minutes,
@@ -861,11 +872,19 @@ class Controller(threading.Thread):
         backup_interval_minutes = self.backup_settings["backup_interval_minutes"]
         backup_hour = self.backup_settings["backup_hour"]
         backup_minute = self.backup_settings["backup_minute"]
-        if normalized.hour < backup_hour or (normalized.hour == backup_hour and normalized.minute < backup_minute):
-            normalized = normalized - datetime.timedelta(days=1)
-        normalized = normalized.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
-        while normalized + datetime.timedelta(minutes=backup_interval_minutes) < now:
+
+        previous_normalized = self._previous_normalized_backup_timestamp()
+        # in case we have a previous backup time, we can use it as starting point
+        if previous_normalized:
+            normalized = datetime.datetime.fromisoformat(previous_normalized)
+        else:
+            if normalized.hour < backup_hour or (normalized.hour == backup_hour and normalized.minute < backup_minute):
+                normalized = normalized - datetime.timedelta(days=1)
+            normalized = normalized.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+
+        while normalized + datetime.timedelta(minutes=backup_interval_minutes) <= now:
             normalized = normalized + datetime.timedelta(minutes=backup_interval_minutes)
+
         return normalized.isoformat()
 
     def _determine_unapplied_remote_binlogs(self, stream):
@@ -1177,23 +1196,14 @@ class Controller(threading.Thread):
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()
-        most_recent_scheduled = None
-        last_normalized_backup_time = None
-        if self.backup_streams:
-            normalized_backup_times = [
-                stream.state["normalized_backup_time"]
-                for stream in self.backup_streams
-                if stream.state["normalized_backup_time"]
-            ]
-            if normalized_backup_times:
-                last_normalized_backup_time = max(normalized_backup_times)
-            scheduled_streams = [
-                stream
-                for stream in self.backup_streams
-                if stream.state["backup_reason"] == BackupStream.BackupReason.scheduled
-            ]
-            if scheduled_streams:
-                most_recent_scheduled = max(stream.created_at for stream in scheduled_streams)
+        last_normalized_backup_time = self._previous_normalized_backup_timestamp()
+
+        scheduled_streams_created_at = [
+            stream.created_at
+            for stream in self.backup_streams
+            if stream.state["backup_reason"] == BackupStream.BackupReason.scheduled
+        ]
+        most_recent_scheduled = max(scheduled_streams_created_at) if scheduled_streams_created_at else None
 
         # Don't create new backup unless at least half of interval has elapsed since scheduled last backup. Otherwise
         # we would end up creating a new backup each time when backup hour/minute changes, which is typically undesired.
