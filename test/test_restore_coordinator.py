@@ -3,7 +3,9 @@ from . import build_statsd_client, DataGenerator, generate_rsa_key_pair, restart
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
+from myhoard.state_manager import StateManager
 from rohmu.object_storage.local import LocalTransfer
+from typing import Any, Generic, List, Mapping, TypeVar
 from unittest.mock import Mock, patch
 
 import myhoard.util as myhoard_util
@@ -15,18 +17,38 @@ pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
 def test_restore_coordinator(session_tmpdir, mysql_master, mysql_empty):
-    _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, pitr=False)
+    _restore_coordinator_sequence(
+        session_tmpdir, mysql_master, mysql_empty, pitr=False, rebuild_tables=False, fail_and_resume=False
+    )
 
 
 def test_restore_coordinator_pitr(session_tmpdir, mysql_master, mysql_empty):
-    _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, pitr=True)
+    _restore_coordinator_sequence(
+        session_tmpdir, mysql_master, mysql_empty, pitr=True, rebuild_tables=False, fail_and_resume=False
+    )
 
 
-def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, pitr):
+def test_restore_coordinator_rebuild_tables(session_tmpdir, mysql_master, mysql_empty):
+    _restore_coordinator_sequence(
+        session_tmpdir, mysql_master, mysql_empty, pitr=False, rebuild_tables=True, fail_and_resume=False
+    )
+
+
+def test_restore_coordinator_resume_rebuild_tables(session_tmpdir, mysql_master, mysql_empty):
+    _restore_coordinator_sequence(
+        session_tmpdir, mysql_master, mysql_empty, pitr=False, rebuild_tables=True, fail_and_resume=True
+    )
+
+
+def _restore_coordinator_sequence(
+    session_tmpdir, mysql_master, mysql_empty, *, pitr: bool, rebuild_tables: bool, fail_and_resume: bool
+):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
         cursor.execute("USE db1")
+        cursor.execute("CREATE TABLE t0 (id INTEGER PRIMARY KEY, data TEXT)")
         cursor.execute("CREATE TABLE t1 (id INTEGER PRIMARY KEY, data TEXT)")
+        cursor.execute("CREATE TABLE t2 (id INTEGER PRIMARY KEY, data TEXT)")
         cursor.execute("COMMIT")
 
     private_key_pem, public_key_pem = generate_rsa_key_pair()
@@ -264,10 +286,12 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
         mysql_relay_log_index_file=mysql_empty.config_options.relay_log_index_file,
         mysql_relay_log_prefix=mysql_empty.config_options.relay_log_file_prefix,
         pending_binlogs_state_file=state_file_name.replace(".json", "") + ".pending_binlogs",
+        rebuild_tables=rebuild_tables,
         restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_empty, **kwargs),
         rsa_private_key_pem=private_key_pem,
         site="default",
         state_file=state_file_name,
+        state_manager_class=FailingStateManager if fail_and_resume else StateManager,
         stats=build_statsd_client(),
         stream_id=bs1.state["stream_id"],
         target_time=pitr_target_time,
@@ -289,7 +313,16 @@ def _restore_coordinator_sequence(session_tmpdir, mysql_master, mysql_empty, *, 
     finally:
         rc.stop()
 
-    assert rc.state["restore_errors"] == 0
+    if fail_and_resume:
+        assert isinstance(rc.state_manager, FailingStateManager)
+        assert rc.state["restore_errors"] == 1
+        # FailingStateManager is configured to fail once on t1, so it will retry t1.
+        # If resume is correctly implemented, it won't retry t0
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": ("db1", "t0")}) == 1
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": ("db1", "t1")}) == 2
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": ("db1", "t2")}) == 1
+    else:
+        assert rc.state["restore_errors"] == 0
     assert rc.state["remote_read_errors"] == 0
 
     with myhoard_util.mysql_cursor(**restored_connect_options) as cursor:
@@ -354,6 +387,7 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
             mysql_relay_log_index_file=mysql_empty.config_options.relay_log_index_file,
             mysql_relay_log_prefix=mysql_empty.config_options.relay_log_file_prefix,
             pending_binlogs_state_file=state_file_name.replace(".json", "") + ".pending_binlogs",
+            rebuild_tables=False,
             restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_empty, **kwargs),
             rsa_private_key_pem=private_key_pem,
             site="default",
@@ -370,3 +404,26 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
 
     assert apply_finished
     assert current_index == 2
+
+
+class InjectedError(Exception):
+    pass
+
+
+T = TypeVar("T", bound=Mapping[str, Any])
+
+
+class FailingStateManager(Generic[T], StateManager[T]):
+    def __init__(self, *, allow_unknown_keys: bool = False, lock=None, state: T, state_file) -> None:
+        super().__init__(allow_unknown_keys=allow_unknown_keys, lock=lock, state=state, state_file=state_file)
+        self.update_log: List[Mapping[str, Any]] = []
+        self.has_failed = False
+
+    def update_state(self, **kwargs) -> None:
+        self.update_log.append(kwargs)
+        super().update_state(**kwargs)
+        # We're not testing "what if the StateManager fails", but using it as an injection
+        # mechanism to stop at interesting points, that's why we raise after writing the state.
+        if not self.has_failed and kwargs.get("last_rebuilt_table") == ("db1", "t1"):
+            self.has_failed = True
+            raise InjectedError()

@@ -271,6 +271,7 @@ class Controller(threading.Thread):
     def restore_backup(
         self,
         *,
+        rebuild_tables: bool = False,
         site: str,
         stream_id: str,
         target_time: Optional[float] = None,
@@ -314,6 +315,7 @@ class Controller(threading.Thread):
                         }
                     ],
                     "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
+                    "rebuild_tables": rebuild_tables,
                     "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
                     "stream_id": stream_id,
                     "site": site,
@@ -823,6 +825,7 @@ class Controller(threading.Thread):
             mysql_relay_log_index_file=self.mysql_relay_log_index_file,
             mysql_relay_log_prefix=self.mysql_relay_log_prefix,
             pending_binlogs_state_file=options["pending_binlogs_state_file"],
+            rebuild_tables=options["rebuild_tables"],
             restart_mysqld_callback=self.restart_mysqld_callback,
             rsa_private_key_pem=backup_site["encryption_keys"]["private"],
             site=options["site"],
@@ -1636,6 +1639,7 @@ class Controller(threading.Thread):
                     ]
                     + options["binlog_streams"],
                     "pending_binlogs_state_file": self._get_restore_coordinator_pending_state_file_and_remove_old(),
+                    "rebuild_tables": options["rebuild_tables"],
                     "state_file": self._get_restore_coordinator_state_file_and_remove_old(),
                     "stream_id": earlier_backup["stream_id"],
                     "site": earlier_backup["site"],

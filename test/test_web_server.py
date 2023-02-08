@@ -138,6 +138,14 @@ async def test_status_update_to_restore(master_controller, web_client):
     )
     assert response["message"] == "Field 'target_time' must be an integer when present"
 
+    response = await put_and_verify_json_body(
+        web_client,
+        "/status",
+        {"mode": "restore", "rebuild_tables": "foo", "site": "default", "stream_id": "abc"},
+        expected_status=400,
+    )
+    assert response["message"] == "Field 'rebuild_tables' must be a boolean when present"
+
     async def restore_status_returned():
         response = await get_and_verify_json_body(web_client, "/status/restore")
         assert isinstance(response["basebackup_compressed_bytes_downloaded"], int)

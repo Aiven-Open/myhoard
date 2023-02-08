@@ -6,6 +6,7 @@ from .binlog_downloader import download_binlog
 from .errors import BadRequest
 from .state_manager import StateManager
 from .statsd import StatsClient
+from .table import Table
 from .util import (
     add_gtid_ranges_to_executed_set,
     build_gtid_ranges,
@@ -99,6 +100,7 @@ class RestoreCoordinator(threading.Thread):
         getting_backup_info = "getting_backup_info"
         initiating_binlog_downloads = "initiating_binlog_downloads"
         restoring_basebackup = "restoring_basebackup"
+        rebuilding_tables = "rebuilding_tables"
         refreshing_binlogs = "refreshing_binlogs"
         applying_binlogs = "applying_binlogs"
         waiting_for_apply_to_finish = "waiting_for_apply_to_finish"
@@ -135,6 +137,7 @@ class RestoreCoordinator(threading.Thread):
         last_poll: Optional[float]
         last_processed_index: Optional[int]
         last_renamed_index: int
+        last_rebuilt_table: Optional[Tuple[str, str]]
         mysql_params: Optional[Dict[str, Any]]
         phase: "RestoreCoordinator.Phase"
         prefetched_binlogs: Dict
@@ -160,10 +163,12 @@ class RestoreCoordinator(threading.Thread):
         mysql_relay_log_index_file,
         mysql_relay_log_prefix,
         pending_binlogs_state_file,
+        rebuild_tables: bool,
         restart_mysqld_callback,
         rsa_private_key_pem,
         site: str,
         state_file: str,
+        state_manager_class: type[StateManager["RestoreCoordinator.State"]] = StateManager,
         stats: StatsClient,
         stream_id: str,
         target_time=None,
@@ -187,7 +192,7 @@ class RestoreCoordinator(threading.Thread):
         self.iteration_sleep_short = self.ITERATION_SLEEP_SHORT
         self.lock = threading.RLock()
         self.log = logging.getLogger(f"{self.__class__.__name__}/{stream_id}")
-        self.max_binlog_count = None
+        self.max_binlog_count: Optional[int] = None
         # Maximum bytes worth of binlogs to store on disk simultaneously. Note that this is
         # not an actual upper limit as the constraint is checked after adding new binlog
         # (or else it might be possible no binlogs can be downloaded)
@@ -212,6 +217,7 @@ class RestoreCoordinator(threading.Thread):
         if not isinstance(rsa_private_key_pem, bytes):
             rsa_private_key_pem = rsa_private_key_pem.encode("ascii")
         self.rsa_private_key_pem = rsa_private_key_pem
+        self.should_rebuild_tables = rebuild_tables
         self.site = site
         # State contains variables that should be persisted over process restart
         # so that the operation resumes from where it was left (whenever possible)
@@ -242,6 +248,7 @@ class RestoreCoordinator(threading.Thread):
             "last_poll": None,
             "last_processed_index": None,
             "last_renamed_index": 0,
+            "last_rebuilt_table": None,
             "mysql_params": None,
             "phase": self.Phase.getting_backup_info,
             "prefetched_binlogs": {},
@@ -252,7 +259,7 @@ class RestoreCoordinator(threading.Thread):
             "target_time_reached": False,
             "write_relay_log_manually": False,
         }
-        self.state_manager = StateManager[RestoreCoordinator.State](lock=self.lock, state=self.state, state_file=state_file)
+        self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
         self.stream_id = stream_id
         self.target_time = target_time
@@ -327,6 +334,8 @@ class RestoreCoordinator(threading.Thread):
                     self.initiate_binlog_downloads()
                 if self.phase == self.Phase.restoring_basebackup:
                     self.restore_basebackup()
+                if self.phase == self.Phase.rebuilding_tables:
+                    self.rebuild_tables()
                 if self.phase == self.Phase.refreshing_binlogs:
                     self.refresh_binlogs()
                 if self.phase == self.Phase.applying_binlogs:
@@ -412,9 +421,11 @@ class RestoreCoordinator(threading.Thread):
             self.basebackup_restore_operation.restore_backup()
             duration = time.monotonic() - start_time
             self.log.info("Basebackup restored in %.2f seconds", duration)
+            next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
             self.update_state(
-                phase=self.Phase.refreshing_binlogs,
+                phase=next_phase,
                 basebackup_restore_duration=duration,
+                last_rebuilt_table=None,
             )
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to restore basebackup: %r", ex)
@@ -429,6 +440,52 @@ class RestoreCoordinator(threading.Thread):
                 self.stats.increase("myhoard.basebackup_broken")
         finally:
             self.basebackup_restore_operation = None
+
+    def rebuild_tables(self) -> None:
+        excluded_tables = {
+            ("mysql", "innodb_index_stats"),
+            ("mysql", "innodb_table_stats"),
+        }
+        self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
+        with self._mysql_cursor() as cursor:
+            cursor.execute(
+                "SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_ROWS,AVG_ROW_LENGTH"
+                " FROM INFORMATION_SCHEMA.TABLES WHERE ENGINE='InnoDB'"
+            )
+            tables = [Table.from_row(row) for row in cursor.fetchall()]
+            tables = sorted(tables, key=Table.sort_key)
+            tables = [table for table in tables if table.sort_key() not in excluded_tables]
+            if self.state["last_rebuilt_table"] is not None:
+                self.log.info("Resuming at table %s", self.state["last_rebuilt_table"])
+                tables = [table for table in tables if table.sort_key() >= self.state["last_rebuilt_table"]]
+            estimated_total_bytes = sum(table.estimated_size_bytes() for table in tables)
+            estimated_progress_bytes = 0
+            self.log.info("Will rebuild %s tables, estimated total size: %s bytes", len(tables), estimated_total_bytes)
+            for table_index, table in enumerate(tables, start=1):
+                escaped_table_designator = table.escaped_designator()
+                self.log.info(
+                    "Rebuilding table %s of %s: %s, estimated size: %s bytes, estimated total progress: %.1f%%",
+                    table_index,
+                    len(tables),
+                    escaped_table_designator,
+                    table.estimated_size_bytes(),
+                    estimated_progress_bytes / max(estimated_total_bytes, 1) * 100,
+                )
+                try:
+                    cursor.execute(f"ALTER TABLE {escaped_table_designator} FORCE")
+                except pymysql.err.OperationalError as e:
+                    # ERROR 1148: The used command is not allowed with this MySQL version
+                    if e.args[0] == 1148:
+                        # This happens for some tables which are marked as using InnoDB but are actually not
+                        # normal tables (like mysql.innodb_index_stats and mysql.innodb_table_stats).
+                        # The known ones are already skipped but if we encounter more, we just skip them.
+                        self.log.error("Could not rebuild %s, error: %s, skipping it", escaped_table_designator, str(e))
+                    else:
+                        raise
+                self.update_state(last_rebuilt_table=table.sort_key())
+                estimated_progress_bytes += table.estimated_size_bytes()
+            self.log.info("Rebuilt all tables")
+        self.update_state(phase=self.Phase.refreshing_binlogs)
 
     def refresh_binlogs(self) -> None:
         self._fetch_more_binlog_infos(force=True)
