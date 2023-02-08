@@ -611,7 +611,6 @@ class RateTracker(threading.Thread):
 
 
 class SlaveStatus(TypedDict):
-
     Relay_Log_File: str
     Relay_Master_Log_File: str
     Exec_Master_Log_Pos: int

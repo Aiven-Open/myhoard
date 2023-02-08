@@ -47,12 +47,10 @@ ERR_BACKUP_IN_PROGRESS = 4085
 
 
 class BaseBackup(TypedDict):
-
     end_ts: float
 
 
 class Backup(TypedDict):
-
     basebackup_info: BaseBackup
     closed_at: Optional[float]
     completed_at: Optional[float]
@@ -63,7 +61,6 @@ class Backup(TypedDict):
 
 
 class BackupRequest(TypedDict):
-
     backup_reason: BackupStream.BackupReason
     normalized_backup_time: str
 

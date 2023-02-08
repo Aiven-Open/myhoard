@@ -340,7 +340,6 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
     mock_cursor.fetchone.return_value = slave_status_response
 
     with patch.object(RestoreCoordinator, "_mysql_cursor") as mock_mysql_cursor:
-
         mock_mysql_cursor.return_value.__enter__.return_value = mock_cursor
         mock_cursor.foo.return_value.bar.return_value.something.return_value = "bar"
         mock_cursor.foo.return_value = "bar"
