@@ -4,7 +4,7 @@ coverage
 coveralls
 flake8
 httplib2
-isort==5.10.1
+isort==5.12.0
 mock
 mypy
 pre-commit
