@@ -835,6 +835,48 @@ def test_multiple_backup_management(master_controller):
     assert 8 <= len(seen_backups) <= 13
 
 
+def test_scheduled_backup_is_skipped_when_at_max(master_controller):
+    mcontroller, master = master_controller
+    # Backup every 3 seconds
+    mcontroller.backup_settings["backup_interval_minutes"] = 0.05
+    # Never delete backups if we don't have at least 2 no matter how old they are
+    mcontroller.backup_settings["backup_count_min"] = 2
+    # Delete backups if there are more than this even if the backup to delete is newer than max age
+    mcontroller.backup_settings["backup_count_max"] = 3
+    # Max age way higher than we'll get
+    mcontroller.backup_settings["backup_age_days_max"] = 1
+
+    mcontroller.switch_to_active_mode()
+    mcontroller.start()
+
+    seen_backups = set()
+    highest_backup_count = 0
+    last_flush = [time.monotonic()]
+
+    def maybe_flush_binlog():
+        if time.monotonic() - last_flush[0] > 0.2:
+            with mysql_cursor(**master.connect_options) as cursor:
+                cursor.execute("FLUSH BINARY LOGS")
+            last_flush[0] = time.monotonic()
+
+    # Wait for 30 seconds and ensure backup count stays between 3 and 4 the whole time (once 3 has been reached)
+    start_time = time.monotonic()
+    while time.monotonic() - start_time < 30:
+        maybe_flush_binlog()
+        for backup in mcontroller.state["backups"]:
+            seen_backups.add(backup["stream_id"])
+        completed_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
+        if len(completed_backups) > highest_backup_count:
+            highest_backup_count = len(completed_backups)
+        time.sleep(0.1)
+
+    assert highest_backup_count == 4
+
+    # We waited for 30 seconds altogether and backup interval is 3 seconds. There should be more than our max
+    # backups taken, as we should have allowed one extra to rotate through.
+    assert 4 < len(seen_backups)
+
+
 def test_manual_backup_creation(master_controller):
     mcontroller = master_controller[0]
     # Never delete backups if we don't have at least 2 no matter how old they are

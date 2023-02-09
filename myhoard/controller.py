@@ -81,14 +81,6 @@ class RestoreOptions(TypedDict):
     target_time_approximate_ok: bool
 
 
-def sort_completed_backups(backups: List[Backup]) -> List[Backup]:
-    def key(backup):
-        assert backup["completed_at"] is not None
-        return backup["completed_at"]
-
-    return sorted((backup for backup in backups if backup["completed_at"]), key=key)
-
-
 class Controller(threading.Thread):
     """Main logic controller for the service. This drives the individual handlers like
     BackupStream, BinlogScanner and RestoreCoordinator as well as provides state info
@@ -267,6 +259,14 @@ class Controller(threading.Thread):
     @property
     def mode(self) -> Mode:
         return self.state["mode"]
+
+    @property
+    def completed_backups(self) -> List[Backup]:
+        def key(backup: Backup):
+            assert backup["completed_at"] is not None
+            return backup["completed_at"]
+
+        return sorted((backup for backup in self.state["backups"] if backup["completed_at"]), key=key)
 
     def restore_backup(
         self,
@@ -958,7 +958,7 @@ class Controller(threading.Thread):
         assert self.restore_coordinator is not None
         if not self.restore_coordinator.can_add_binlog_streams():
             return
-        backups = sort_completed_backups(self.state["backups"])
+        backups = self.completed_backups
         # If most recent current backup is not in the list of backups being restored then we're probably
         # restoring some old backup and don't want to automatically get latest changes
         if not any(bs["stream_id"] == backups[-1]["stream_id"] for bs in self.restore_coordinator.binlog_streams):
@@ -966,7 +966,6 @@ class Controller(threading.Thread):
 
         old_backups = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
         self._refresh_backups_list()
-        backups = sort_completed_backups(self.state["backups"])
         new_backups: List[BinlogStream] = [{"site": backup["site"], "stream_id": backup["stream_id"]} for backup in backups]
         if old_backups == new_backups:
             return
@@ -1182,6 +1181,12 @@ class Controller(threading.Thread):
             )
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
+            # If we already have more than the max, skip this one
+            # We allow one over the max just to handle rotation.
+            if (length := len(self.completed_backups)) > (max_count := self.backup_settings["backup_count_max"]):
+                self.log.info("Skipping automated backup request as we already have our maximum count of backups (%d >= %d)", length, max_count)
+                return
+
             self.log.info(
                 "New normalized time %r differs from previous %r, adding new backup request",
                 normalized_backup_time,
@@ -1220,14 +1225,13 @@ class Controller(threading.Thread):
                 stream.remove_binlogs(binlogs)
 
     def _purge_old_backups(self):
-        purgeable = [backup for backup in self.state["backups"] if backup["completed_at"]]
+        purgeable = self.completed_backups
         if len(purgeable) <= self.backup_settings["backup_count_min"]:
             return
 
         # For simplicity only ever drop one backup here. This function
         # is called repeatedly so if there are for any reason more backups
         # to drop they will be dropped soon enough
-        purgeable = sort_completed_backups(purgeable)
         backup = purgeable[0]
         if not backup["closed_at"]:
             return
@@ -1610,7 +1614,7 @@ class Controller(threading.Thread):
         # We're trying to restore a backup but that keeps on failing in the basebackup restoration phase.
         # If we have an older backup available try restoring that and play back all binlogs so that the
         # system should end up in the exact same state eventually.
-        backups = sort_completed_backups(self.state["backups"])
+        backups = self.completed_backups
         current_stream_id = self.state["restore_options"]["stream_id"]
         earlier_backup = None
         for backup in backups:
