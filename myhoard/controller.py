@@ -1151,6 +1151,12 @@ class Controller(threading.Thread):
         normalized_backup_time = self._current_normalized_backup_timestamp()
         most_recent_scheduled = None
         last_normalized_backup_time = None
+        last_completed_backup_time = self.completed_backups[-1]["completed_at"] if self.completed_backups else None
+
+        # If we already have a recent enough backup, skip for now.
+        if last_completed_backup_time and datetime.datetime.fromtimestamp(last_completed_backup_time).isoformat() > normalized_backup_time:
+            return
+
         if self.backup_streams:
             normalized_backup_times = [
                 stream.state["normalized_backup_time"]
