@@ -148,6 +148,7 @@ class BackupStream(threading.Thread):
         binlog_progress_tracker: Optional[RateTracker] = None,
         binlogs: Optional[List[BinlogInfo]] = None,
         closed_at: Optional[float] = None,
+        completed_at: Optional[float] = None,
         compression: Optional[Compression] = None,
         file_storage_setup_fn: Callable[[], "BaseTransfer"],
         file_uploaded_callback=None,
@@ -173,6 +174,7 @@ class BackupStream(threading.Thread):
         self.basebackup_operation: Optional[BasebackupOperation] = None
         self.basebackup_progress: Optional[Dict[str, Any]] = None
         self.closed_at = closed_at
+        self.completed_at = completed_at
         self.compression = compression
         self.current_upload_index: Optional[int] = None
         # This file storage object must only be called from BackupStream's own thread. Calls from
@@ -435,9 +437,10 @@ class BackupStream(threading.Thread):
         self.log.info("Marking stream %r as completed (local update only)", self.stream_id)
         # Just write the completed info to local state here to ensure file storage
         # operation happens from appropriate thread
+        self.completed_at = time.time()
         self.state_manager.update_state(
             completed_info={
-                "completed_at": time.time(),
+                "completed_at": self.completed_at,
                 "server_id": self.server_id,
             },
         )
@@ -453,6 +456,7 @@ class BackupStream(threading.Thread):
             metadata = make_fs_metadata(completed_info)
             self.file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
             self.state_manager.update_state(active_details={"phase": self.ActivePhase.binlog})
+            self.completed_at = completed_info["completed_at"]
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to create completed.json")
             self.stats.unexpected_exception(ex=ex, where="BackupStream._handle_pending_mark_as_completed")
@@ -522,7 +526,9 @@ class BackupStream(threading.Thread):
                 if not self.file_storage:
                     self.file_storage = self.file_storage_setup_fn()
                 if self.mode == self.Mode.active:
-                    if self.state["completed_info"] and self.active_phase == self.ActivePhase.binlog_catchup:
+                    if self.state["completed_info"] and (
+                        self.active_phase == self.ActivePhase.binlog_catchup or self.completed_at is None
+                    ):
                         self._handle_pending_mark_as_completed()
                     if self.state["closed_info"] and (self.active_phase != self.ActivePhase.none or self.closed_at is None):
                         self._handle_pending_mark_as_closed()
