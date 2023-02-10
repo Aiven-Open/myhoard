@@ -481,17 +481,19 @@ class BackupStream(threading.Thread):
         with self.lock:
             return len(self.state["pending_binlogs"])
 
-    def remove(self) -> None:
+    def remove(self) -> bool:
         self.stop()
         file_storage = self.file_storage_setup_fn()
         self.delete_state()
         try:
             file_storage.delete_tree(f"{self.site}/{self.stream_id}")
+            return True
         except FileNotFoundError:
             pass
         except Exception as ex:  # pylint: disable=broad-except
             self.log.error("Removing remote backup failed: %r", ex)
             self.stats.unexpected_exception(ex=ex, where="BackupStream.remove")
+        return False
 
     def delete_state(self) -> None:
         self.state_manager.delete_state()

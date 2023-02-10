@@ -1246,10 +1246,13 @@ class Controller(threading.Thread):
             self.log.warning("Backup %r to drop is one of active streams, not dropping", backup["stream_id"])
             return
 
-        self._build_backup_stream(backup).remove()
+        removed = self._build_backup_stream(backup).remove()
         with self.lock:
             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
+        if removed:
+            self.state_manager.update_state(backups_fetched_at=0)
+            self._refresh_backups_list()
 
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
