@@ -147,6 +147,7 @@ class BackupStream(threading.Thread):
         backup_reason: Optional["BackupStream.BackupReason"],
         binlog_progress_tracker: Optional[RateTracker] = None,
         binlogs: Optional[List[BinlogInfo]] = None,
+        closed_at: Optional[float] = None,
         compression: Optional[Compression] = None,
         file_storage_setup_fn: Callable[[], "BaseTransfer"],
         file_uploaded_callback=None,
@@ -171,6 +172,7 @@ class BackupStream(threading.Thread):
         self.basebackup_bytes_uploaded = 0
         self.basebackup_operation: Optional[BasebackupOperation] = None
         self.basebackup_progress: Optional[Dict[str, Any]] = None
+        self.closed_at = closed_at
         self.compression = compression
         self.current_upload_index: Optional[int] = None
         # This file storage object must only be called from BackupStream's own thread. Calls from
@@ -399,9 +401,10 @@ class BackupStream(threading.Thread):
         self.log.info("Marking stream %s as closed (local update only)", self.stream_id)
         # Just write the closed info to local state here to ensure file storage
         # operation happens from appropriate thread
+        self.closed_at = time.time()
         self.state_manager.update_state(
             closed_info={
-                "closed_at": time.time(),
+                "closed_at": self.closed_at,
                 "server_id": self.server_id,
             },
         )
@@ -417,6 +420,7 @@ class BackupStream(threading.Thread):
             metadata = make_fs_metadata(closed_info)
             self.file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
             self.state_manager.update_state(active_details={"phase": self.ActivePhase.none})
+            self.closed_at = closed_info["closed_at"]
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to create closed.json")
             self.stats.unexpected_exception(ex=ex, where="BackupStream._handle_pending_mark_as_closed")
@@ -520,7 +524,7 @@ class BackupStream(threading.Thread):
                 if self.mode == self.Mode.active:
                     if self.state["completed_info"] and self.active_phase == self.ActivePhase.binlog_catchup:
                         self._handle_pending_mark_as_completed()
-                    if self.state["closed_info"] and self.active_phase != self.ActivePhase.none:
+                    if self.state["closed_info"] and (self.active_phase != self.ActivePhase.none or self.closed_at is None):
                         self._handle_pending_mark_as_closed()
                     if self.active_phase == self.ActivePhase.basebackup:
                         self.stats.gauge_int("myhoard.backup_stream.basebackup_requested", 1)
