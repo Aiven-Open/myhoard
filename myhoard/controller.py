@@ -47,6 +47,7 @@ ERR_BACKUP_IN_PROGRESS = 4085
 
 
 class BaseBackup(TypedDict):
+    start_ts: float
     end_ts: float
 
 
@@ -148,6 +149,7 @@ class Controller(threading.Thread):
         optimize_tables_before_backup=False,
         restart_mysqld_callback,
         restore_max_binlog_bytes,
+        restore_max_basebackup_target_time=None,
         server_id,
         state_dir,
         stats,
@@ -192,6 +194,7 @@ class Controller(threading.Thread):
         self.optimize_tables_before_backup = optimize_tables_before_backup
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
+        self.restore_max_basebackup_target_time = restore_max_basebackup_target_time
         self.restore_free_memory_percentage: Optional[int] = restore_free_memory_percentage
         self.restore_coordinator: Optional[RestoreCoordinator] = None
         self.seen_basebackup_infos: Dict[str, BaseBackup] = {}
@@ -287,6 +290,13 @@ class Controller(threading.Thread):
                     continue
                 if not backup["basebackup_info"]:
                     raise ValueError(f"Backup {backup!r} cannot be restored")
+
+                if (
+                    self.restore_max_basebackup_target_time
+                    and backup["basebackup_info"]["start_ts"] >= self.restore_max_basebackup_target_time
+                ):
+                    raise ValueError(f"Cannot restore backups newer than {self.restore_max_basebackup_target_time}.")
+
                 if target_time:
                     if target_time < backup["basebackup_info"]["end_ts"]:
                         raise ValueError(f"Requested target time {target_time} predates backup completion: {backup!r}")

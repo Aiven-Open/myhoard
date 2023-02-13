@@ -342,6 +342,11 @@ The full path and file name prefix of relay logs. This must be the same as the
 corresponding MySQL configuration option except full path is always required
 here.
 
+**restore_basebackup_max_target_time**
+
+Maximum target time allowed for basebackup restoration, meaning that only backups
+created before this time can be restored, otherwise the request will fail.
+
 **restore_free_memory_percentage**
 
 Maximum percentage of system memory to allow xtrabackup to use while

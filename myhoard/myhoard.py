@@ -7,6 +7,7 @@ from myhoard.web_server import WebServer
 
 import argparse
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -97,6 +98,12 @@ class MyHoard:
         ival = backup_settings["backup_interval_minutes"]
         if (ival > 1440 and ival // 1440 * 1440 != ival) or (ival < 1440 and 1440 // ival * ival != 1440):
             raise Exception("Backup interval must be 1440, multiple of 1440, or integer divisor of 1440")
+
+        if self.config.get("max_basebackup_target_time"):
+            try:
+                self.config = datetime.datetime.fromisoformat(self.config["max_basebackup_target_time"]).timestamp()
+            except:
+                raise Exception("Basebackup target time must be a valid ISO 8601 timestamp.")
 
         if self.config["http_address"] not in {"127.0.0.1", "::1", "localhost"}:
             self.log.warning("Binding to non-localhost address %r is highly discouraged", self.config["http_address"])
@@ -205,6 +212,7 @@ class MyHoard:
             restart_mysqld_callback=self._restart_mysqld,
             restore_max_binlog_bytes=self.config["restore_max_binlog_bytes"],
             restore_free_memory_percentage=self.config.get("restore_free_memory_percentage"),
+            restore_max_basebackup_target_time=self.config.get("max_basebackup_target_time"),
             server_id=self.config["server_id"],
             state_dir=self.config["state_directory"],
             stats=statsd,

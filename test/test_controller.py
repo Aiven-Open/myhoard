@@ -255,6 +255,34 @@ def create_fake_state_files(controller: Controller) -> List[str]:
     return [state_file_name, remote_binlogs_state_file_name]
 
 
+def test_restore_backup_exceed_max_basebackup_target_time(default_backup_site, mysql_empty, session_tmpdir):
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.restore_max_basebackup_target_time = time.time()
+    controller.state["backups"] = [
+        {
+            "basebackup_info": {"start_ts": time.time()},
+            "closed_at": None,
+            "completed_at": None,
+            "recovery_site": False,
+            "stream_id": "1234",
+            "resumable": False,
+            "site": "default",
+        }
+    ]
+
+    with pytest.raises(ValueError, match=r"Cannot restore backups newer than"):
+        controller.restore_backup(stream_id="1234", site="default")
+
+    controller.restore_max_basebackup_target_time = time.time()
+    controller.restore_backup(stream_id="1234", site="default")
+    assert controller.mode == Controller.Mode.restore
+
+
 def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_empty, session_tmpdir):
     controller = build_controller(
         Controller,
