@@ -133,6 +133,8 @@ class WebServer:
             elif body_mode == Controller.Mode.observe:
                 self.controller.switch_to_observe_mode()
             elif body_mode == Controller.Mode.restore:
+                if not isinstance(body.get("rebuild_tables"), (bool, type(None))):
+                    raise BadRequest("Field 'rebuild_tables' must be a boolean when present")
                 for key in ["site", "stream_id"]:
                     if not isinstance(body.get(key), str):
                         raise BadRequest(f"Field {key!r} must be given and a string")
@@ -141,6 +143,7 @@ class WebServer:
                 if not isinstance(body.get("target_time_approximate_ok"), (bool, type(None))):
                     raise BadRequest("Field 'target_time_approximate_ok' must be a boolean when present")
                 self.controller.restore_backup(
+                    rebuild_tables=False if body.get("rebuild_tables") is None else body.get("rebuild_tables"),
                     site=body["site"],
                     stream_id=body["stream_id"],
                     target_time=body.get("target_time"),
