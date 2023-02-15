@@ -8,7 +8,7 @@ Supports Telegraf's statsd protocol extension for 'key=value' tags:
 """
 from contextlib import contextmanager
 from copy import copy
-from typing import Union
+from typing import Any, Dict, Optional, Union
 
 import datetime
 import enum
@@ -17,25 +17,28 @@ import os
 import socket
 import time
 
-try:
-    import raven
-except ImportError:
-    raven = None
-
 
 class StatsClient:
-    def __init__(self, *, host, port=8125, sentry_dsn=None, tags=None):
+    def __init__(
+        self,
+        *,
+        host: Optional[str],
+        port: int = 8125,
+        sentry_dsn: Optional[str] = None,
+        tags: Optional[Dict[str, str]] = None,
+    ):
         self.log = logging.getLogger("StatsClient")
-        self.sentry_config = {}
+
         tags = tags or {}
         sentry_tags = copy(tags)
-        sentry_config = {
+        self.sentry_config: Dict[str, Any] = {
             "dsn": sentry_dsn or None,
             "hostname": os.environ.get("HOSTNAME") or None,
             "tags": sentry_tags,
             "ignore_exceptions": [],
         }
-        self.update_sentry_config(sentry_config)
+        self._initialize_sentry()
+
         self._dest_addr = (host, port)
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.tags = tags
@@ -61,14 +64,7 @@ class StatsClient:
             return
 
         self.sentry_config = new_config
-        if self.sentry_config.get("dsn"):
-            if raven:
-                self.raven_client = raven.Client(**self.sentry_config)
-            else:
-                self.raven_client = None
-                self.log.warning("Cannot enable Sentry.io sending: importing 'raven' failed")
-        else:
-            self.raven_client = None
+        self._initialize_sentry()
 
     def gauge_timedelta(self, metric: str, value: datetime.timedelta, *, tags=None) -> None:
         self._send(metric, b"g", value.total_seconds(), tags)
@@ -97,18 +93,45 @@ class StatsClient:
         }
         all_tags.update(tags or {})
         self.increase("exception", tags=all_tags)
-        raven_tags = {**(tags or {}), "where": where}
-        sentry_args = {}
-        if elapsed:
-            sentry_args["time_spent"] = elapsed
-        if getattr(ex, "sentry_fingerprint", None):
-            # "{{ default }}" is a special tag sentry replaces with default fingerprint.
-            # Only set sentry_fingerprint if you are sure automatic grouping in Sentry is failing. Don't add items
-            # like service_id, unless there is a very good reason to have separate Sentry issues for each service.
-            sentry_args["fingerprint"] = ["{{ default }}", ex.sentry_fingerprint]
 
-        if self.raven_client:
-            self.raven_client.captureException(tags=raven_tags, **sentry_args)
+        if not self.sentry:
+            return
+
+        sentry_tags = {**(tags or {}), "where": where}
+
+        with self.sentry.push_scope() as scope:
+            for key, value in sentry_tags.items():
+                scope.set_tag(key, value)
+
+            if elapsed:
+                scope.set_extra("time_spent", elapsed)
+
+            if getattr(ex, "sentry_fingerprint", None):
+                # "{{ default }}" is a special tag sentry replaces with default fingerprint.
+                # Only set sentry_fingerprint if you are sure automatic grouping in Sentry is failing. Don't add items
+                # like service_id, unless there is a very good reason to have separate Sentry issues for each service.
+                scope.fingerprint = ["{{ default }}", ex.sentry_fingerprint]
+
+            self.sentry.capture_exception(ex)
+
+    def _initialize_sentry(self) -> None:
+        if not self.sentry_config.get("dsn"):
+            self.sentry = None
+            return
+
+        try:
+            import sentry_sdk
+
+            sentry_sdk.init(dsn=self.sentry_config["dsn"])
+            with sentry_sdk.configure_scope() as scope:
+                scope.set_extra("hostname", self.sentry_config.get("hostname"))
+                for key, value in self.sentry_config.get("tags", {}).items():
+                    scope.set_tag(key, value)
+
+            self.sentry = sentry_sdk
+        except ImportError:
+            self.sentry = None
+            self.log.warning("Cannot enable Sentry.io sending: importing 'sentry_sdk' failed")
 
     def _send(self, metric: str, metric_type, value, tags):
         try:
