@@ -1,6 +1,8 @@
 from enum import Enum
 from myhoard.statsd import StatsClient
 from socket import socket
+from types import ModuleType
+from typing import Callable, Generator
 from unittest.mock import ANY, MagicMock, patch
 
 import datetime
@@ -12,7 +14,7 @@ FAKE_SENTRY_DSN = "https://random.ingest.sentry.io/project_id"
 
 
 @pytest.fixture(name="sentry_init")
-def fixture_sentry_init():
+def fixture_sentry_init() -> Generator[Callable[[], ModuleType], None, None]:
     def inner(*a, **kw):
         hub = sentry_sdk.Hub.current
         client = sentry_sdk.Client(*a, **kw)
@@ -24,7 +26,7 @@ def fixture_sentry_init():
 
 
 @pytest.fixture(name="stats_client", scope="function")
-def fixture_stats_client(monkeypatch, sentry_init) -> StatsClient:
+def fixture_stats_client(monkeypatch, sentry_init: Callable[[], ModuleType]) -> StatsClient:
     stats_client = StatsClient(host=None, sentry_dsn=None)
 
     def fake_initialize() -> None:
@@ -51,11 +53,10 @@ def test_update_sentry_config(stats_client: StatsClient) -> None:
 def test_initialize_sentry(
     mocked_sentry_init: MagicMock,  # pylint: disable=unused-argument
     mocked_scope_set_tag: MagicMock,
-    sentry_init,
-    stats_client: StatsClient,
+    sentry_init: Callable[[], ModuleType],
 ) -> None:
     # pylint: disable=protected-access
-    mocked_sentry_init = sentry_init  # noqa: F841
+    mocked_sentry_init.return_value = sentry_init  # noqa
     stats_client = StatsClient(host=None, sentry_dsn=None)
     assert stats_client.sentry is None
 
@@ -99,7 +100,7 @@ def test_unexpected_exception(
     mocked_increase: MagicMock,
     mocked_sentry_capture_exception: MagicMock,
     mocked_scope_set_tag: MagicMock,
-    stats_client,
+    stats_client: StatsClient,
 ) -> None:
     stats_client.update_sentry_config({"dsn": FAKE_SENTRY_DSN})
 

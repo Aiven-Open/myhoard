@@ -8,6 +8,7 @@ Supports Telegraf's statsd protocol extension for 'key=value' tags:
 """
 from contextlib import contextmanager
 from copy import copy
+from types import ModuleType
 from typing import Any, Dict, Optional, Union
 
 import datetime
@@ -37,6 +38,8 @@ class StatsClient:
             "tags": sentry_tags,
             "ignore_exceptions": [],
         }
+
+        self.sentry: Optional[ModuleType] = None
         self._initialize_sentry()
 
         self._dest_addr = (host, port)
@@ -120,9 +123,16 @@ class StatsClient:
             return
 
         try:
+            from sentry_sdk.integrations.logging import LoggingIntegration
+
             import sentry_sdk
 
-            sentry_sdk.init(dsn=self.sentry_config["dsn"])
+            sentry_logging = LoggingIntegration(
+                level=logging.INFO,
+                event_level=logging.CRITICAL,
+            )
+
+            sentry_sdk.init(dsn=self.sentry_config["dsn"], integrations=[sentry_logging])
             with sentry_sdk.configure_scope() as scope:
                 scope.set_extra("hostname", self.sentry_config.get("hostname"))
                 for key, value in self.sentry_config.get("tags", {}).items():
