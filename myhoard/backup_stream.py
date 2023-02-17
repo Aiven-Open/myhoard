@@ -116,6 +116,7 @@ class BackupStream(threading.Thread):
         basebackup_errors: int
         basebackup_file_metadata: Optional[Dict]
         basebackup_info: Dict
+        broken_info: Dict
         closed_info: Dict
         completed_info: Dict
         backup_reason: Optional["BackupStream.BackupReason"]
@@ -213,6 +214,7 @@ class BackupStream(threading.Thread):
             "basebackup_errors": 0,
             "basebackup_file_metadata": None,
             "basebackup_info": {},
+            "broken_info": {},
             "closed_info": {},
             "completed_info": {},
             "backup_reason": backup_reason,
@@ -390,6 +392,34 @@ class BackupStream(threading.Thread):
                 binlogs = list(self.remote_binlogs)
         for binlog in binlogs:
             yield binlog
+
+    def mark_as_broken(self) -> None:
+        if self.state["broken_info"]:
+            self.log.warning("Stream %s marked as broken multiple times", self.stream_id)
+            return
+
+        self.stop()
+        self.log.info("Marking stream %s as broken.", self.stream_id)
+
+        broken_info = {
+            "broken_at": time.time(),
+            "server_id": self.server_id,
+        }
+        # Write the broken info to local state too
+        self.state_manager.update_state(broken_info=broken_info)
+
+        try:
+            key = self._build_full_name("broken.json")
+            data = json.dumps(broken_info)
+            metadata = make_fs_metadata(broken_info)
+
+            file_storage = self.file_storage_setup_fn()
+            file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
+        except Exception as ex:  # pylint: disable=broad-except
+            self.log.exception("Failed to create broken.json")
+            self.stats.unexpected_exception(ex=ex, where="BackupStream.mark_as_broken")
+            self.state_manager.update_state(remote_write_errors=self.state["remote_write_errors"] + 1)
+            self.stats.increase("myhoard.remote_write_errors")
 
     def mark_as_closed(self) -> None:
         if self.state["closed_info"]:

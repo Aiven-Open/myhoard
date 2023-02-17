@@ -54,6 +54,7 @@ class Backup(TypedDict):
     basebackup_info: BaseBackup
     closed_at: Optional[float]
     completed_at: Optional[float]
+    broken_at: Optional[float]
     recovery_site: bool
     stream_id: str
     resumable: bool
@@ -287,6 +288,10 @@ class Controller(threading.Thread):
                     continue
                 if not backup["basebackup_info"]:
                     raise ValueError(f"Backup {backup!r} cannot be restored")
+
+                if backup.get("broken_at"):
+                    raise ValueError(f"Cannot restore a broken backup: {backup!r}")
+
                 if target_time:
                     if target_time < backup["basebackup_info"]["end_ts"]:
                         raise ValueError(f"Requested target time {target_time} predates backup completion: {backup!r}")
@@ -559,6 +564,7 @@ class Controller(threading.Thread):
             for site_and_stream_id in streams:
                 basebackup_compressed_size = None
                 basebackup_info = {}
+                broken_info = {}
                 closed_info = {}
                 completed_info = {}
                 for info in file_storage.list_iter(site_and_stream_id):
@@ -573,6 +579,8 @@ class Controller(threading.Thread):
                             info_str, _ = file_storage.get_contents_to_string(info["name"])
                             basebackup_info = json.loads(info_str.decode("utf-8"))
                             seen_basebackup_infos[site_and_stream_id] = basebackup_info
+                    elif file_name == "broken.json":
+                        broken_info = parse_fs_metadata(info["metadata"])
                     elif file_name == "closed.json":
                         closed_info = parse_fs_metadata(info["metadata"])
                     elif file_name == "completed.json":
@@ -586,6 +594,7 @@ class Controller(threading.Thread):
                 backups.append(
                     {
                         "basebackup_info": basebackup_info,
+                        "broken_at": broken_info.get("broken_at"),
                         "closed_at": closed_info["closed_at"] if closed else None,
                         "completed_at": completed_info["completed_at"] if completed else None,
                         "recovery_site": site_config.get("recovery_only", False),
@@ -1140,6 +1149,7 @@ class Controller(threading.Thread):
         self._process_local_binlog_updates()
         self._extend_binlog_stream_list()
         if self.restore_coordinator.phase == RestoreCoordinator.Phase.failed_basebackup:
+            self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
         if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():
             self.state_manager.update_state(
@@ -1150,6 +1160,20 @@ class Controller(threading.Thread):
                 mode=self.Mode.promote,
                 restore_options={},
             )
+
+    def _mark_failed_restore_backup_as_broken(self) -> None:
+        broken_backup = None
+        failed_stream_id = self.state["restore_options"]["stream_id"]
+        backups = self.state["backups"]
+        for backup in backups:
+            if backup["stream_id"] == failed_stream_id:
+                broken_backup = backup
+                break
+
+        if not broken_backup:
+            raise Exception(f"Stream {failed_stream_id} to be marked as broken not found in completed backups: {backups}")
+
+        self._build_backup_stream(broken_backup).mark_as_broken()
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()
@@ -1224,7 +1248,20 @@ class Controller(threading.Thread):
 
     def _purge_old_backups(self):
         purgeable = [backup for backup in self.state["backups"] if backup["completed_at"]]
-        if len(purgeable) <= self.backup_settings["backup_count_min"]:
+        broken_backups_count = sum(backup["broken_at"] is not None for backup in purgeable)
+        # do not consider broken backups for the count, they will still be purged
+        # but we should only purge when the count of non-broken backups has exceeded the limit.
+        non_broken_backups_count = len(purgeable) - broken_backups_count
+
+        if non_broken_backups_count <= self.backup_settings["backup_count_max"] < len(purgeable):
+            self.log.info(
+                "Backup count %s is above max allowed, but %s are broken, not dropping",
+                len(purgeable),
+                broken_backups_count,
+            )
+            return
+
+        if non_broken_backups_count <= self.backup_settings["backup_count_min"]:
             return
 
         # For simplicity only ever drop one backup here. This function
@@ -1232,13 +1269,16 @@ class Controller(threading.Thread):
         # to drop they will be dropped soon enough
         purgeable = sort_completed_backups(purgeable)
         backup = purgeable[0]
+
         if not backup["closed_at"]:
             return
 
         if time.time() > backup["closed_at"] + self.backup_settings["backup_age_days_max"] * 24 * 60 * 60:
             self.log.info("Backup %r is older than max backup age, dropping it", backup["stream_id"])
-        elif len(purgeable) > self.backup_settings["backup_count_max"]:
-            self.log.info("Backup count %s is above max allowed, dropping %r", len(purgeable), backup["stream_id"])
+        elif non_broken_backups_count > self.backup_settings["backup_count_max"]:
+            self.log.info(
+                "Non-broken backup count %s is above max allowed, dropping %r", non_broken_backups_count, backup["stream_id"]
+            )
         else:
             return
 
@@ -1619,7 +1659,9 @@ class Controller(threading.Thread):
         for backup in backups:
             if backup["stream_id"] == current_stream_id:
                 break
-            earlier_backup = backup
+
+            if not backup["broken_at"]:
+                earlier_backup = backup
         else:
             raise Exception(f"Stream {current_stream_id} being restored not found in completed backups: {backups}")
 
