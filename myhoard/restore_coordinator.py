@@ -137,7 +137,7 @@ class RestoreCoordinator(threading.Thread):
         last_poll: Optional[float]
         last_processed_index: Optional[int]
         last_renamed_index: int
-        last_rebuilt_table: Optional[Tuple[str, str]]
+        last_rebuilt_table: Optional[str]
         mysql_params: Optional[Dict[str, Any]]
         phase: "RestoreCoordinator.Phase"
         prefetched_binlogs: Dict
@@ -453,11 +453,11 @@ class RestoreCoordinator(threading.Thread):
                 " FROM INFORMATION_SCHEMA.TABLES WHERE ENGINE='InnoDB'"
             )
             tables = [Table.from_row(row) for row in cursor.fetchall()]
-            tables = sorted(tables, key=Table.sort_key)
-            tables = [table for table in tables if table.sort_key() not in excluded_tables]
+            tables = sorted(tables, key=Table.escaped_designator)
+            tables = [table for table in tables if table.escaped_designator() not in excluded_tables]
             if self.state["last_rebuilt_table"] is not None:
                 self.log.info("Resuming at table %s", self.state["last_rebuilt_table"])
-                tables = [table for table in tables if table.sort_key() >= self.state["last_rebuilt_table"]]
+                tables = [table for table in tables if table.escaped_designator() >= self.state["last_rebuilt_table"]]
             estimated_total_bytes = sum(table.estimated_size_bytes() for table in tables)
             estimated_progress_bytes = 0
             self.log.info("Will rebuild %s tables, estimated total size: %s bytes", len(tables), estimated_total_bytes)
@@ -482,7 +482,7 @@ class RestoreCoordinator(threading.Thread):
                         self.log.error("Could not rebuild %s, error: %s, skipping it", escaped_table_designator, str(e))
                     else:
                         raise
-                self.update_state(last_rebuilt_table=table.sort_key())
+                self.update_state(last_rebuilt_table=table.escaped_designator())
                 estimated_progress_bytes += table.estimated_size_bytes()
             self.log.info("Rebuilt all tables")
         self.update_state(phase=self.Phase.refreshing_binlogs)

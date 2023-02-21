@@ -17,11 +17,6 @@ def test_create_table_from_row() -> None:
     assert table.avg_row_length == 100
 
 
-def test_table_sort_key() -> None:
-    table = Table(table_schema="schema", table_name="name", table_rows=10, avg_row_length=20)
-    assert table.sort_key() == ("schema", "name")
-
-
 def test_table_estimated_size_bytes() -> None:
     table = Table(table_schema="schema", table_name="name", table_rows=10, avg_row_length=20)
     assert table.estimated_size_bytes() == 200

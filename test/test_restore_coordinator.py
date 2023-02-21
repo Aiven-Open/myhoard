@@ -318,9 +318,9 @@ def _restore_coordinator_sequence(
         assert rc.state["restore_errors"] == 1
         # FailingStateManager is configured to fail once on t1, so it will retry t1.
         # If resume is correctly implemented, it won't retry t0
-        assert rc.state_manager.update_log.count({"last_rebuilt_table": ("db1", "t0")}) == 1
-        assert rc.state_manager.update_log.count({"last_rebuilt_table": ("db1", "t1")}) == 2
-        assert rc.state_manager.update_log.count({"last_rebuilt_table": ("db1", "t2")}) == 1
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`t0`"}) == 1
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`t1`"}) == 2
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`t2`"}) == 1
     else:
         assert rc.state["restore_errors"] == 0
     assert rc.state["remote_read_errors"] == 0
@@ -424,6 +424,6 @@ class FailingStateManager(Generic[T], StateManager[T]):
         super().update_state(**kwargs)
         # We're not testing "what if the StateManager fails", but using it as an injection
         # mechanism to stop at interesting points, that's why we raise after writing the state.
-        if not self.has_failed and kwargs.get("last_rebuilt_table") == ("db1", "t1"):
+        if not self.has_failed and kwargs.get("last_rebuilt_table") == "`db1`.`t1`":
             self.has_failed = True
             raise InjectedError()
