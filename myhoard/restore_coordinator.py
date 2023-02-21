@@ -11,6 +11,7 @@ from .util import (
     add_gtid_ranges_to_executed_set,
     build_gtid_ranges,
     change_master_to,
+    DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
     get_slave_status,
     GtidExecuted,
@@ -447,7 +448,8 @@ class RestoreCoordinator(threading.Thread):
             ("mysql", "innodb_table_stats"),
         }
         self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
-        with self._mysql_cursor() as cursor:
+        # Rebuilding very large tables can be slow
+        with self._mysql_cursor(timeout=3600.0) as cursor:
             cursor.execute(
                 "SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_ROWS,AVG_ROW_LENGTH"
                 " FROM INFORMATION_SCHEMA.TABLES WHERE ENGINE='InnoDB'"
@@ -1115,12 +1117,13 @@ class RestoreCoordinator(threading.Thread):
             on_disk_binlog_bytes += binlog["file_size"]
 
     @contextlib.contextmanager
-    def _mysql_cursor(self):
+    def _mysql_cursor(self, timeout: float = DEFAULT_MYSQL_TIMEOUT):
         with mysql_cursor(
             host=self.mysql_client_params["host"],
             password=self.mysql_client_params["password"],
             port=self.mysql_client_params["port"],
             user=self.mysql_client_params["user"],
+            timeout=timeout,
         ) as cursor:
             yield cursor
 
