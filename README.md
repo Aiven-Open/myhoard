@@ -83,7 +83,7 @@ things.
 On the very first master after you've initialized MySQL database and started up
 MyHoard you'd do this:
 
-```
+```bash
 curl -XPUT -H "Content-Type: application/json" -d '{"mode": "active"}' \
   http://localhost:16001/status
 ```
@@ -96,7 +96,7 @@ On a new standby server you'd first install MySQL and MyHoard but not start or
 initialize MySQL (i.e. don't do `mysqld --initialize`). After starting the
 MyHoard service you'd do this:
 
-```
+```bash
 curl http://localhost:16001/backup  # lists all available backups
 curl -XPUT -H "Content-Type: application/json" \
   -d '{"mode": "restore", "site": "mybackups", "stream_id": "backup_id", "target_time": null}' \
@@ -116,7 +116,7 @@ transaction before the target time.
 If the master server fails for any reason you'd do this on one of the standby
 servers:
 
-```
+```bash
 curl -XPUT -H "Content-Type: application/json" -d '{"mode": "promote"}' \
   http://localhost:16001/status
 ```
@@ -427,7 +427,7 @@ are described here.
 
 All APIs return a response like this on error:
 
-```
+```json
 {
   "message": "details regarding what went wrong"
 }
@@ -438,7 +438,7 @@ All APIs return a response like this on error:
 Lists all available backups. This call takes no request parameters. Response
 format is as follows:
 
-```
+```json
 {
   "backups": [
     {
@@ -447,6 +447,7 @@ format is as follows:
       },
       "closed_at": "2019-05-23T06:29:10.041489Z",
       "completed_at": "2019-05-22T06:29:20.582302Z",
+      "delete_requested_at": null,
       "recovery_site": false,
       "resumable": true,
       "site": "{backup_site_name}",
@@ -470,6 +471,11 @@ The time at which last binary log to this stream was uploaded and no more
 uploads are expected. The backup can resume to any point in time between
 `closed_at` and `completed_at`. If `closed_at` is `null` the backup is
 active and new binary logs are still being uploaded to it.
+
+**delete_requested_at**
+
+If a DELETE request is sent to the `/backup/{stream_id}` endpoint, the timestamp
+of the request is recorded here.
 
 **recovery_site**
 
@@ -499,7 +505,7 @@ Identifier of this backup.
 Create new full backup or force binary log rotation and back up the latest
 binary log file. Request body must be like this:
 
-```
+```json
 {
   "backup_type": "{basebackup|binlog}",
   "wait_for_upload": 3.0
@@ -522,11 +528,38 @@ for the binary log upload to complete before returning.
 
 Response on success looks like this:
 
-```
+```json
 {
   "success": true
 }
 ```
+
+## GET /backup/{stream_id}
+
+Shows the detailed information for a single backup:
+
+```json
+{
+  "basebackup_info": {
+    ...
+  },
+  "closed_at": "2019-05-23T06:29:10.041489Z",
+  "completed_at": "2019-05-22T06:29:20.582302Z",
+  "delete_requested_at": null,
+  "recovery_site": false,
+  "resumable": true,
+  "site": "{backup_site_name}",
+  "stream_id": "{backup_identifier}"
+}
+```
+
+See the field descriptions in the [GET /backup](#get-backup) section.
+
+## DELETE /backup/{stream_id}
+
+Requests the deletion of a specific backup. Returns `202 (Accepted)` to indicate
+that the backup has been queued to be deleted.
+
 
 ## PUT /replication_state
 
@@ -534,7 +567,7 @@ This call can be used to inform MyHoard of the executed GTIDs on other servers
 in the cluster to allow MyHoard to only purge binlogs that have been fully
 applied on all cluster nodes. Request body must be like this:
 
-```
+```json
 {
   "server1": {
     "206375d9-ec5a-46b7-bb26-b621812e7471": [[1, 100]],
@@ -567,7 +600,7 @@ Response on success echoes back the same data sent in the request.
 
 Returns current main mode of MyHoard. Response looks like this:
 
-```
+```json
 {
   "mode": "{active|idle|observe|promote|restore}"
 }
@@ -579,7 +612,7 @@ See the status update API for more information regarding the different modes.
 
 Updates current main mode of MyHoard. Request must be like this:
 
-```
+```json
 {
   "force": false,
   "mode": "{active|idle|observe|promote|restore}",
@@ -674,7 +707,7 @@ If current mode is `restore` this API can be used to get details regarding
 restore progress. If mode is something else the request will fail with HTTP
 status 400. For successful requests the response body looks like this:
 
-```
+```json
 {
   "basebackup_compressed_bytes_downloaded": 8489392354,
   "basebackup_compressed_bytes_total": 37458729461,
@@ -787,7 +820,7 @@ The following metrics are exported by myhoard:
 
 Make sure docker is installed (podman currently untested) and just run:
 
-```
+```bash
 make PYTHON_VERSION=3.10 PERCONA_VERSION=8.0.29-22-1.bullseye MYSQL_VERSION=8.0.26 build-setup-specific-image
 
 make dockertest
@@ -796,7 +829,7 @@ make dockertest
 If you don't need to change percona or mysql or python version, but you want to change myhoard source code and re-test,
 run:
 
-```
+```bash
 make dockertest-resync
 ```
 
@@ -806,7 +839,7 @@ Take a look at `.github/workflows/build.yaml` for possible version values.
 
 In order to locally launch a single test (again while resyncing from current source code), you can use `pytest-quick` e.g.
 
-```
+```bash
 make PYTEST_ARGS="-k test_3_node_service_failover_and_restore" dockertest-pytest
 ```
 
@@ -891,4 +924,3 @@ MyHoard uses [Percona Xtrabackup](https://www.percona.com) for creating and
 restoring database snapshot excluding binary logs.
 
 Copyright ⓒ 2019 Aiven Ltd.
-```

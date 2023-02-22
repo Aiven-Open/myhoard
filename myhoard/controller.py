@@ -54,6 +54,7 @@ class Backup(TypedDict):
     basebackup_info: BaseBackup
     closed_at: Optional[float]
     completed_at: Optional[float]
+    delete_requested_at: Optional[str]
     recovery_site: bool
     stream_id: str
     resumable: bool
@@ -63,6 +64,11 @@ class Backup(TypedDict):
 class BackupRequest(TypedDict):
     backup_reason: BackupStream.BackupReason
     normalized_backup_time: str
+
+
+class DeleteBackupRequest(TypedDict):
+    stream_id: str
+    delete_request_time: str
 
 
 class BackupSiteInfo(TypedDict):
@@ -87,6 +93,21 @@ def sort_completed_backups(backups: List[Backup]) -> List[Backup]:
         return backup["completed_at"]
 
     return sorted((backup for backup in backups if backup["completed_at"]), key=key)
+
+
+DELETE_NOT_REQUESTED_AT: str = datetime.datetime(2400, 1, 1, tzinfo=datetime.timezone.utc).isoformat()
+
+
+def sort_purgeable_backups(backups: List[Backup]) -> List[Backup]:
+    def key(backup: Backup) -> str:
+        assert backup["completed_at"] is not None
+        delete_requested_at: str = (
+            backup["delete_requested_at"] if backup["delete_requested_at"] is not None else DELETE_NOT_REQUESTED_AT
+        )
+        completed_at: str = datetime.datetime.fromtimestamp(backup["completed_at"]).isoformat()
+        return f"{delete_requested_at}__{completed_at}"
+
+    return sorted(backups, key=key)
 
 
 class Controller(threading.Thread):
@@ -119,6 +140,7 @@ class Controller(threading.Thread):
         backups: List[Backup]
         backups_fetched_at: int
         binlogs_purged_at: int
+        delete_requests: Optional[dict[str, DeleteBackupRequest]]
         errors: int
         force_promote: bool
         last_binlog_purge: float
@@ -202,6 +224,7 @@ class Controller(threading.Thread):
             "backups": [],
             "backups_fetched_at": 0,
             "binlogs_purged_at": 0,
+            "delete_requests": None,
             "errors": 0,
             "force_promote": False,
             "last_binlog_purge": time.time(),
@@ -263,6 +286,23 @@ class Controller(threading.Thread):
                 ):
                     return
             self.state_manager.update_state(backup_request=new_request)
+
+    def mark_delete_requested(self, *, stream_id: str) -> str:
+        delete_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        new_request: DeleteBackupRequest = {"stream_id": stream_id, "delete_request_time": delete_time}
+        with self.lock:
+            delete_requests: dict[str, DeleteBackupRequest]
+            if self.state["delete_requests"]:
+                delete_requests = self.state["delete_requests"]
+                if stream_id in delete_requests.keys():
+                    return delete_requests[stream_id]["delete_request_time"]
+            else:
+                delete_requests = {}
+
+            delete_requests[stream_id] = new_request
+
+            self.state_manager.update_state(delete_requests=delete_requests)
+            return delete_time
 
     @property
     def mode(self) -> Mode:
@@ -544,11 +584,19 @@ class Controller(threading.Thread):
         return binlogs_to_purge, bool(only_binlogs_without_gtids or only_binlogs_that_are_too_new)
 
     @staticmethod
-    def get_backup_list(backup_sites: Dict[str, BackupSiteInfo], *, seen_basebackup_infos=None, site_transfers=None):
+    def get_backup_list(
+        backup_sites: Dict[str, BackupSiteInfo],
+        *,
+        seen_basebackup_infos=None,
+        site_transfers=None,
+        delete_requests: Optional[Dict[str, DeleteBackupRequest]] = None,
+    ):
         if seen_basebackup_infos is None:
             seen_basebackup_infos = {}
         if site_transfers is None:
             site_transfers = {}
+        if delete_requests is None:
+            delete_requests = {}
         backups = []
         for site_name, site_config in backup_sites.items():
             file_storage = site_transfers.get(site_name)
@@ -583,13 +631,19 @@ class Controller(threading.Thread):
                 resumable = basebackup_info and basebackup_compressed_size
                 completed = resumable and completed_info
                 closed = completed and closed_info
+                stream_id: str = site_and_stream_id.rsplit("/", 1)[-1]
+                delete_request: Optional[DeleteBackupRequest] = delete_requests.get(stream_id, None)
+                delete_requested_at: Optional[str] = (
+                    delete_request["delete_request_time"] if delete_request is not None else None
+                )
                 backups.append(
                     {
                         "basebackup_info": basebackup_info,
                         "closed_at": closed_info["closed_at"] if closed else None,
                         "completed_at": completed_info["completed_at"] if completed else None,
+                        "delete_requested_at": delete_requested_at,
                         "recovery_site": site_config.get("recovery_only", False),
-                        "stream_id": site_and_stream_id.rsplit("/", 1)[-1],
+                        "stream_id": stream_id,
                         "resumable": bool(resumable),
                         "site": site_name,
                     }
@@ -1224,13 +1278,19 @@ class Controller(threading.Thread):
 
     def _purge_old_backups(self):
         purgeable = [backup for backup in self.state["backups"] if backup["completed_at"]]
-        if len(purgeable) <= self.backup_settings["backup_count_min"]:
+        force_delete = [
+            backup for backup in self.state["backups"] if backup["delete_requested_at"] and backup["completed_at"]
+        ]
+
+        if len(force_delete) == 0 and len(purgeable) <= self.backup_settings["backup_count_min"]:
             return
+
+        purgeable = purgeable + [backup for backup in force_delete if backup not in purgeable]  # get a single unique list
 
         # For simplicity only ever drop one backup here. This function
         # is called repeatedly so if there are for any reason more backups
         # to drop they will be dropped soon enough
-        purgeable = sort_completed_backups(purgeable)
+        purgeable = sort_purgeable_backups(purgeable)
         backup = purgeable[0]
         if not backup["closed_at"]:
             return
@@ -1239,6 +1299,12 @@ class Controller(threading.Thread):
             self.log.info("Backup %r is older than max backup age, dropping it", backup["stream_id"])
         elif len(purgeable) > self.backup_settings["backup_count_max"]:
             self.log.info("Backup count %s is above max allowed, dropping %r", len(purgeable), backup["stream_id"])
+        elif backup["delete_requested_at"]:
+            self.log.info(
+                "Request to drop backup %r received at %r, dropping now",
+                backup["stream_id"],
+                backup["delete_requested_at"],
+            )
         else:
             return
 
@@ -1250,7 +1316,11 @@ class Controller(threading.Thread):
         self._build_backup_stream(backup).remove()
         with self.lock:
             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
-            self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
+            delete_requests = self.state["delete_requests"]
+
+            if backup["delete_requested_at"]:
+                delete_requests.pop(backup["stream_id"], None)
+            self.state_manager.update_state(owned_stream_ids=owned_stream_ids, delete_requests=delete_requests)
 
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
@@ -1359,7 +1429,10 @@ class Controller(threading.Thread):
             return None
 
         backups = self.get_backup_list(
-            self.backup_sites, seen_basebackup_infos=self.seen_basebackup_infos, site_transfers=self.site_transfers
+            self.backup_sites,
+            seen_basebackup_infos=self.seen_basebackup_infos,
+            site_transfers=self.site_transfers,
+            delete_requests=self.state["delete_requests"],
         )
         new_backups_ids = {backup["stream_id"] for backup in backups}
         for backup in self.state["backups"]:

@@ -1,12 +1,13 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from aiohttp import web
-from aiohttp.web_response import json_response
+from aiohttp.web_response import json_response, Response
 from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller
+from myhoard.controller import Backup, Controller
 from myhoard.errors import BadRequest
 
 import asyncio
 import contextlib
+import copy
 import enum
 import json
 import logging
@@ -77,6 +78,42 @@ class WebServer:
                 if self.controller.state["backups_fetched_at"]:
                     response["backups"] = self.controller.state["backups"]
                 return json_response(response)
+
+    async def backup_show(self, request):
+        with self._handle_request(name="backup_show"):
+            backup: Backup = None
+            stream_id = request.match_info["stream_id"]
+
+            with self.controller.lock:
+                if self.controller.state["backups_fetched_at"]:
+                    current_backup: Backup
+                    for current_backup in self.controller.state["backups"]:
+                        if current_backup["stream_id"] == stream_id:
+                            backup = copy.deepcopy(current_backup)  # copy so we can release the lock
+                            break
+
+            if backup:
+                return json_response(backup)
+
+            raise BadRequest("`stream_id` must be a valid stream identifier")
+
+    async def backup_delete(self, request):
+        with self._handle_request(name="backup_delete"):
+            stream_id = request.match_info["stream_id"]
+
+            with self.controller.lock:
+                if self.controller.state["backups_fetched_at"]:
+                    backup: Backup
+                    for backup in self.controller.state["backups"]:
+                        if backup["stream_id"] == stream_id:
+                            if backup["delete_requested_at"] is None:
+                                delete_requested_at: str = self.controller.mark_delete_requested(stream_id=stream_id)
+                                backup["delete_requested_at"] = delete_requested_at
+                            return Response(
+                                status=202
+                            )  # If delete_requested_at has a value, the request has been queued (202 Accpeted)
+
+            raise BadRequest("`stream_id` must be a valid stream identifier")
 
     async def replication_state_set(self, request):
         with self._handle_request(name="replication_state_set"):
@@ -201,6 +238,8 @@ class WebServer:
             [
                 web.get("/backup", self.backup_list),
                 web.post("/backup", self.backup_create),
+                web.get("/backup/{stream_id}", self.backup_show),
+                web.delete("/backup/{stream_id}", self.backup_delete),
                 web.put("/replication_state", self.replication_state_set),
                 web.get("/status", self.status_show),
                 web.put("/status", self.status_update),
