@@ -1,5 +1,5 @@
 #  Copyright (c) 23 Aiven, Helsinki, Finland. https://aiven.io/
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping
 
 import dataclasses
 
@@ -19,9 +19,6 @@ class Table:
             table_rows=row["TABLE_ROWS"],
             avg_row_length=row["AVG_ROW_LENGTH"],
         )
-
-    def sort_key(self) -> Tuple[str, str]:
-        return self.table_schema, self.table_name
 
     def estimated_size_bytes(self) -> int:
         return self.table_rows * self.avg_row_length
