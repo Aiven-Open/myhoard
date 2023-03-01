@@ -83,10 +83,6 @@ jobs:
       # skipping matrix items that aren't meaningful
       matrix:
         include:
-          - mysql-version: "8.0.26"
-            percona-version: "8.0.28-20-1.focal"
-            python-version: "3.9"
-            ubuntu-version: "20.04"
           - mysql-version: "8.0.27"
             percona-version: "8.0.28-21-1.focal"
             python-version: "3.9"

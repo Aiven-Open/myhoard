@@ -788,7 +788,7 @@ The following metrics are exported by myhoard:
 Make sure docker is installed (podman currently untested) and just run:
 
 ```
-make PYTHON_VERSION=3.10 PERCONA_VERSION=8.0.29-22-1.bullseye MYSQL_VERSION=8.0.26 build-setup-specific-image
+make PYTHON_VERSION=3.11 PERCONA_VERSION=8.0.30-23-1.bullseye MYSQL_VERSION=8.0.30 build-setup-specific-image
 
 make dockertest
 ```
@@ -819,8 +819,8 @@ Running native tests must NOT be performed as root (requires additional options 
 Run:
 
 ```bash
-MYSQL_VERSION=8.0.29
-PERCONA_VERSION=8.0.29-22-1.bullseye
+MYSQL_VERSION=8.0.30
+PERCONA_VERSION=8.0.30-23-1.bullseye
 make build-dep-ubuntu
 make clean
 scripts/remove-default-mysql
@@ -849,7 +849,7 @@ run:
 
 Once the environment setup is over, you can execute
 
-`make PYTHON_VERSION=3.8 coverage`
+`make PYTHON_VERSION=3.11 coverage`
 
 And have all test run, or just
 
