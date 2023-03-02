@@ -1,17 +1,20 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_controller, DataGenerator, get_mysql_config_options, MySQLConfig, wait_for_condition, while_asserts
 from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller
+from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
+from myhoard.controller import Controller, sort_completed_backups
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
     change_master_to,
     GtidExecuted,
+    make_fs_metadata,
     mysql_cursor,
     parse_gtid_range_string,
     partition_sort_and_combine_gtid_ranges,
 )
-from typing import Dict, List, Optional, Set
-from unittest.mock import MagicMock
+from rohmu import get_transfer
+from typing import Any, Dict, List, Optional, Set
+from unittest.mock import MagicMock, patch
 
 import contextlib
 import os
@@ -1282,3 +1285,329 @@ def test_collect_binlogs_to_purge():
     assert binlogs_to_purge == binlogs
     assert only_inapplicable_binlogs is False
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 3)
+
+
+@patch.object(RestoreCoordinator, "MAX_BASEBACKUP_ERRORS", 2)
+@patch.object(BasebackupRestoreOperation, "restore_backup", side_effect=Exception("failed restoring basebackup"))
+def test_backup_marked_as_broken_after_failed_restoration(
+    mocked_restore_backup: MagicMock,  # pylint: disable=unused-argument
+    default_backup_site,
+    master_controller,
+    mysql_empty,
+    session_tmpdir,
+) -> None:
+    m_controller, master = master_controller
+    new_controller = None
+    try:
+        m_controller.switch_to_active_mode()
+        m_controller.start()
+
+        # Write some data that gets included in the first backup
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("CREATE TABLE foo (id INTEGER)")
+            cursor.execute("INSERT INTO foo VALUES (1)")
+            cursor.execute("COMMIT")
+            cursor.execute("FLUSH BINARY LOGS")
+
+        def streaming_binlogs():
+            assert m_controller.backup_streams
+            assert len(m_controller.backup_streams) == 1
+            assert m_controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+
+        while_asserts(streaming_binlogs, timeout=15)
+
+        new_controller = build_controller(
+            Controller,
+            default_backup_site=default_backup_site,
+            mysql_config=mysql_empty,
+            session_tmpdir=session_tmpdir,
+        )
+        new_controller.start()
+
+        # fetch remote backup
+        wait_for_condition(
+            lambda: new_controller.state["backups_fetched_at"] != 0 and len(new_controller.state["backups"]) == 1, timeout=2
+        )
+
+        assert new_controller.state["backups"][0]["broken_at"] is None
+
+        # try to restore
+        new_controller.restore_backup(
+            site=new_controller.state["backups"][0]["site"], stream_id=new_controller.state["backups"][0]["stream_id"]
+        )
+
+        def restoration_is_failed():
+            assert new_controller.restore_coordinator
+            assert new_controller.restore_coordinator.phase == RestoreCoordinator.Phase.failed
+
+        while_asserts(restoration_is_failed, timeout=40)
+
+        refreshed_backup_lists = new_controller.get_backup_list(backup_sites=new_controller.backup_sites)
+        assert refreshed_backup_lists[0]["broken_at"] is not None
+
+    finally:
+        m_controller.stop()
+        if new_controller:
+            new_controller.stop()
+
+
+@patch.object(RestoreCoordinator, "MAX_BASEBACKUP_ERRORS", 2)
+def test_restore_failed_basebackup_and_retry_with_prior(
+    default_backup_site,
+    master_controller,
+    mysql_empty,
+    session_tmpdir,
+) -> None:
+    m_controller, master = master_controller
+    new_controller = None
+
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
+
+    try:
+        data_generator = DataGenerator(
+            connect_info=master.connect_options,
+            make_temp_tables=False,
+        )
+        data_generator.start()
+
+        m_controller.switch_to_active_mode()
+        m_controller.start()
+
+        def streaming_binlogs():
+            assert m_controller.backup_streams
+            assert all(bs.active_phase == BackupStream.ActivePhase.binlog for bs in m_controller.backup_streams)
+
+        while_asserts(streaming_binlogs, timeout=10)
+
+        m_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+        data_generator.stop()
+
+        def all_backups_completed(expected_num):
+            backups = m_controller.state["backups"]
+            assert len(backups) == expected_num
+            assert all(backup["completed_at"] is not None for backup in backups)
+
+        while_asserts(lambda: all_backups_completed(expected_num=2), timeout=30)
+
+        m_controller.stop()
+
+        # get the most recent backup (corrupted)
+        corrupted_backup = sort_completed_backups(m_controller.state["backups"])[1]
+
+        new_controller = build_controller(
+            Controller,
+            default_backup_site=default_backup_site,
+            mysql_config=mysql_empty,
+            session_tmpdir=session_tmpdir,
+        )
+
+        new_controller.start()
+
+        restore_operation_side_effects = LimitedSideEffectMock(
+            original_function_to_mock=BasebackupRestoreOperation.restore_backup,
+            max_calls_with_side_effects=2,
+        )
+
+        # raise exceptions for all attempts to restoring corrupted basebackup,
+        # when trying to restore the previous basebackup, it should work as we expect
+        with patch.object(
+            BasebackupRestoreOperation,
+            "restore_backup",
+            autospec=True,
+            side_effect=restore_operation_side_effects,
+        ) as mocked_restore_backup:
+            wait_for_condition(lambda: new_controller.state["backups_fetched_at"] != 0, timeout=2)
+
+            new_controller.restore_backup(site=corrupted_backup["site"], stream_id=corrupted_backup["stream_id"])
+
+            def mocked_raised_all_errors() -> None:
+                assert mocked_restore_backup.call_count > 2
+
+            def restoration_has_phase(phase):
+                assert new_controller.restore_coordinator is not None
+                assert new_controller.restore_coordinator.state["phase"] == phase
+
+            # second basebackup should fail due to the side effects
+            while_asserts(mocked_raised_all_errors, timeout=30)
+
+            # after second basebackup fails, it should try to restore the first backup we generated
+            # this one should be successfull
+            while_asserts(lambda: restoration_has_phase(RestoreCoordinator.Phase.completed), timeout=40)
+
+            new_controller.get_backup_list(backup_sites=new_controller.backup_sites)
+
+            current_backups = sort_completed_backups(new_controller.state["backups"])
+            corrupted_backup = current_backups[1]
+            # failed basebackup should be marked as broken
+            assert corrupted_backup["broken_at"] is not None
+
+            # verify the empty mysql restored all data.
+            with mysql_cursor(**mysql_empty.connect_options) as cursor:
+                expected_row_count = data_generator.row_count
+                cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
+                result_row_count = cursor.fetchone()["count"]
+                assert expected_row_count == result_row_count
+    finally:
+        m_controller.stop()
+        if new_controller:
+            new_controller.stop()
+
+
+@patch.object(BackupStream, "remove", autospec=True)
+def test_purge_old_backups_exceeding_backup_age_days_max(
+    mocked_backup_stream_remove: MagicMock,
+    default_backup_site,
+    mysql_empty,
+    session_tmpdir,
+) -> None:
+    # pylint: disable=protected-access
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.backup_settings["backup_count_min"] = 2
+    controller.backup_settings["backup_count_max"] = 3
+    # set it to 1 sec
+    controller.backup_settings["backup_age_days_max"] = 1 / 86400
+
+    def remove_backup(backup_stream) -> None:
+        controller.state["backups"] = [
+            backup for backup in controller.state["backups"] if backup["stream_id"] != backup_stream.stream_id
+        ]
+
+    mocked_backup_stream_remove.side_effect = remove_backup
+
+    def _add_fake_backup(stream_id: str) -> None:
+        now = time.time()
+        controller.state["backups"].append(
+            {
+                "basebackup_info": {
+                    "end_ts": now - 20 * 60,
+                },
+                "closed_at": now - 3 * 60,
+                "completed_at": now - 5 * 60,
+                "broken_at": None,
+                "recovery_site": False,
+                "stream_id": stream_id,
+                "resumable": True,
+                "site": "default",
+            }
+        )
+
+    time.sleep(1)
+    _add_fake_backup("1")
+    _add_fake_backup("2")
+
+    # no backups should be purged, since we didn't exceed the max
+    controller._purge_old_backups()
+    assert len(controller.state["backups"]) == 2
+
+    # exceed the backup limit
+    _add_fake_backup("3")
+    _add_fake_backup("4")
+    controller._purge_old_backups()
+
+    # backup 1 should had been removed
+    assert len(controller.state["backups"]) == 3
+    assert controller.state["backups"][0]["stream_id"] == "2"
+    assert controller.state["backups"][1]["stream_id"] == "3"
+    assert controller.state["backups"][2]["stream_id"] == "4"
+
+    _add_fake_backup("5")
+    _add_fake_backup("6")
+
+    # mark all of backups as broken, except the oldest one
+    # in this case we should not remove any backup even if we exceed the max
+    for bid in range(1, len(controller.state["backups"])):
+        controller.state["backups"][bid]["broken_at"] = time.time()
+
+    controller._purge_old_backups()
+    assert len(controller.state["backups"]) == 5
+
+    # now add some healthy backups and exceed limit, it should purge backup 2
+    _add_fake_backup("7")
+    _add_fake_backup("8")
+    _add_fake_backup("9")
+
+    controller._purge_old_backups()
+    assert len(controller.state["backups"]) == 7
+    assert controller.state["backups"][0]["stream_id"] == "3"
+
+
+@pytest.mark.parametrize(
+    "backup_has_data,stream_statuses_to_be_marked,result_status_keys_must_have_value",
+    [
+        (False, ["completed", "closed"], {"completed_at": False, "closed_at": False, "broken_at": False}),
+        (True, ["completed"], {"completed_at": True, "closed_at": False, "broken_at": False}),
+        (True, ["closed"], {"completed_at": False, "closed_at": False, "broken_at": False}),
+        (True, ["completed", "closed"], {"completed_at": True, "closed_at": True, "broken_at": False}),
+        (True, ["completed", "closed", "broken"], {"completed_at": True, "closed_at": True, "broken_at": True}),
+    ],
+)
+def test_check_if_get_backup_list_fills_attributes_based_on_missing_files(
+    backup_has_data: bool,
+    stream_statuses_to_be_marked: List[str],
+    result_status_keys_must_have_value: Dict[str, bool],
+    default_backup_site,
+    mysql_empty,
+    session_tmpdir,
+) -> None:
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+
+    site_config = controller.backup_sites["default"]
+    file_storage = get_transfer(site_config["object_storage"])
+
+    # store fake data for stream 1
+    file_storage.store_file_from_memory("default/1/basebackup.xbstream", b"\x0001\x0002" if backup_has_data else b"")
+    file_storage.store_file_from_memory("default/1/basebackup.json", b'{"binlog_name": "000001.bin"}')
+
+    for status in stream_statuses_to_be_marked:
+        file_storage.store_file_from_memory(
+            f"default/1/{status}.json",
+            b"",
+            make_fs_metadata({f"{status}_at": time.time()}),
+        )
+
+    result = controller.get_backup_list(backup_sites=controller.backup_sites)[0]
+
+    # it is resumable if backup has data and basebackup.json has information about it
+    assert result["resumable"] is backup_has_data
+
+    for key, has_value in result_status_keys_must_have_value.items():
+        assert key in result
+        if has_value:
+            assert result[key] is not None
+        else:
+            assert result[key] is None
+
+
+class LimitedSideEffectMock:
+    """
+    Instantiate class when trying to patch an object with side effects
+    only for a limited amount of times and later go back to its
+    original behavior.
+    """
+
+    calls = 0
+
+    def __init__(
+        self,
+        original_function_to_mock,
+        max_calls_with_side_effects: int,
+    ) -> None:
+        self.original_function_to_mock = original_function_to_mock
+        self.max_calls_with_side_effects = max_calls_with_side_effects
+
+    def __call__(self, *args, **kwargs) -> Any:
+        if self.calls < self.max_calls_with_side_effects:
+            self.calls += 1
+            raise Exception()
+
+        return self.original_function_to_mock(*args, **kwargs)
