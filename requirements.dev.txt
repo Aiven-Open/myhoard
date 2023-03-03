@@ -17,5 +17,6 @@ pytest-mock
 pytest-timeout
 pytest-xdist
 responses
+time-machine
 types-PyMySQL
 types-requests
