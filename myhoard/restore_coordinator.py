@@ -450,6 +450,15 @@ class RestoreCoordinator(threading.Thread):
         self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
         # Rebuilding very large tables can be slow
         with self._mysql_cursor(timeout=3600.0) as cursor:
+            cursor.execute("SELECT @@SESSION.sql_mode")
+            unwanted_sql_modes = {"STRICT_ALL_TABLES", " STRICT_TRANS_TABLES", "NO_ZERO_DATE", "NO_ZERO_IN_DATE"}
+            sql_mode = cursor.fetchone()["@@SESSION.sql_mode"]
+            lenient_sql_mode = ",".join([mode for mode in sql_mode.split(",") if mode not in unwanted_sql_modes])
+            if lenient_sql_mode != sql_mode:
+                self.log.info("Switching SQL mode from %r to %r during tables rebuild", sql_mode, lenient_sql_mode)
+                cursor.execute("SET SESSION sql_mode = %s", (lenient_sql_mode,))
+            self.log.info("Disabling requirement for primary keys during tables rebuild")
+            cursor.execute("SET SESSION sql_require_primary_key = false")
             cursor.execute(
                 "SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_ROWS,AVG_ROW_LENGTH"
                 " FROM INFORMATION_SCHEMA.TABLES WHERE ENGINE='InnoDB'"

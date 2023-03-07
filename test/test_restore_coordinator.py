@@ -49,6 +49,10 @@ def _restore_coordinator_sequence(
         cursor.execute("CREATE TABLE t0 (id INTEGER PRIMARY KEY, data TEXT)")
         cursor.execute("CREATE TABLE t1 (id INTEGER PRIMARY KEY, data TEXT)")
         cursor.execute("CREATE TABLE t2 (id INTEGER PRIMARY KEY, data TEXT)")
+        cursor.execute("SET SESSION sql_require_primary_key = false")
+        cursor.execute("SET SESSION sql_mode = ''")
+        cursor.execute("CREATE TABLE bad0 (id INTEGER, data TEXT)")
+        cursor.execute("CREATE TABLE bad1 (id INTEGER, data DATETIME default '0000-00-00 00:00:00')")
         cursor.execute("COMMIT")
 
     private_key_pem, public_key_pem = generate_rsa_key_pair()
@@ -321,6 +325,8 @@ def _restore_coordinator_sequence(
         assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`t0`"}) == 1
         assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`t1`"}) == 2
         assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`t2`"}) == 1
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`bad0`"}) == 1
+        assert rc.state_manager.update_log.count({"last_rebuilt_table": "`db1`.`bad1`"}) == 1
     else:
         assert rc.state["restore_errors"] == 0
     assert rc.state["remote_read_errors"] == 0
