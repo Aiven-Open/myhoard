@@ -448,8 +448,8 @@ class RestoreCoordinator(threading.Thread):
             ("mysql", "innodb_table_stats"),
         }
         self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
-        # Rebuilding very large tables can be slow
-        with self._mysql_cursor(timeout=3600.0) as cursor:
+        # Rebuilding very large tables can be very slow
+        with self._mysql_cursor(timeout=12 * 3600.0) as cursor:
             cursor.execute("SELECT @@SESSION.sql_mode")
             unwanted_sql_modes = {"STRICT_ALL_TABLES", " STRICT_TRANS_TABLES", "NO_ZERO_DATE", "NO_ZERO_IN_DATE"}
             sql_mode = cursor.fetchone()["@@SESSION.sql_mode"]
