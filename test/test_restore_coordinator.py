@@ -53,6 +53,10 @@ def _restore_coordinator_sequence(
         cursor.execute("SET SESSION sql_mode = ''")
         cursor.execute("CREATE TABLE bad0 (id INTEGER, data TEXT)")
         cursor.execute("CREATE TABLE bad1 (id INTEGER, data DATETIME default '0000-00-00 00:00:00')")
+        # Tables with compact rows and a row length longer than 8126 bytes raise an error unless strict mode is disabled
+        cursor.execute("SET SESSION innodb_strict_mode = false")
+        columns = ", ".join([f"d{i} CHAR(255)" for i in range(40)])
+        cursor.execute(f"CREATE TABLE bad2 ({columns}) ROW_FORMAT=COMPACT")
         cursor.execute("COMMIT")
 
     private_key_pem, public_key_pem = generate_rsa_key_pair()
