@@ -189,15 +189,17 @@ than 24 hours this is used as base for calculating the backup times. E.g. if
 backup interval was 6 hours and backup hour was 4, backups would be taken at
 hours 4, 10, 16 and 22.
 
+**backup_minute**
+The minute of hour at which to take new full backup.
+
 **backup_interval_minutes**
 
 The interval in minutes at which to take new backups. Individual binary logs
 are backed up as soon as they're created so there's usually no need to have
 very frequent full backups.
-
-**backup_minute**
-
-The minute of hour at which to take new full backup.
+Note: If this value is not does not have a factor of 1440 (1 day) then the backup_hour and backup_minute
+settings cannot be changed once the first backup has been taken, as having a cycle not as a multiple of days
+means that the hour and minute of the backup will not be the same each day.
 
 **forced_binlog_rotation_interval**
 

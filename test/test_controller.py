@@ -1357,6 +1357,70 @@ def test_periodic_backup_based_on_exceeded_intervals(time_machine, master_contro
     while_asserts(lambda: streaming_binlogs(m_controller, 3), timeout=10)
 
 
+def test_changed_backup_hour_is_applied(time_machine, master_controller) -> None:
+    # pylint: disable=protected-access
+    time_machine.move_to("2023-01-02T03:30:00")
+
+    # By default backup_hour = 3, backup_interval_minutes = 1440
+    m_controller, master = master_controller
+
+    m_controller.switch_to_active_mode()
+    m_controller.start()
+
+    def streaming_binlogs(controller: Controller, expected_completed_backups: int):
+        assert controller.backup_streams
+        assert controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+
+        complete_backups = [backup for backup in controller.state["backups"] if backup["completed_at"]]
+        assert len(complete_backups) == expected_completed_backups
+
+    def flush_binlogs():
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("FLUSH BINARY LOGS")
+
+    # write some data for the first backup
+    flush_binlogs()
+    # first backup for 2023-01-02 03:00 should be generated at 03:30 (time we started the service)
+    while_asserts(lambda: streaming_binlogs(m_controller, 1), timeout=10)
+
+    # generate more data for second backup
+    flush_binlogs()
+
+    time_machine.move_to("2023-01-03T03:00:00+00:00")
+
+    expected_normalized_time = datetime.datetime(2023, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    assert m_controller._current_normalized_backup_timestamp() == expected_normalized_time.isoformat()
+
+    time.sleep(1)
+    min_created_at = datetime.datetime(2023, 1, 3, 3, tzinfo=datetime.timezone.utc).timestamp()
+    assert any(bs.created_at >= min_created_at for bs in m_controller.backup_streams)
+
+    time_machine.move_to("2023-01-03T06:00:00+00:00")
+    while_asserts(lambda: streaming_binlogs(m_controller, 2), timeout=10)
+
+    # generate more data for third backup
+    flush_binlogs()
+
+    # After second backup, the next scheduled one should be at 2023-02-04 03:00:00, but let's change
+    # the backup hour to 18
+    m_controller.backup_settings["backup_hour"] = 18
+
+    time_machine.move_to("2023-01-04T18:00:00+00:00")
+
+    expected_normalized_time = datetime.datetime(2023, 1, 4, 18, tzinfo=datetime.timezone.utc)
+    assert m_controller._current_normalized_backup_timestamp() == expected_normalized_time.isoformat()
+
+    time.sleep(1)
+    min_created_at = datetime.datetime(2023, 1, 4, 3, tzinfo=datetime.timezone.utc).timestamp()
+    assert any(bs.created_at >= min_created_at for bs in m_controller.backup_streams)
+
+    time_machine.move_to("2023-01-05T18:00:00+00:00")
+    expected_normalized_time = datetime.datetime(2023, 1, 5, 18, tzinfo=datetime.timezone.utc)
+
+    assert m_controller._current_normalized_backup_timestamp() == expected_normalized_time.isoformat()
+    while_asserts(lambda: streaming_binlogs(m_controller, 3), timeout=10)
+
+
 @patch.object(RestoreCoordinator, "MAX_BASEBACKUP_ERRORS", 2)
 @patch.object(BasebackupRestoreOperation, "restore_backup", side_effect=Exception("failed restoring basebackup"))
 def test_backup_marked_as_broken_after_failed_restoration(
