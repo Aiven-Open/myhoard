@@ -366,10 +366,10 @@ def are_gtids_in_executed_set(gtid_executed, ranges, *, exclude_uuid=None):
 
 
 @contextlib.contextmanager
-def mysql_connection(*, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user):
-    ssl = None
-    if ca_file:
-        ssl = {"ca": ca_file}
+def mysql_connection(
+    *, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user, require_ssl=False
+):
+    ssl = {"ca": ca_file} if ca_file else {"require": True} if require_ssl else None
     connection = pymysql.connect(
         charset="utf8mb4",
         connect_timeout=timeout,
@@ -390,9 +390,11 @@ def mysql_connection(*, ca_file=None, db="mysql", host="127.0.0.1", password, po
 
 
 @contextlib.contextmanager
-def mysql_cursor(*, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user):
+def mysql_cursor(
+    *, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user, require_ssl=False
+):
     with mysql_connection(
-        ca_file=ca_file, db=db, host=host, password=password, port=port, timeout=timeout, user=user
+        ca_file=ca_file, db=db, host=host, password=password, port=port, timeout=timeout, user=user, require_ssl=require_ssl
     ) as connection:
         with connection.cursor() as cursor:
             yield cursor

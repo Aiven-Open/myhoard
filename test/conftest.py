@@ -327,7 +327,13 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
         "http_port": get_random_port(start=3000, end=30000),
         "mysql": {
             "binlog_prefix": mysql_master.config_options.binlog_file_prefix,
-            "client_params": {"host": "127.0.0.1", "password": "NgLqvU8gbWCtfJWJPy", "port": 3306, "user": "root"},
+            "client_params": {
+                "host": "127.0.0.1",
+                "password": "f@keP@ssw0rd",
+                "port": 3306,
+                "require_ssl": False,
+                "user": "root",
+            },
             "config_file_name": mysql_master.config_name,
             "data_directory": mysql_master.config_options.datadir,
             "relay_log_index_file": mysql_master.config_options.relay_log_index_file,

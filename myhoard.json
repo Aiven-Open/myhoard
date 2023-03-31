@@ -37,9 +37,10 @@
         "binlog_prefix": "/var/lib/mysql/binlog",
         "client_params": {
             "host": "127.0.0.1",
-            "password": "NgLqvU8gbWCtfJWJPy",
+            "password": "f@keP@ssw0rd",
             "port": 3306,
-            "user": "root"
+            "user": "root",
+            "require_ssl": false
         },
         "config_file_name": "/etc/my.cnf",
         "data_directory": "/var/lib/mysql",
