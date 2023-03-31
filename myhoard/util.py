@@ -367,9 +367,9 @@ def are_gtids_in_executed_set(gtid_executed, ranges, *, exclude_uuid=None):
 
 @contextlib.contextmanager
 def mysql_connection(*, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user):
-    ssl = None
+    ssl = {"require": True}
     if ca_file:
-        ssl = {"ca": ca_file}
+        ssl["ca"] = ca_file
     connection = pymysql.connect(
         charset="utf8mb4",
         connect_timeout=timeout,
