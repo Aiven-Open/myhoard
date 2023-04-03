@@ -252,6 +252,10 @@ class BackupStream(threading.Thread):
         yield
         self.stop()
 
+    def is_in_terminal_state(self) -> bool:
+        """Returns if the stream has finished operating, successfully or not"""
+        return bool(self.state.get("broken_info") or self.state.get("closed_info") or self.state.get("completed_info"))
+
     def activate(self) -> None:
         with self.lock:
             if self.mode != self.Mode.promoted:
