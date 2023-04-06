@@ -872,15 +872,22 @@ class Controller(threading.Thread):
         backup_interval_minutes = self.backup_settings["backup_interval_minutes"]
         backup_hour = self.backup_settings["backup_hour"]
         backup_minute = self.backup_settings["backup_minute"]
+        day_in_minutes = 1440
 
         previous_normalized = self._previous_normalized_backup_timestamp()
-        # in case we have a previous backup time, we can use it as starting point
+
+        # If we have a previous backup we use this to base our current normalized datetime off
+        # this allows backup intervals of greater than a day
         if previous_normalized:
             normalized = datetime.datetime.fromisoformat(previous_normalized)
+            # If the interval is in days then we can change the time of day backups are taken
+            if backup_interval_minutes % day_in_minutes == 0:
+                normalized = normalized.replace(hour=backup_hour, minute=backup_minute)
         else:
-            if normalized.hour < backup_hour or (normalized.hour == backup_hour and normalized.minute < backup_minute):
-                normalized = normalized - datetime.timedelta(days=1)
-            normalized = normalized.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+            normalized = now.replace(hour=backup_hour, minute=backup_minute, second=0, microsecond=0)
+
+        if normalized > now:
+            normalized = normalized - datetime.timedelta(days=1)
 
         while normalized + datetime.timedelta(minutes=backup_interval_minutes) <= now:
             normalized = normalized + datetime.timedelta(minutes=backup_interval_minutes)
