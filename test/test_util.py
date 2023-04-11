@@ -3,17 +3,77 @@ from . import generate_rsa_key_pair
 from datetime import datetime
 from time import sleep
 from typing import List
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import copy
 import logging
 import myhoard.util as myhoard_util
 import os
+import pymysql
 import pytest
 import random
 import subprocess
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
+
+
+@patch("pymysql.connect")
+@pytest.mark.parametrize(
+    "conn_options",
+    [
+        {
+            "password": "f@keP@ssw0rd",
+            "port": 3306,
+            "user": "root",
+        },
+        {
+            "password": "f@keP@ssw0rd",
+            "port": 3306,
+            "require_ssl": True,
+            "user": "root",
+        },
+        {
+            "ca_file": "ca-bundle.crt",
+            "password": "f@keP@ssw0rd",
+            "port": 3306,
+            "require_ssl": True,
+            "user": "root",
+        },
+        {
+            "ca_file": "ca-bundle.crt",
+            "db": "data",
+            "host": "localhost",
+            "password": "f@keP@ssw0rd",
+            "port": 3306,
+            "timeout": 10.0,
+            "user": "admin",
+        },
+    ],
+)
+def test_mysql_cursor(connect_mock, conn_options):
+    with myhoard_util.mysql_cursor(**conn_options):
+        pass
+
+    timeout = conn_options.get("timeout", 4.0)
+    ssl = None
+    if conn_options.get("require_ssl"):
+        ssl = {"require": True}
+    if conn_options.get("ca_file"):
+        ssl = {"ca": conn_options["ca_file"]}
+
+    connect_mock.assert_called_once_with(
+        charset="utf8mb4",
+        connect_timeout=timeout,
+        cursorclass=pymysql.cursors.DictCursor,
+        db=conn_options.get("db", "mysql"),
+        host=conn_options.get("host", "127.0.0.1"),
+        password=conn_options["password"],
+        read_timeout=timeout,
+        port=conn_options["port"],
+        ssl=ssl,
+        user=conn_options["user"],
+        write_timeout=timeout,
+    )
 
 
 def test_rate_tracking_ndigits_calculation():
