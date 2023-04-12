@@ -1133,6 +1133,7 @@ class RestoreCoordinator(threading.Thread):
             host=self.mysql_client_params["host"],
             password=self.mysql_client_params["password"],
             port=self.mysql_client_params["port"],
+            require_ssl=self.mysql_client_params.get("require_ssl", False),
             user=self.mysql_client_params["user"],
             timeout=timeout,
         ) as cursor:
