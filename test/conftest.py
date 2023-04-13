@@ -180,6 +180,7 @@ FLUSH PRIVILEGES;
         "host": "127.0.0.1",
         "password": password,
         "port": config_options.port,
+        "require_ssl": False,
         "timeout": 10,
         "user": "root",
     }

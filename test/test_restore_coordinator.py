@@ -273,6 +273,7 @@ def _restore_coordinator_sequence(
         "host": "127.0.0.1",
         "password": mysql_master.password,
         "port": mysql_empty.port,
+        "require_ssl": mysql_master.connect_options["require_ssl"],
         "user": mysql_master.user,
     }
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
@@ -372,6 +373,7 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
         "host": "127.0.0.1",
         "password": mysql_master.password,
         "port": mysql_empty.port,
+        "require_ssl": mysql_master.connect_options["require_ssl"],
         "user": mysql_master.user,
     }
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
