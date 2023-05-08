@@ -485,7 +485,7 @@ class RestoreCoordinator(threading.Thread):
                     estimated_progress_bytes / max(estimated_total_bytes, 1) * 100,
                 )
                 try:
-                    cursor.execute(f"ALTER TABLE {escaped_table_designator} FORCE")
+                    cursor.execute(f"ALTER TABLE {escaped_table_designator} FORCE, ALGORITHM=INPLACE")
                 except pymysql.err.OperationalError as e:
                     # ERROR 1148: The used command is not allowed with this MySQL version
                     if e.args[0] == 1148:
