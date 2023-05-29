@@ -65,8 +65,16 @@ build-dep-ubuntu:
 # prerequisite
 .PHONY: build-setup-specific-image
 build-setup-specific-image:
+ifeq ($(shell uname -m),x86_64)
+	@echo "Building image for default architecture"
 	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
 		scripts/build-setup-specific-test-image
+else
+    # For other architectures, we must build the dependencies ourselves, as they are not available in the official repos.
+	@echo "Building image for $(shell uname -m)"
+	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
+		scripts/build-setup-specific-test-image-full
+endif
 
 .PHONY: dockertest
 dockertest:

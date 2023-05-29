@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash -ex
 [ -n "$1" ] || { echo "must pass percona package version"; exit 1; }
 PERCONA_PACKAGE_VERSION="$1"
 export DEBIAN_FRONTEND="noninteractive"
