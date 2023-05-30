@@ -1,8 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from .errors import DiskFullError
 from .util import get_xtrabackup_version
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Optional
+from typing import Final, Optional
 
 import base64
 import fnmatch
@@ -21,6 +22,9 @@ class BasebackupRestoreOperation:
     """Restores an existing basebackup. Note that the stream handler callback is
     executed on another thread so that the main thread can manage restore state
     information while the data is being loaded."""
+
+    #: Error message from xbstream / xtrabackup when disk is full.
+    NO_SPACE_LEFT_ON_DEVICE: Final[str] = "OS errno 28 - No space left on device"
 
     prepare_completed_re = re.compile(r"Shutdown completed; log sequence number (\d+)$")
 
@@ -291,12 +295,16 @@ class BasebackupRestoreOperation:
         if not line:
             return
 
+        self._raise_if_no_space_left(line, "xtrabackup-move")
+
         self.log.info("xtrabackup-move: %r", line)
 
     def _process_prepare_output_line(self, line, _stream_name):
         line = self.decode_output_line(line)
         if not line:
             return
+
+        self._raise_if_no_space_left(line, "xtrabackup-prepare")
 
         if not self._process_prepare_completed_line(line):
             self.log.info("xtrabackup-prepare: %r", line)
@@ -313,6 +321,8 @@ class BasebackupRestoreOperation:
         if not line:
             return
 
+        self._raise_if_no_space_left(line, "xbstream-extract")
+
         if not self._process_xbstream_output_line_new_file(line):
             self.log.info("xbstream: %r", line)
 
@@ -324,6 +334,11 @@ class BasebackupRestoreOperation:
         self.number_of_files += 1
         self.log.info("Started processing file %r", self.current_file)
         return True
+
+    def _raise_if_no_space_left(self, line: str, operation: str) -> None:
+        if self.NO_SPACE_LEFT_ON_DEVICE in line:
+            self.log.error("%s: %r", operation, line)
+            raise DiskFullError(f"No space left on device. Cannot complete {operation}!")
 
 
 class InputSenderThread(threading.Thread):

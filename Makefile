@@ -70,14 +70,14 @@ build-setup-specific-image:
 
 .PHONY: dockertest
 dockertest:
-	docker run -it --rm myhoard-test-temp /src/scripts/test-inside
+	docker run --cap-add SYS_ADMIN -it --rm myhoard-test-temp /src/scripts/test-inside
 
 # when the image didn't change this can be used. local dev only, don't use in CI
 # in this target we override the /src that gets used to rsync source inside the container
 .PHONY: dockertest-resync
 dockertest-resync:
-	docker run -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/test-inside
+	docker run --cap-add SYS_ADMIN -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/test-inside
 
 .PHONY: dockertest-pytest
 dockertest-pytest:
-	docker run -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/pytest-inside $(PYTEST_ARGS)
+	docker run --cap-add SYS_ADMIN -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/pytest-inside $(PYTEST_ARGS)

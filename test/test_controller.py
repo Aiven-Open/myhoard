@@ -1,8 +1,12 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from __future__ import annotations
+
 from . import build_controller, DataGenerator, get_mysql_config_options, MySQLConfig, wait_for_condition, while_asserts
+from _pytest.logging import LogCaptureFixture
+from functools import wraps
 from myhoard.backup_stream import BackupStream
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
-from myhoard.controller import Controller, sort_completed_backups
+from myhoard.controller import Backup, BaseBackup, Controller, sort_completed_backups
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
     change_master_to,
@@ -12,12 +16,14 @@ from myhoard.util import (
     parse_gtid_range_string,
     partition_sort_and_combine_gtid_ranges,
 )
+from pathlib import Path
 from rohmu import get_transfer
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, cast, Dict, Final, List, Optional, Set, TypedDict
 from unittest.mock import MagicMock, patch
 
 import contextlib
 import datetime
+import logging
 import os
 import pytest
 import random
@@ -1720,6 +1726,260 @@ def test_check_if_get_backup_list_fills_attributes_based_on_missing_files(
             assert result[key] is not None
         else:
             assert result[key] is None
+
+
+def test_backup_and_restore(
+    master_controller: tuple[Controller, MySQLConfig],
+    empty_controller: tuple[Controller, MySQLConfig],
+) -> None:
+    """Test a successful backup and restore."""
+    empty_controller[1].connect_options["password"] = master_controller[1].connect_options["password"]
+    _populate_table(master_controller[1], "test")
+
+    backup_streams = do_backup(controller=master_controller[0])
+    do_restore(target_controller=empty_controller[0], backup_streams=backup_streams)
+
+    orig_size = _get_table_size(master_controller[1], "test")
+    restored_size = _get_table_size(empty_controller[1], "test")
+
+    assert orig_size == restored_size
+
+
+def test_backup_and_restore_fail_on_disk_full(
+    master_controller: tuple[Controller, MySQLConfig],
+    empty_controller_in_small_disk: tuple[Controller, MySQLConfig],
+    caplog: LogCaptureFixture,
+) -> None:
+    """Test a backup and restore that fails restoring because the disk is full."""
+    empty_controller_in_small_disk[1].connect_options["password"] = master_controller[1].connect_options["password"]
+    _populate_table(master_controller[1], "test")
+
+    backup_streams = do_backup(controller=master_controller[0])
+    do_restore(
+        target_controller=empty_controller_in_small_disk[0],
+        backup_streams=backup_streams,
+        caplog=caplog,
+        fail_because_disk_full=True,
+    )
+
+
+def _log_duration(function: Callable) -> Callable:
+    """Log the duration of a function call."""
+    description = function.__name__.replace("_", " ").capitalize()
+
+    @wraps(function)
+    def wrapper(*args, **kwargs) -> Any:
+        logger = logging.getLogger(_get_logger_name())
+
+        t0 = time.monotonic_ns()
+        result = function(*args, **kwargs)
+        t1 = time.monotonic_ns()
+
+        logger.info("%s took %.5f sec.", description, (t1 - t0) / 1_000_000_000)
+
+        return result
+
+    return wrapper
+
+
+def _get_logger_name() -> str:
+    """Get the name of the logger for the current test.
+
+    Environment variable PYTEST_CURRENT_TEST is set by pytest and contains something like
+    ``"test/test_myfile.py::test_something (call)"``.
+
+    With the example above, this function will return ``"test.test_myfile.test_something"``.
+
+    If the environment variable is not set, it will return something like ``"test.test_myfile"``.
+    """
+    current_test = os.environ.get("PYTEST_CURRENT_TEST")
+    if current_test is None:
+        return f"test.{Path(__file__).stem}"
+
+    path, _, name = current_test.split(":")
+    name = name.split()[0]
+    path = path.removesuffix(".py").replace("/", ".").replace("\\", ".")
+    return f"{path}.{name}"
+
+
+def _populate_table(mysql_config: MySQLConfig, table_name: str, batches: int = 1) -> None:
+    """Populate database with a lot of data, using a single transaction.
+
+    Args:
+        mysql_config: Configuration for connecting to MySQL.
+        table_name: Name of the table to populate (will be created if it does not exist).
+        batches: Number of batches to use. Each batch is 64 MB.
+    """
+    logger = logging.getLogger(_get_logger_name())
+
+    ONE_MB: Final[int] = 2**20
+    MB_PER_BATCH: Final[int] = 64
+
+    # Use a higher timeout, +1 minute per 4 batches
+    options = mysql_config.connect_options
+    if batches > 3:
+        orig_timeout = mysql_config.connect_options["timeout"]
+        options = mysql_config.connect_options | {"timeout": orig_timeout + batches // 4 * 60}
+
+    # Use a higher timeout
+    with mysql_cursor(**options) as cursor:
+        t0 = time.monotonic_ns()
+
+        cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_name} (id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, b LONGBLOB);")
+        cursor.execute("DROP PROCEDURE IF EXISTS generate_data;")
+        cursor.execute(
+            f"""
+        CREATE PROCEDURE generate_data()
+        BEGIN
+             DECLARE i INT DEFAULT 0;
+                WHILE i < {batches} DO
+                    INSERT INTO {table_name} (b) VALUES (REPEAT('x', {MB_PER_BATCH * ONE_MB}));
+                    SET i = i + 1;
+                END WHILE;
+        END
+        """
+        )
+        cursor.execute("CALL generate_data();")
+        cursor.execute("COMMIT")
+        cursor.execute("FLUSH BINARY LOGS")
+
+        t1 = time.monotonic_ns()
+
+        logger.info(
+            "Populating table %s with %i MB took %f sec.", table_name, (batches * MB_PER_BATCH), (t1 - t0) / 1_000_000_000
+        )
+
+
+def _get_table_size(mysql_config: MySQLConfig, table_name: str) -> int:
+    """Get size of table (data + index) in bytes."""
+    with mysql_cursor(**mysql_config.connect_options) as cursor:
+        cursor.execute(
+            f"""
+            SELECT TABLE_NAME AS `Table`,
+                (DATA_LENGTH + INDEX_LENGTH) AS `size`
+            FROM information_schema.TABLES
+            WHERE TABLE_NAME = '{table_name}';
+        """
+        )
+
+        return cast(SizeDict, cursor.fetchone())["size"]
+
+
+def do_backup(controller: Controller) -> list[BackupStream]:
+    """Trigger a backup and wait for it to finish."""
+    flow_tester = FlowTester(controller)
+
+    controller.switch_to_active_mode()
+    controller.start()
+
+    flow_tester.wait_for_streaming_binlogs()
+
+    # Stream backup.
+    controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+
+    flow_tester.wait_for_multiple_streams()
+    flow_tester.wait_for_streaming_binlogs()
+    flow_tester.wait_for_single_stream()
+
+    return controller.backup_streams
+
+
+def do_restore(
+    target_controller: Controller,
+    backup_streams: list[BackupStream],
+    caplog: LogCaptureFixture | None = None,
+    fail_because_disk_full: bool = False,
+) -> None:
+    """Trigger a restore and wait for it to finish."""
+    bs = backup_streams[0]
+
+    # Restore backup into an empty database.
+    flow_tester = FlowTester(target_controller, caplog=caplog)
+    target_controller.start()
+
+    try:
+        flow_tester.wait_for_fetched_backup(timeout=2)
+
+        target_controller.restore_backup(site=bs.site, stream_id=bs.stream_id)
+
+        if fail_because_disk_full:
+            flow_tester.wait_for_disk_full_being_logged()
+
+            # Check that we have backups, but none of them are broken.
+            current_backups = sort_completed_backups(target_controller.state["backups"])
+            assert current_backups
+            assert all(b["broken_at"] is None for b in current_backups)
+            assert target_controller.restore_coordinator.phase is RestoreCoordinator.Phase.failed
+        else:
+            flow_tester.wait_for_restore_complete()
+    finally:
+        target_controller.stop()
+
+
+class FlowTester:
+    """Helper class to test the flow of a backup or restore."""
+
+    def __init__(self, controller: Controller, global_timeout: int = 10, caplog: LogCaptureFixture | None = None) -> None:
+        self.controller = controller
+        self.timeout = global_timeout
+        self.caplog = caplog
+        self.logger = logging.getLogger(_get_logger_name())
+
+    @_log_duration
+    def wait_for_streaming_binlogs(self, *, timeout: int | None = None) -> None:
+        timeout = self.timeout if timeout is None else timeout
+        while_asserts(self._streaming_binlogs, timeout=timeout)
+
+    @_log_duration
+    def wait_for_multiple_streams(self, *, timeout: int | None = None) -> None:
+        timeout = self.timeout if timeout is None else timeout
+        while_asserts(self._has_multiple_streams, timeout=timeout)
+
+    @_log_duration
+    def wait_for_single_stream(self, *, timeout: int | None = None) -> None:
+        timeout = self.timeout if timeout is None else timeout
+        while_asserts(self._has_single_stream, timeout=timeout)
+
+    @_log_duration
+    def wait_for_restore_complete(self, *, timeout: int | None = None) -> None:
+        timeout = self.timeout if timeout is None else timeout
+        wait_for_condition(self._restore_complete, timeout=timeout, description="restore complete")
+
+    @_log_duration
+    def wait_for_fetched_backup(self, *, timeout: int | None = None) -> None:
+        timeout = self.timeout if timeout is None else timeout
+        wait_for_condition(self._has_fetched_backup, timeout=timeout, description="fetched backup")
+
+    @_log_duration
+    def wait_for_disk_full_being_logged(self, *, timeout: int | None = None) -> None:
+        timeout = self.timeout if timeout is None else timeout
+        wait_for_condition(self._disk_full_being_logged, timeout=timeout, description="disk full being logged")
+
+    def _streaming_binlogs(self) -> None:
+        assert self.controller.backup_streams
+        assert all(bs.active_phase == BackupStream.ActivePhase.binlog for bs in self.controller.backup_streams), [
+            (s.name, s.active_phase) for s in self.controller.backup_streams
+        ]
+
+    def _has_multiple_streams(self) -> None:
+        assert len(self.controller.backup_streams) > 1
+
+    def _has_single_stream(self) -> None:
+        assert len(self.controller.backup_streams) == 1
+
+    def _restore_complete(self) -> bool:
+        return self.controller.restore_coordinator is not None and self.controller.restore_coordinator.is_complete()
+
+    def _has_fetched_backup(self) -> bool:
+        return self.controller.state["backups_fetched_at"] != 0
+
+    def _disk_full_being_logged(self) -> bool:
+        if self.caplog is None:
+            return False
+        return any(
+            "DiskFullError('No space left on device. Cannot complete xbstream-extract!')" in record.message
+            for record in self.caplog.records
+        )
 
 
 class LimitedSideEffectMock:

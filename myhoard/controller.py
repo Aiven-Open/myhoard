@@ -1174,7 +1174,7 @@ class Controller(threading.Thread):
         self._purge_old_binlogs(mysql_maybe_not_running=True)
         self._process_local_binlog_updates()
         self._extend_binlog_stream_list()
-        if self.restore_coordinator.phase == RestoreCoordinator.Phase.failed_basebackup:
+        if self.restore_coordinator.phase is RestoreCoordinator.Phase.failed_basebackup:
             self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
         if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():

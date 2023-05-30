@@ -19,3 +19,7 @@ class UnknownBackupSite(Exception):
 
     def __str__(self):
         return f"backup site {self.backup_site_name} unknown (sites: {self.known_backup_sites!r})"
+
+
+class DiskFullError(Exception):
+    """Raised when disk is full."""

@@ -767,6 +767,7 @@ The following metrics are exported by myhoard:
 **myhoard.binlog.size_new**
 **myhoard.binlog.upload**
 **myhoard.binlog.upload_errors**
+**myhoard.disk_full_errors**
 **myhoard.generic_errors**
 **myhoard.http.{name}**
 **myhoard.network_errors**
