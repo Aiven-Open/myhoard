@@ -33,6 +33,14 @@ import time
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
+class CountDict(TypedDict):
+    count: int
+
+
+class SizeDict(TypedDict):
+    size: int
+
+
 def test_old_master_has_failed(default_backup_site, master_controller, mysql_empty, session_tmpdir):
     """Create a master and take backup, ensure some binary logs are created. Start new empty server
     and restore that from backup and promote as new master immediate to simulate scenario where old
@@ -298,15 +306,15 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
     )
     fake_file_names = create_fake_state_files(controller)
     controller.state["backups"] = [
-        {
-            "basebackup_info": {"end_ts": 0.0},
-            "closed_at": None,
-            "completed_at": None,
-            "recovery_site": False,
-            "stream_id": "1234",
-            "resumable": False,
-            "site": "not_default_site",
-        }
+        Backup(
+            basebackup_info=BaseBackup(end_ts=0.0),
+            closed_at=None,
+            completed_at=None,
+            recovery_site=False,
+            stream_id="1234",
+            resumable=False,
+            site="not_default_site",
+        )
     ]
     controller._refresh_backups_list()  # pylint: disable=protected-access
     for file_name in fake_file_names:
@@ -889,7 +897,9 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
 
     def streaming_binlogs():
         assert mcontroller.backup_streams
-        assert all(bs.active_phase == BackupStream.ActivePhase.binlog for bs in mcontroller.backup_streams)
+        assert all(bs.active_phase == BackupStream.ActivePhase.binlog for bs in mcontroller.backup_streams), [
+            (s.name, s.active_phase) for s in mcontroller.backup_streams
+        ]
 
     while_asserts(streaming_binlogs, timeout=10)
 
@@ -1585,7 +1595,7 @@ def test_restore_failed_basebackup_and_retry_with_prior(
             with mysql_cursor(**mysql_empty.connect_options) as cursor:
                 expected_row_count = data_generator.row_count
                 cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
-                result_row_count = cursor.fetchone()["count"]
+                result_row_count = cast(CountDict, cursor.fetchone())["count"]
                 assert expected_row_count == result_row_count
     finally:
         m_controller.stop()

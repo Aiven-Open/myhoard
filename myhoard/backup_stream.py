@@ -943,7 +943,7 @@ class BackupStream(threading.Thread):
                     with mysql_cursor(**connect_params) as cursor:
                         cursor.execute("FLUSH BINARY LOGS")
                         cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
-                        gtid_executed = parse_gtid_range_string(cursor.fetchone()["gtid_executed"])
+                        gtid_executed = parse_gtid_range_string(cast(dict, cursor.fetchone())["gtid_executed"])
                     break
                 except pymysql.err.OperationalError as ex:
                     if not retry or ex.args[0] != ERR_TIMEOUT:

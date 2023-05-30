@@ -5,7 +5,7 @@ from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.state_manager import StateManager
 from rohmu.object_storage.local import LocalTransfer
-from typing import Any, Generic, List, Mapping, TypeVar
+from typing import Any, cast, Generic, List, Mapping, TypeVar
 from unittest.mock import Mock, patch
 
 import myhoard.util as myhoard_util
@@ -263,10 +263,10 @@ def _restore_coordinator_sequence(
 
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("SHOW MASTER STATUS")
-        original_master_status = cursor.fetchone()
+        original_master_status = cast(dict, cursor.fetchone())
         print("Original master status", original_master_status)
         cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
-        original_count = cursor.fetchone()["count"]
+        original_count = cast(dict, cursor.fetchone())["count"]
         print("Number of rows in original master", original_count)
 
     restored_connect_options = {
@@ -338,13 +338,13 @@ def _restore_coordinator_sequence(
 
     with myhoard_util.mysql_cursor(**restored_connect_options) as cursor:
         cursor.execute("SHOW MASTER STATUS")
-        final_status = cursor.fetchone()
+        final_status = cast(dict, cursor.fetchone())
         print(time.time(), "Restored server's final status", final_status)
 
         cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
         expected_row_count = pitr_row_count or data_generator.row_count
         print("Expected row count", expected_row_count)
-        actual_row_count = cursor.fetchone()["count"]
+        actual_row_count = cast(dict, cursor.fetchone())["count"]
         print("Actual row count", actual_row_count)
         for batch_start in range(0, expected_row_count - 1, 200):
             cursor.execute("SELECT id, data FROM db1.t1 WHERE id > %s ORDER BY id ASC LIMIT 200", [batch_start])

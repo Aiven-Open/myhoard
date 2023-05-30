@@ -4,7 +4,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.controller import BackupSiteInfo, Controller
 from rohmu.object_storage.local import LocalTransfer
-from typing import Dict
+from typing import cast, Dict
 
 import json
 import myhoard.util as myhoard_util
@@ -101,7 +101,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
 
             with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
                 cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
-                gtid_executed = myhoard_util.parse_gtid_range_string(cursor.fetchone()["gtid_executed"])
+                gtid_executed = myhoard_util.parse_gtid_range_string(cast(dict, cursor.fetchone())["gtid_executed"])
                 assert bs_observer.state["remote_gtid_executed"] == gtid_executed
                 cursor.execute("INSERT INTO db1.t1 (id, data) VALUES (1, 'abcdefg')")
                 cursor.execute("COMMIT")
@@ -153,7 +153,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
 
         with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
             cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
-            gtid_executed = myhoard_util.parse_gtid_range_string(cursor.fetchone()["gtid_executed"])
+            gtid_executed = myhoard_util.parse_gtid_range_string(cast(dict, cursor.fetchone())["gtid_executed"])
             assert bs_observer.state["remote_gtid_executed"] == gtid_executed
             cursor.execute("INSERT INTO db1.t1 (id, data) VALUES (2, 'hijkl')")
             cursor.execute("COMMIT")

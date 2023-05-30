@@ -290,7 +290,7 @@ class BasebackupRestoreOperation:
         except UnicodeDecodeError:
             return line.decode("iso-8859-1")
 
-    def _process_move_output_line(self, line, _stream_name):
+    def _process_move_output_line(self, line: str, _stream_name: str) -> None:
         line = self.decode_output_line(line)
         if not line:
             return
@@ -299,7 +299,7 @@ class BasebackupRestoreOperation:
 
         self.log.info("xtrabackup-move: %r", line)
 
-    def _process_prepare_output_line(self, line, _stream_name):
+    def _process_prepare_output_line(self, line: str, _stream_name: str) -> None:
         line = self.decode_output_line(line)
         if not line:
             return
@@ -316,7 +316,7 @@ class BasebackupRestoreOperation:
             self.log.info("Restored backup prepared, lsn %s", self.prepared_lsn)
         return match
 
-    def _process_xbstream_output_line(self, line, _stream_name):
+    def _process_xbstream_output_line(self, line: str, _stream_name: str) -> None:
         line = self.decode_output_line(line)
         if not line:
             return
