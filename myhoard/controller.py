@@ -28,7 +28,7 @@ from rohmu.object_storage.base import BaseTransfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, cast, Dict, List, Optional, TypedDict
 
 import contextlib
 import datetime
@@ -778,7 +778,7 @@ class Controller(threading.Thread):
                 reached_target = False
             elif expected_ranges:
                 cursor.execute("SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed", [expected_ranges])
-                if not cursor.fetchone()["executed"]:
+                if not cast(dict, cursor.fetchone())["executed"]:
                     reached_target = False
             if not reached_target:
                 if self.state["force_promote"]:
@@ -1174,7 +1174,7 @@ class Controller(threading.Thread):
         self._purge_old_binlogs(mysql_maybe_not_running=True)
         self._process_local_binlog_updates()
         self._extend_binlog_stream_list()
-        if self.restore_coordinator.phase == RestoreCoordinator.Phase.failed_basebackup:
+        if self.restore_coordinator.phase is RestoreCoordinator.Phase.failed_basebackup:
             self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
         if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():

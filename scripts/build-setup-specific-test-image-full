@@ -1,0 +1,31 @@
+#!/bin/bash -ex
+
+# This script fully builds all the dependencies for myhoard tests.
+# If `build-setup-specific-test-image` fails, this one should work (but it's slower).
+
+[ -n "${PYTHON_VERSION}" ] || { echo "outside env must define PYTHON_VERSION"; exit 1; }
+[ -n "${MYSQL_VERSION}" ] || { echo "outside env must define MYSQL_VERSION"; exit 1; }
+[ -n "${PERCONA_VERSION}" ] || { echo "outside env must define PERCONA_VERSION"; exit 1; }
+
+# PERCONA_VERSION should start with MYSQL_VERSION
+if [[ ! "${PERCONA_VERSION}" =~ ^${MYSQL_VERSION} ]]; then
+  echo "PERCONA_VERSION (${PERCONA_VERSION}) must start with MYSQL_VERSION (${MYSQL_VERSION})"
+  exit 1
+fi
+
+# In PERCONA_VERSION=8.0.30-23-1.bullseye, we only keep:
+#                           ^^--------------- this part
+percona_suffix=$(echo ${PERCONA_VERSION} | cut -d'-' -f2)
+
+percona_xtrabackup_version="${MYSQL_VERSION}-${percona_suffix}"
+# Server version seems to be xtrabackup version minus 1
+percona_server_version="${MYSQL_VERSION}-$(($percona_suffix - 1))"
+
+docker build                                                            \
+  -t myhoard-test-temp                                                  \
+  --build-arg PYTHON_VERSION=${PYTHON_VERSION}                          \
+  --build-arg MYSQL_VERSION=${MYSQL_VERSION}                            \
+  --build-arg PERCONA_SERVER_VERSION=${percona_server_version}          \
+  --build-arg PERCONA_XTRA_VERSION=${percona_xtrabackup_version}        \
+  -f Dockerfile                                                         \
+  .

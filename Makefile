@@ -65,19 +65,27 @@ build-dep-ubuntu:
 # prerequisite
 .PHONY: build-setup-specific-image
 build-setup-specific-image:
+ifeq ($(shell uname -m),x86_64)
+	@echo "Building image for default architecture"
 	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
 		scripts/build-setup-specific-test-image
+else
+    # For other architectures, we must build the dependencies ourselves, as they are not available in the official repos.
+	@echo "Building image for $(shell uname -m)"
+	PYTHON_VERSION=$(PYTHON_VERSION) MYSQL_VERSION=$(MYSQL_VERSION) PERCONA_VERSION=$(PERCONA_VERSION) \
+		scripts/build-setup-specific-test-image-full
+endif
 
 .PHONY: dockertest
 dockertest:
-	docker run -it --rm myhoard-test-temp /src/scripts/test-inside
+	docker run --cap-add SYS_ADMIN -it --rm myhoard-test-temp /src/scripts/test-inside
 
 # when the image didn't change this can be used. local dev only, don't use in CI
 # in this target we override the /src that gets used to rsync source inside the container
 .PHONY: dockertest-resync
 dockertest-resync:
-	docker run -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/test-inside
+	docker run --cap-add SYS_ADMIN -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/test-inside
 
 .PHONY: dockertest-pytest
 dockertest-pytest:
-	docker run -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/pytest-inside $(PYTEST_ARGS)
+	docker run --cap-add SYS_ADMIN -it --rm -v "$(shell pwd):/src:ro" myhoard-test-temp /src/scripts/pytest-inside $(PYTEST_ARGS)

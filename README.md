@@ -722,6 +722,8 @@ Current phase of backup restoration. Possible options are these:
   scheduled so that progress with those can be made while the full snapshot is
   being restored.
 - restoring_basebackup: The full snapshot is being downloaded and prepared.
+- rebuilding_tables: Rebuilding tables before restoring binary logs. This can
+  avoid data corruption when updating from older MySQL versions.
 - refreshing_binlogs: Refreshing binary log info to see if new binary logs have
   been uploaded to object storage from current master. This and the other
   binlog related phases are typically entered multiple times as the binlogs are
@@ -736,8 +738,10 @@ Current phase of backup restoration. Possible options are these:
   restoration completes and the restoration status is not available in that
   mode.
 - failed: Restoring the backup failed. The operation will be retried
-  automatically but it may fail repeatedly and analyzing logs to get more
+  automatically, but it may fail repeatedly and analyzing logs to get more
   details regarding the failure is advisable.
+- failed_basebackup: Terminal state for a RestoreCoordinator instance but
+  restoring an earlier backup may be an option.
 
 # Metrics
 
@@ -767,6 +771,7 @@ The following metrics are exported by myhoard:
 **myhoard.binlog.size_new**
 **myhoard.binlog.upload**
 **myhoard.binlog.upload_errors**
+**myhoard.disk_full_errors**
 **myhoard.generic_errors**
 **myhoard.http.{name}**
 **myhoard.network_errors**

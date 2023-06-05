@@ -8,10 +8,11 @@ from . import (
     MySQLConfig,
     random_basic_string,
 )
-from myhoard.controller import Controller
+from myhoard.controller import BackupSiteInfo, Controller
 from myhoard.util import atomic_create_file, change_master_to, mysql_cursor, wait_for_port
 from myhoard.web_server import WebServer
-from typing import Optional
+from py.path import local as LocalPath
+from typing import Callable, Iterator, Optional
 
 import contextlib
 import logging
@@ -24,7 +25,7 @@ import sys
 
 pytest_plugins = "aiohttp.pytest_plugin"
 
-# Force logging to be configured verbose so we can debug tests easily.
+# Force logging to be configured verbose, so we can debug tests easily.
 _log_level_str = os.getenv("MYHOARD_TEST_LOG_LEVEL", "WARNING")
 _test_log_level = logging._nameToLevel[_log_level_str]  # pylint: disable=protected-access
 _test_mysqld_log_level = int(os.getenv("MYHOARD_TEST_MYSQLD_LOG_LEVEL", "0"))
@@ -40,12 +41,12 @@ root.addHandler(handler)
 
 
 @pytest.fixture(scope="session", name="session_tmpdir")
-def fixture_session_tmpdir(tmpdir_factory):
+def fixture_session_tmpdir(tmpdir_factory: pytest.TempdirFactory) -> Iterator[Callable[[], LocalPath]]:
     """Create a temporary directory object that's usable in the session scope.  The returned value is a
     function which creates a new temporary directory which will be automatically cleaned up upon exit."""
     tmpdir_obj = tmpdir_factory.mktemp("myhoard.session.tmpdr.")
 
-    def subdir():
+    def subdir() -> LocalPath:
         return tmpdir_obj.mkdtemp(rootdir=tmpdir_obj)
 
     try:
@@ -257,7 +258,9 @@ def fixture_default_backup_site(session_tmpdir, encryption_keys):
 
 
 @pytest.fixture(scope="function", name="master_controller")
-def fixture_master_controller(session_tmpdir, mysql_master, default_backup_site):
+def fixture_master_controller(
+    session_tmpdir, mysql_master: MySQLConfig, default_backup_site: BackupSiteInfo
+) -> Iterator[tuple[Controller, MySQLConfig]]:
     controller = build_controller(
         Controller,
         default_backup_site=default_backup_site,
@@ -294,6 +297,22 @@ def fixture_standby2_controller(session_tmpdir, mysql_standby2, default_backup_s
     )
     try:
         yield controller, mysql_standby2
+    finally:
+        controller.stop()
+
+
+@pytest.fixture(scope="function", name="empty_controller")
+def fixture_empty_controller(
+    session_tmpdir, mysql_empty: MySQLConfig, default_backup_site: BackupSiteInfo
+) -> Iterator[tuple[Controller, MySQLConfig]]:
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    try:
+        yield controller, mysql_empty
     finally:
         controller.stop()
 

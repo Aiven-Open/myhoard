@@ -5,6 +5,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
+from pymysql.connections import Connection
+from pymysql.cursors import DictCursor
 from typing import Dict, Iterable, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
 
 import collections
@@ -368,7 +370,7 @@ def are_gtids_in_executed_set(gtid_executed, ranges, *, exclude_uuid=None):
 @contextlib.contextmanager
 def mysql_connection(
     *, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user, require_ssl=False
-):
+) -> Iterator[Connection]:
     ssl = {"ca": ca_file} if ca_file else {"require": True} if require_ssl else None
     connection = pymysql.connect(
         charset="utf8mb4",
@@ -392,7 +394,7 @@ def mysql_connection(
 @contextlib.contextmanager
 def mysql_cursor(
     *, ca_file=None, db="mysql", host="127.0.0.1", password, port, timeout=DEFAULT_MYSQL_TIMEOUT, user, require_ssl=False
-):
+) -> Iterator[DictCursor]:
     with mysql_connection(
         ca_file=ca_file, db=db, host=host, password=password, port=port, timeout=timeout, user=user, require_ssl=require_ssl
     ) as connection:

@@ -3,7 +3,7 @@ from .append_only_state_manager import AppendOnlyStateManager
 from .backup_stream import BINLOG_BUCKET_SIZE
 from .basebackup_restore_operation import BasebackupRestoreOperation
 from .binlog_downloader import download_binlog
-from .errors import BadRequest
+from .errors import BadRequest, DiskFullError
 from .state_manager import StateManager
 from .statsd import StatsClient
 from .table import Table
@@ -419,7 +419,12 @@ class RestoreCoordinator(threading.Thread):
             free_memory_percentage=self.free_memory_percentage,
         )
         try:
-            self.basebackup_restore_operation.restore_backup()
+            try:
+                self.basebackup_restore_operation.restore_backup()
+            except DiskFullError:
+                self.stats.increase("myhoard.disk_full_errors")
+                self.update_state(phase=self.Phase.failed)
+                raise
             duration = time.monotonic() - start_time
             self.log.info("Basebackup restored in %.2f seconds", duration)
             next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
