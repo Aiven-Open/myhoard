@@ -8,11 +8,9 @@ from . import (
     MySQLConfig,
     random_basic_string,
 )
-from contextlib import contextmanager
 from myhoard.controller import BackupSiteInfo, Controller
 from myhoard.util import atomic_create_file, change_master_to, mysql_cursor, wait_for_port
 from myhoard.web_server import WebServer
-from pathlib import Path
 from py.path import local as LocalPath
 from typing import Callable, Iterator, Optional
 
@@ -317,48 +315,6 @@ def fixture_empty_controller(
         yield controller, mysql_empty
     finally:
         controller.stop()
-
-
-@pytest.fixture(scope="function", name="empty_controller_in_small_disk")
-def fixture_empty_controller_in_small_disk(
-    session_tmpdir: Callable[[], LocalPath], mysql_empty: MySQLConfig, default_backup_site: BackupSiteInfo
-) -> Iterator[tuple[Controller, MySQLConfig]]:
-    sub_dir = Path(session_tmpdir().strpath) / "small_disk"
-    with mount_tmpfs(path=sub_dir, megabytes=8) as tmpfs_dir:
-        controller = build_controller(
-            Controller,
-            default_backup_site=default_backup_site,
-            mysql_config=mysql_empty,
-            session_tmpdir=lambda: LocalPath(tmpfs_dir),
-        )
-
-        yield controller, mysql_empty
-
-        controller.stop()
-
-
-@contextmanager
-def mount_tmpfs(path: Path, *, megabytes: int) -> Iterator[Path]:
-    """Mount a tmpfs filesystem at the given path and unmount it when done.
-
-    Args:
-        path: The path to mount the tmpfs filesystem at (will create a subdirectory there).
-        megabytes: The size of the tmpfs filesystem in megabytes.
-
-    Yields:
-        The path the tmpfs filesystem was mounted at.
-    """
-    sub_dir = path / random_basic_string(20, prefix="small_disk_")
-    try:
-        sub_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.check_call(["sudo", "mount", "-t", "tmpfs", "-o", f"size={megabytes}m", "tmpfs", str(sub_dir)])
-
-        yield sub_dir
-    finally:
-        # Delete all files in the tmpfs filesystem before unmounting it.
-        with contextlib.suppress(Exception):
-            LocalPath(sub_dir).remove(rec=1)
-            subprocess.check_call(["sudo", "umount", str(sub_dir)])
 
 
 @pytest.fixture(scope="function", name="myhoard_config")
