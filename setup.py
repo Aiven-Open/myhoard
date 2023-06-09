@@ -14,7 +14,7 @@ setup(
     name="myhoard",
     version=version_for_setup_py,
     zip_safe=False,
-    packages=find_packages(exclude=["test"]),
+    packages=find_packages(include=["myhoard"]),
     install_requires=[
         "cryptography",
         "PyMySQL",
