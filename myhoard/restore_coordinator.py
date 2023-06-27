@@ -466,6 +466,7 @@ class RestoreCoordinator(threading.Thread):
             cursor.execute("SET SESSION sql_require_primary_key = false")
             self.log.info("Disabling innodb strict mode during tables rebuild")
             cursor.execute("SET SESSION innodb_strict_mode = false")
+            cursor.execute("SET SESSION foreign_key_checks = 0")
             cursor.execute(
                 "SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_ROWS,AVG_ROW_LENGTH"
                 " FROM INFORMATION_SCHEMA.TABLES WHERE ENGINE='InnoDB'"
