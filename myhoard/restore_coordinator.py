@@ -502,10 +502,13 @@ class RestoreCoordinator(threading.Thread):
                         raise
                 except pymysql.err.OperationalError as e:
                     # ERROR 1148: The used command is not allowed with this MySQL version
-                    if e.args[0] == 1148:
-                        # This happens for some tables which are marked as using InnoDB but are actually not
-                        # normal tables (like mysql.innodb_index_stats and mysql.innodb_table_stats).
-                        # The known ones are already skipped but if we encounter more, we just skip them.
+                    # This happens for some tables which are marked as using InnoDB but are actually not
+                    # normal tables (like mysql.innodb_index_stats and mysql.innodb_table_stats).
+                    # The known ones are already skipped but if we encounter more, we just skip them.
+                    #
+                    # ERROR 1291: Column '<colname>' has duplicate value '<value' in ENUM
+                    # Seems like an issue with user-data when rebuilding tables.
+                    if e.args[0] in (1148, 1291):
                         self.log.error("Could not rebuild %s, error: %s, skipping it", escaped_table_designator, str(e))
                     else:
                         raise
