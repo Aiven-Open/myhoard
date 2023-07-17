@@ -493,10 +493,10 @@ class RestoreCoordinator(threading.Thread):
                 try:
                     cursor.execute(f"ALTER TABLE {escaped_table_designator} FORCE")
                 except pymysql.err.IntegrityError as e:
-                    # ERROR 1026: Duplicate entry
+                    # ERROR 1062: Duplicate entry
                     # This happens for tables that had temporary duplicate rows in different transactions, we can't rebuild
                     # those at the moment.
-                    if e.args[0] == 1026:
+                    if e.args[0] == 1062:
                         self.log.error("Could not rebuild %s, error: %s, skipping it", escaped_table_designator, str(e))
                     else:
                         raise
