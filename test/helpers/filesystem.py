@@ -1,7 +1,6 @@
 # Copyright (c) 2023 Aiven, Helsinki, Finland. https://aiven.io/
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
-from py.path import local as LocalPath
 from test import random_basic_string
 from typing import Iterator
 
@@ -26,7 +25,4 @@ def mount_tmpfs(path: Path, *, megabytes: int) -> Iterator[Path]:
 
         yield sub_dir
     finally:
-        # Delete all files in the tmpfs filesystem before unmounting it.
-        with suppress(Exception):
-            LocalPath(sub_dir).remove(rec=1)
-            subprocess.check_call(["sudo", "umount", str(sub_dir)])
+        subprocess.check_call(["sudo", "umount", str(sub_dir)])
