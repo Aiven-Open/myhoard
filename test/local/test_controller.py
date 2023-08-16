@@ -89,7 +89,7 @@ def do_restore(
     bs = backup_streams[0]
 
     # Restore backup into an empty database.
-    flow_tester = ControllerFlowTester(target_controller, caplog=caplog)
+    flow_tester = ControllerFlowTester(target_controller)
     target_controller.start()
 
     try:
@@ -98,15 +98,21 @@ def do_restore(
         target_controller.restore_backup(site=bs.site, stream_id=bs.stream_id)
 
         if fail_because_disk_full:
-            flow_tester.wait_for_disk_full_being_logged()
+            flow_tester.wait_for_restore_phase(RestoreCoordinator.Phase.failed)
+
+            # check if it failed due to full disk
+            assert caplog is not None, "caplog is required for checking full disk message."
+            assert any(
+                "DiskFullError('No space left on device. Cannot complete xbstream-extract!')" in record.message
+                for record in caplog.records
+            )
 
             # Check that we have backups, but none of them are broken.
             current_backups = sort_completed_backups(target_controller.state["backups"])
             assert current_backups
             assert all(b["broken_at"] is None for b in current_backups)
-            assert target_controller.restore_coordinator is not None
-            assert target_controller.restore_coordinator.phase is RestoreCoordinator.Phase.failed
+
         else:
-            flow_tester.wait_for_restore_complete()
+            flow_tester.wait_for_restore_phase(RestoreCoordinator.Phase.completed)
     finally:
         target_controller.stop()
