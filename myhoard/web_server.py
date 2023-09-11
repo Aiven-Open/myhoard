@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from aiohttp import web
 from aiohttp.web_response import json_response
+from datetime import datetime, timezone
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
@@ -77,6 +78,63 @@ class WebServer:
                 if self.controller.state["backups_fetched_at"]:
                     response["backups"] = self.controller.state["backups"]
                 return json_response(response)
+
+    async def backup_preserve(self, request):
+        with self._handle_request(name="backup_preserve"):
+            stream_id = request.match_info["stream_id"]
+            body = await self._get_request_json(request)
+            preserve_until = body.get("preserve_until")
+
+            if preserve_until is not None:
+                try:
+                    preserve_until = datetime.fromisoformat(preserve_until)
+                    if preserve_until.tzinfo != timezone.utc:
+                        raise BadRequest("`preserve_until` must be in UTC timezone.")
+
+                    now = datetime.now(timezone.utc)
+                    if preserve_until < now:
+                        raise BadRequest("`preserve_until` must be a date in the future.")
+                except ValueError:
+                    raise BadRequest("`preserve_until` must be a valid isoformat datetime string.")
+
+            self.controller.mark_backup_preservation(stream_id=stream_id, preserve_until=preserve_until)
+            wait_for_applied_preservation = body.get("wait_for_applied_preservation")
+            if wait_for_applied_preservation:
+                self.log.info(
+                    "Waiting up to %.1f seconds for preservation of backup %s to be applied.",
+                    wait_for_applied_preservation,
+                    stream_id,
+                )
+                start = time.monotonic()
+                while True:
+                    backup = self.controller.get_backup_by_stream_id(stream_id)
+                    # the backup was or will be removed before preservation could be applied
+                    if not backup or stream_id == self.controller.state["stream_to_be_purged"]:
+                        if preserve_until:
+                            return json_response({"success": False})
+                        # preservation was removed on time
+                        return json_response({"success": True})
+
+                    if (backup["preserve_until"] is None and preserve_until is None) or (
+                        backup["preserve_until"] == preserve_until.isoformat()
+                    ):
+                        self.log.info("Preservation for backup %s was applied.", stream_id)
+                        break
+
+                    elapsed = time.monotonic() - start
+                    if elapsed > wait_for_applied_preservation:
+                        self.log.info(
+                            "Preservation for backup %s was not applied up in %.1f seconds",
+                            stream_id,
+                            elapsed,
+                        )
+                        # waiting time was exceeded
+                        return json_response({"success": False, "preservation_is_still_pending": True})
+
+                    wait_time = min(wait_for_applied_preservation - elapsed, 0.1)
+                    await asyncio.sleep(wait_time)
+
+            return json_response({"success": True})
 
     async def replication_state_set(self, request):
         with self._handle_request(name="replication_state_set"):
@@ -201,6 +259,7 @@ class WebServer:
             [
                 web.get("/backup", self.backup_list),
                 web.post("/backup", self.backup_create),
+                web.put("/backup/{stream_id}/preserve", self.backup_preserve),
                 web.put("/replication_state", self.replication_state_set),
                 web.get("/status", self.status_show),
                 web.put("/status", self.status_update),

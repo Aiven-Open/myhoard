@@ -140,6 +140,7 @@ class BackupStream(threading.Thread):
         normalized_backup_time: Optional[str]
         pending_binlogs: List[BinlogInfo]
         prepare_details: Dict
+        preserved_info: Dict
         # Set of GTIDs that have been stored persistently to file storage.
         remote_gtid_executed: GtidExecuted
         remote_read_errors: int
@@ -238,6 +239,7 @@ class BackupStream(threading.Thread):
             "normalized_backup_time": normalized_backup_time,
             "pending_binlogs": list(binlogs) if binlogs else [],
             "prepare_details": {},
+            "preserved_info": {},
             # Set of GTIDs that have been stored persistently to file storage.
             "remote_gtid_executed": {},
             "remote_read_errors": 0,
@@ -442,6 +444,33 @@ class BackupStream(threading.Thread):
             },
         )
         self.wakeup_event.set()
+
+    def mark_preservation(self, preserve_until: Optional[datetime]) -> None:
+        if preserve_until:
+            self.log.info("Marking stream %s preservation to %s.", self.stream_id, preserve_until)
+        else:
+            self.log.info("Removing preservation for stream %s.", self.stream_id)
+
+        preserved_info = {
+            "preserve_until": preserve_until.isoformat() if preserve_until else None,
+            "server_id": self.server_id,
+        }
+
+        try:
+            key = self._build_full_name("preserved.json")
+            data = json.dumps(preserved_info)
+            metadata = make_fs_metadata(preserved_info)
+
+            file_storage = self.file_storage_setup_fn()
+            file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
+            self.state_manager.update_state(preserved_info=preserved_info)
+        except Exception as ex:  # pylint: disable=broad-except
+            self.log.exception("Failed to update basebackup preservation")
+            self.stats.unexpected_exception(ex=ex, where="BackupStream._update_basebackup_preservation")
+            self.state_manager.update_state(remote_write_errors=self.state["remote_write_errors"] + 1)
+            self.stats.increase("myhoard.remote_write_errors")
+            # raise exception since update on preservation did not succeed
+            raise
 
     def _handle_pending_mark_as_closed(self) -> None:
         assert self.file_storage is not None

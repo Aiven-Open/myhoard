@@ -783,7 +783,7 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
         def extend_binlog_stream_list(self):
             self._extend_binlog_stream_list()
 
-        def _refresh_backups_list(self):
+        def _refresh_backups_list(self, force_refresh: bool = False):
             self.state["backups"] = backups()
 
     name = "dummyserver"
@@ -1505,6 +1505,116 @@ def test_changed_backup_hour_is_applied(time_machine, master_controller) -> None
     while_asserts(lambda: streaming_binlogs(m_controller, 3), timeout=10)
 
 
+def test_mark_backup_preservation(
+    time_machine,
+    master_controller,
+) -> None:
+    m_controller, _ = master_controller
+
+    # just hold 3 backups at most
+    m_controller.backup_settings["backup_count_max"] = 2
+    m_controller.backup_settings["backup_count_min"] = 1
+
+    # drop every backup older than 2 days
+    m_controller.backup_settings["backup_age_days_max"] = 2
+
+    m_controller.switch_to_active_mode()
+
+    def wait_for_scheduled_backup(backup_num):
+        completed_backups = [backup for backup in m_controller.state["backups"] if backup["completed_at"] is not None]
+        assert len(completed_backups) == backup_num
+
+    def backup_has_preservation(stream_id):
+        for backup in m_controller.state["backups"]:
+            if backup["stream_id"] == stream_id:
+                assert backup["preserve_until"] is not None
+                break
+        else:
+            assert False, f"Backup with stream id {stream_id} not found."
+
+    current_date = datetime.datetime(2023, 9, 6)
+    time_machine.move_to(current_date)
+    m_controller.start()
+
+    # wait for first backup to be created
+    while_asserts(lambda: wait_for_scheduled_backup(1), timeout=20)
+    first_stream_id = m_controller.state["backups"][0]["stream_id"]
+
+    # wait for second backup and preserve it
+    current_date += datetime.timedelta(days=1)
+    time_machine.move_to(current_date)
+    while_asserts(lambda: wait_for_scheduled_backup(2), timeout=20)
+
+    stream_id_to_preserve = [
+        backup["stream_id"] for backup in m_controller.state["backups"] if backup["stream_id"] != first_stream_id
+    ][0]
+    preserved_until = datetime.datetime(2023, 9, 15, tzinfo=datetime.timezone.utc)
+    m_controller.mark_backup_preservation(
+        stream_id=stream_id_to_preserve,
+        preserve_until=preserved_until,
+    )
+    while_asserts(lambda: backup_has_preservation(stream_id_to_preserve))
+
+    # wait for third backup and wait for first backup to be removed
+    current_date += datetime.timedelta(days=1)
+    time_machine.move_to(current_date)
+    while_asserts(lambda: wait_for_scheduled_backup(2), timeout=20)
+
+    # check that the first backup was deleted (due to max backup count was reached and backup is old enough)
+    wait_for_condition(
+        lambda: not any(backup for backup in m_controller.state["backups"] if backup["stream_id"] == first_stream_id)
+    )
+
+    # generate 2 new backups, we should exceed maximum backup count
+    current_date += datetime.timedelta(days=1)
+    time_machine.move_to(current_date)
+    while_asserts(lambda: wait_for_scheduled_backup(3), timeout=20)
+
+    current_date += datetime.timedelta(days=1)
+    time_machine.move_to(current_date)
+    while_asserts(lambda: wait_for_scheduled_backup(4), timeout=20)
+
+    # now exceed preservation date and extra backups should be purged as well (max age exceeded)
+    time_machine.move_to(preserved_until + datetime.timedelta(minutes=10))
+    while_asserts(lambda: wait_for_scheduled_backup(2), timeout=20)
+
+
+def test_unmark_backup_preservation(
+    time_machine,
+    master_controller,
+) -> None:
+    m_controller, _ = master_controller
+
+    # just hold 1 backup at most
+    m_controller.backup_settings["backup_count_max"] = 1
+    m_controller.backup_settings["backup_count_min"] = 1
+    m_controller.backup_settings["backup_age_days_max"] = 1
+
+    m_controller.switch_to_active_mode()
+    time_machine.move_to(datetime.datetime(2023, 9, 6))
+    m_controller.start()
+
+    wait_for_condition(
+        lambda: len([backup for backup in m_controller.state["backups"] if backup["completed_at"] is not None]), timeout=20
+    )
+
+    # preserve the backup
+    preserve_until = datetime.datetime(2023, 9, 10)
+    stream_id_to_preserve = m_controller.state["backups"][0]["stream_id"]
+    m_controller.mark_backup_preservation(stream_id=stream_id_to_preserve, preserve_until=preserve_until)
+    wait_for_condition(lambda: m_controller.state["backups"][0]["preserve_until"] is not None, timeout=10)
+
+    time_machine.move_to(datetime.datetime(2023, 9, 7))
+    wait_for_condition(lambda: len(m_controller.state["backups"]) == 2, timeout=20)
+
+    time_machine.move_to(datetime.datetime(2023, 9, 8))
+    wait_for_condition(lambda: len(m_controller.state["backups"]) == 3, timeout=20)
+
+    time_machine.move_to(datetime.datetime(2023, 9, 9))
+    m_controller.mark_backup_preservation(stream_id=stream_id_to_preserve, preserve_until=None)
+    wait_for_condition(lambda: len(m_controller.state["backups"]) == 1, timeout=30)
+
+
 @patch.object(RestoreCoordinator, "MAX_BASEBACKUP_ERRORS", 2)
 @patch.object(BasebackupRestoreOperation, "restore_backup", side_effect=Exception("failed restoring basebackup"))
 def test_backup_marked_as_broken_after_failed_restoration(
@@ -1707,6 +1817,7 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
                 "closed_at": now - 3 * 60,
                 "completed_at": now - 5 * 60,
                 "broken_at": None,
+                "preserve_until": None,
                 "recovery_site": False,
                 "stream_id": stream_id,
                 "resumable": True,

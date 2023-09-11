@@ -6,6 +6,7 @@ from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.web_server import WebServer
 
+import datetime
 import pytest
 import uuid
 
@@ -76,6 +77,7 @@ async def test_backup_list(master_controller, web_client):
             "broken_at",
             "closed_at",
             "completed_at",
+            "preserve_until",
             "recovery_site",
             "resumable",
             "site",
@@ -171,6 +173,43 @@ async def test_status_update_to_restore(master_controller, web_client):
     await put_and_verify_json_body(web_client, "/status", {"mode": "restore", "site": "default", "stream_id": "abc"})
     master_controller[0].start()
     await awhile_asserts(restore_status_returned, timeout=2)
+
+
+async def test_backup_preserve_wrong_stream_id(web_client) -> None:
+    preserve_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+    response = await put_and_verify_json_body(
+        web_client,
+        "/backup/1234/preserve",
+        {"preserve_until": preserve_until.isoformat()},
+        expected_status=500,
+    )
+    assert response["message"] == "Stream 1234 was not found in completed backups."
+
+
+async def test_backup_preserve_wrong_preserve_until(web_client) -> None:
+    response = await put_and_verify_json_body(
+        web_client,
+        "/backup/1234/preserve",
+        {"preserve_until": "invalid_value"},
+        expected_status=400,
+    )
+    assert response["message"] == "`preserve_until` must be a valid isoformat datetime string."
+
+    response = await put_and_verify_json_body(
+        web_client,
+        "/backup/1234/preserve",
+        {"preserve_until": "2023-09-01T00:00:00"},
+        expected_status=400,
+    )
+    assert response["message"] == "`preserve_until` must be in UTC timezone."
+
+    response = await put_and_verify_json_body(
+        web_client,
+        "/backup/1234/preserve",
+        {"preserve_until": "2023-09-01T00:00:00+00:00"},
+        expected_status=400,
+    )
+    assert response["message"] == "`preserve_until` must be a date in the future."
 
 
 async def get_and_verify_json_body(client, path, *, expected_status=200):
