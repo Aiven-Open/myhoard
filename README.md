@@ -422,6 +422,20 @@ recommended not to use `/tmp` for this because that is an in-memory file
 system on many distributions and the exact space requirements for this
 directory are not well defined.
 
+**xtrabackup.copy_threads**
+
+Number of worker threads created by XtraBackup for parallel copying data files when taking a backup. The default value is ``1``.
+
+Note: It is recommended to use more threads for copying than to compress or encrypt.
+
+**xtrabackup.compress_threads**
+
+Number of worker threads created by XtraBackup for parallel compression when taking a backup.  The default value is ``1``.
+
+**xtrabackup.encrypt_threads**
+
+Number of worker threads created by XtraBackup for parallel encryption when taking a backup. The default value is ``1``.
+
 # HTTP API
 
 MyHoard provides an HTTP API for managing the service. The various entry points

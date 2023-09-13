@@ -65,5 +65,10 @@
         "sudo", "/usr/bin/myhoard_mysql_env_update", "--", "/etc/systemd/system/mysqld.environment", "MYSQLD_OPTS"
     ],
     "systemd_service": "mysql-server",
-    "temporary_directory": "/var/tmp/sample_temp_dir"
+    "temporary_directory": "/var/tmp/sample_temp_dir",
+    "xtrabackup": {
+        "copy_threads": 1,
+        "compress_threads": 1,
+        "encrypt_threads": 1
+    }
 }

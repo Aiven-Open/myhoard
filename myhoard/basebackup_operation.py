@@ -47,6 +47,9 @@ class BasebackupOperation:
     def __init__(
         self,
         *,
+        copy_threads=1,
+        compress_threads=1,
+        encrypt_threads=1,
         encryption_algorithm,
         encryption_key,
         mysql_client_params,
@@ -60,10 +63,13 @@ class BasebackupOperation:
     ):
         self.abort_reason = None
         self.binlog_info = None
+        self.copy_threads = copy_threads
+        self.compress_threads = compress_threads
         self.current_file = None
         self.data_directory_filtered_size = None
         self.data_directory_size_end: Optional[int] = None
         self.data_directory_size_start: Optional[int] = None
+        self.encrypt_threads = encrypt_threads
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
         self.log = logging.getLogger(self.__class__.__name__)
@@ -119,11 +125,14 @@ class BasebackupOperation:
                     f"--defaults-file={mysql_config_file.name}",
                     "--backup",
                     "--compress",
+                    f"--compress-threads={self.compress_threads}",
                     "--encrypt",
                     self.encryption_algorithm,
+                    f"--encrypt-threads={self.encrypt_threads}",
                     "--encrypt-key-file",
                     encryption_key_file.name,
                     "--no-version-check",
+                    f"--parallel={self.copy_threads}",
                     "--stream",
                     "xbstream",
                     "--target-dir",
