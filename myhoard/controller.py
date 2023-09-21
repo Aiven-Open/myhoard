@@ -1425,6 +1425,11 @@ class Controller(threading.Thread):
         self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
+    def _stream_for_backup_initiated_by_old_master(self, stream: BackupStream) -> bool:
+        """If we are master, then any observe streams that we see are assumed to be
+        for backups initiated by an old master while the current node was getting promoted."""
+        return self.mode == self.Mode.active and stream.mode == BackupStream.Mode.observe
+
     def _refresh_backups_list_and_streams(self):
         basebackup_streams = {
             stream.stream_id: stream
@@ -1460,7 +1465,9 @@ class Controller(threading.Thread):
                             owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != stream_id]
                             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
                     stream.join()
-                elif stream.mode != BackupStream.Mode.observe or not stream.state["closed_info"]:
+                elif stream.mode != BackupStream.Mode.observe or (
+                    not stream.state["closed_info"] and not self._stream_for_backup_initiated_by_old_master(stream=stream)
+                ):
                     new_streams[stream_id] = stream
             elif backup["resumable"] and not backup["closed_at"]:
                 self.log.info("Starting resumable non-closed stream %r", stream_id)
@@ -1816,6 +1823,17 @@ class Controller(threading.Thread):
             streaming_binlogs = sorted(streaming_binlogs, key=lambda s: s.created_at)
             for stream in streaming_binlogs[:-1]:
                 self.log.info("Multiple streams in completed state, marking %r as closed", stream.stream_id)
+                stream.mark_as_closed()
+                expected_closed.append(stream)
+
+        # If we are master, then any observe streams that we see are assumed to be for backups initiated
+        # by an old master while the current node was getting promoted, so we mark them as closed.
+        if self.mode == self.Mode.active:
+            observe_streams = [stream for stream in self.backup_streams if stream.mode == BackupStream.Mode.observe]
+            for stream in observe_streams:
+                self.log.warning(
+                    "Stream %r is for a backup initiated by an old master, marking it as closed", stream.stream_id
+                )
                 stream.mark_as_closed()
                 expected_closed.append(stream)
 
