@@ -9,6 +9,10 @@ class XtraBackupError(Exception):
     """Raised when the backup operation fails."""
 
 
+class BlockMismatchError(XtraBackupError):
+    """Raised when XtraBackup fails due to log block mismatch"""
+
+
 class UnknownBackupSite(Exception):
     """Referenced backup site not in configuration."""
 
