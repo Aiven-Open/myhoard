@@ -1422,7 +1422,9 @@ class Controller(threading.Thread):
         for backup in self.state["backups"]:
             if backup["stream_id"] not in new_backups_ids:
                 self._delete_backup_stream_state(backup["stream_id"])
-        self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
+
+        with self.lock:
+            self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
     def _refresh_backups_list_and_streams(self):
