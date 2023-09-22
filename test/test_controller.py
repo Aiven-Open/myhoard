@@ -253,6 +253,82 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
             new_master_controller.stop()
 
 
+def test_promoted_node_does_not_resume_streams_for_backups_initiated_by_old_master(
+    master_controller,
+    mysql_empty,
+    standby1_controller,
+):
+    """Create a master and one standby, simulate a case where the old master can still complete a backup
+    after the promotion process of the standby was triggered, and ensure that the new master does not
+    resume streams for the backups that got initiated by the old master after promotion."""
+    m_controller, master = master_controller
+    s1_controller, standby1 = standby1_controller
+
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
+    data_generator = DataGenerator(connect_info=master.connect_options, make_temp_tables=False)
+
+    try:
+        data_generator.start()
+
+        m_controller.switch_to_active_mode()
+        m_controller.start()
+
+        s1_controller.switch_to_observe_mode()
+        s1_controller.start()
+
+        def streaming_binlogs():
+            assert m_controller.backup_streams
+            assert all(stream.active_phase == BackupStream.ActivePhase.binlog for stream in m_controller.backup_streams)
+
+        while_asserts(streaming_binlogs, timeout=10)
+
+        m_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+
+        def all_backups_completed(controller, expected_bkps):
+            backups = controller.state["backups"]
+            assert len(backups) == expected_bkps
+            assert all(backup["completed_at"] is not None for backup in backups)
+
+        while_asserts(lambda: all_backups_completed(controller=m_controller, expected_bkps=2), timeout=30)
+
+        # Simulate a case where the old/leaving master creates a new
+        # backup after the promotion process of the standby was triggered.
+        with mysql_cursor(**standby1.connect_options) as cursor:
+            cursor.execute("STOP SLAVE IO_THREAD")
+        s1_controller.switch_to_active_mode()
+
+        m_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+        s1_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+
+        while_asserts(lambda: all_backups_completed(controller=m_controller, expected_bkps=4), timeout=30)
+        while_asserts(lambda: all_backups_completed(controller=s1_controller, expected_bkps=4), timeout=30)
+
+        # Wait for both master nodes to see the observe stream for the backup initiated by the other master.
+        def all_streams_are_visible(controller, expected_streams):
+            assert len(controller.backup_streams) == expected_streams
+
+        while_asserts(lambda: all_streams_are_visible(controller=m_controller, expected_streams=2), timeout=30)
+        while_asserts(lambda: all_streams_are_visible(controller=s1_controller, expected_streams=2), timeout=30)
+
+        # Wait for both master nodes to close the observe stream for the backup initiated by the other master.
+        def all_streams_are_closed(controller):
+            # When all observe streams are closed, we expect to be left
+            # with only one non-closed stream, which is the one the node owns.
+            non_closed_streams = [
+                stream.stream_id for stream in controller.backup_streams if not stream.state["closed_info"]
+            ]
+            assert len(non_closed_streams) == 1
+            assert non_closed_streams == controller.state["owned_stream_ids"]
+            assert len(controller.backup_streams) == 1
+
+        while_asserts(lambda: all_streams_are_closed(controller=m_controller), timeout=30)
+        while_asserts(lambda: all_streams_are_closed(controller=s1_controller), timeout=30)
+    finally:
+        data_generator.stop()
+        m_controller.stop()
+        s1_controller.stop()
+
+
 def create_fake_state_files(controller: Controller) -> List[str]:
     # pylint: disable=protected-access
     state_file_name = controller._state_file_from_stream_id("1234")
