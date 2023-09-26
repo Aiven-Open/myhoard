@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
 from distutils.version import LooseVersion  # pylint:disable=deprecated-module
-from myhoard.errors import XtraBackupError
+from myhoard.errors import BlockMismatchError, XtraBackupError
 from myhoard.util import get_mysql_version, mysql_cursor
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
 from typing import Optional
@@ -72,6 +72,7 @@ class BasebackupOperation:
         self.encrypt_threads = encrypt_threads
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
+        self.has_block_mismatch = False
         self.log = logging.getLogger(self.__class__.__name__)
         self.lsn_dir = None
         self.lsn_info = None
@@ -288,6 +289,8 @@ class BasebackupOperation:
 
         if exit_code != 0:
             self.log.error("xtrabackup exited with non-zero exit code %s: %r", exit_code, pending_output)
+            if self.has_block_mismatch:
+                raise BlockMismatchError(f"xtrabackup failed with code {exit_code} due log block mismatch.")
             raise XtraBackupError(f"xtrabackup failed with code {exit_code}")
 
         # Reader thread might have encountered an exception after xtrabackup exited if it hadn't
@@ -311,6 +314,9 @@ class BasebackupOperation:
             and not self._process_output_line_lsn_info(line)
         ):
             if any(key in line for key in ["[ERROR]", " Failed ", " failed ", " Invalid "]):
+                if "log block numbers mismatch" in line or "expected log block no" in line:
+                    self.has_block_mismatch = True
+
                 self.log.error("xtrabackup: %r", line)
             else:
                 self.log.info("xtrabackup: %r", line)

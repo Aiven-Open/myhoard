@@ -2,7 +2,7 @@
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
 from .binlog_scanner import BinlogInfo
-from .errors import XtraBackupError
+from .errors import BlockMismatchError, XtraBackupError
 from .state_manager import StateManager
 from .util import (
     add_gtid_ranges_to_executed_set,
@@ -67,6 +67,12 @@ class PromotionInfo(TypedDict):
     promoted_at: float
     server_id: int
     start_index: int
+
+
+class BaseBackupFailureReason(str, enum.Enum):
+    network_error = "network_error"
+    block_mismatch_error = "block_mismatch_error"
+    xtrabackup_error = "xtrabackup_error"
 
 
 class BackupStream(threading.Thread):
@@ -1021,13 +1027,25 @@ class BackupStream(threading.Thread):
         ) as ex:
             self.log.exception("Network error while taking basebackup")
             self.state_manager.increment_counter(name="basebackup_errors")
-            self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__, "reason": "network_error"})
+            self.stats.increase(
+                "myhoard.basebackup.errors",
+                tags={"ex": ex.__class__.__name__, "reason": BaseBackupFailureReason.network_error},
+            )
             self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
-            self.stats.increase("myhoard.basebackup.errors", tags={"ex": ex.__class__.__name__})
+
+            tags = {"ex": ex.__class__.__name__}
+            # explicitly tag block mismatch errors, this way we can relate high redo log activity to xtrabackup errors
+            if isinstance(ex, BlockMismatchError):
+                tags["reason"] = BaseBackupFailureReason.block_mismatch_error
+            elif isinstance(ex, XtraBackupError):
+                tags["reason"] = BaseBackupFailureReason.xtrabackup_error
+
+            self.stats.increase("myhoard.basebackup.errors", tags=tags)
             self.state_manager.increment_counter(name="basebackup_errors")
             self.last_basebackup_attempt = time.monotonic()
+
             # If this is not a remote failure error (i.e. any type of error arising from programming
             # issues in Python then we want to log this as an unexpected exception so it'll dispatch
             # to metrics and Sentry etc.
