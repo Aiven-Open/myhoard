@@ -2,9 +2,9 @@
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
-from myhoard.controller import BackupSiteInfo, Controller
+from myhoard.controller import Controller
 from rohmu.object_storage.local import LocalTransfer
-from typing import cast, Dict
+from typing import cast, Tuple, Type
 
 import json
 import myhoard.util as myhoard_util
@@ -14,19 +14,30 @@ import pytest
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
-def test_backup_stream(session_tmpdir, mysql_master):
-    _run_backup_stream_test(session_tmpdir, mysql_master, BackupStream)
+def test_backup_stream(
+    session_tmpdir,
+    master_controller: Tuple[Controller, MySQLConfig],
+):
+    _run_backup_stream_test(session_tmpdir, master_controller, BackupStream)
 
 
-def test_backup_stream_with_s3_emulation(session_tmpdir, mysql_master):
+def test_backup_stream_with_s3_emulation(
+    session_tmpdir,
+    master_controller: Tuple[Controller, MySQLConfig],
+):
     class PatchedBackupStream(BackupStream):
         def _should_list_with_metadata(self, *, next_index):  # pylint: disable=unused-argument
             return False
 
-    _run_backup_stream_test(session_tmpdir, mysql_master, PatchedBackupStream)
+    _run_backup_stream_test(session_tmpdir, master_controller, PatchedBackupStream)
 
 
-def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_stream_class):
+def _run_backup_stream_test(
+    session_tmpdir,
+    master_controller: Tuple[Controller, MySQLConfig],
+    backup_stream_class: Type[BackupStream],
+):
+    controller, mysql_master = master_controller
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
         cursor.execute("USE db1")
@@ -36,11 +47,16 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
     BackupStream.ITERATION_SLEEP = 0.1
     BackupStream.REMOTE_POLL_INTERVAL = 0.1
 
-    backup_target_location = session_tmpdir().strpath
+    backup_target_location = controller.backup_sites["default"]["object_storage"]["directory"]
     state_dir = session_tmpdir().strpath
     state_file = os.path.join(state_dir, "backup_stream.json")
     remote_binlogs_state_file = os.path.join(state_dir, "backup_stream.remote_binlogs")
     private_key_pem, public_key_pem = generate_rsa_key_pair()  # pylint: disable=unused-variable
+
+    # mypy: help
+    assert mysql_master.server_id is not None
+    assert mysql_master.base_dir is not None
+
     bs = backup_stream_class(
         backup_reason=BackupStream.BackupReason.requested,
         compression={
@@ -132,19 +148,9 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         with open(state_file) as f:
             assert bs.state == json.load(f)
 
-        backup_sites: Dict[str, BackupSiteInfo] = {
-            "default": {
-                "recovery_only": False,
-                "encryption_keys": {},
-                "object_storage": {
-                    "directory": backup_target_location,
-                    "storage_type": "local",
-                },
-            }
-        }
-        backups = Controller.get_backup_list(backup_sites)
+        backups = controller.get_backups()
         assert len(backups) == 1
-        backup = backups[0]
+        backup = list(backups.values())[0]
         assert not backup["closed_at"]
         assert backup["completed_at"]
         assert backup["stream_id"]

@@ -58,8 +58,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         def master_streaming_binlogs():
             assert mcontroller.backup_streams
             assert mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
-            complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
-            assert complete_backups
+            assert _get_completed_backups(mcontroller)
 
         while_asserts(master_streaming_binlogs, timeout=15)
 
@@ -80,7 +79,7 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
         new_master_controller.start()
 
         wait_for_condition(lambda: new_master_controller.state["backups_fetched_at"] != 0, timeout=2)
-        backup = new_master_controller.state["backups"][0]
+        backup = list(new_master_controller.state["backups"].values())[0]
         new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
         def restoration_is_complete():
@@ -165,8 +164,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         def master_streaming_binlogs():
             assert mcontroller.backup_streams
             assert mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
-            complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
-            assert complete_backups
+            assert _get_completed_backups(mcontroller)
 
         while_asserts(master_streaming_binlogs, timeout=15)
 
@@ -218,7 +216,7 @@ def test_force_promote(default_backup_site, master_controller, mysql_empty, sess
         new_master_controller.start()
 
         wait_for_condition(lambda: new_master_controller.state["backups_fetched_at"] != 0, timeout=2)
-        backup = new_master_controller.state["backups"][0]
+        backup = list(new_master_controller.state["backups"].values())[0]
         new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
         def applying_binlogs():
@@ -287,7 +285,7 @@ def test_promoted_node_does_not_resume_streams_for_backups_initiated_by_old_mast
         def all_backups_completed(controller, expected_bkps):
             backups = controller.state["backups"]
             assert len(backups) == expected_bkps
-            assert all(backup["completed_at"] is not None for backup in backups)
+            assert len(_get_completed_backups(controller)) == expected_bkps
 
         while_asserts(lambda: all_backups_completed(controller=m_controller, expected_bkps=2), timeout=30)
 
@@ -349,17 +347,18 @@ def test_backup_state_from_removed_backup_is_removed(default_backup_site, mysql_
         session_tmpdir=session_tmpdir,
     )
     fake_file_names = create_fake_state_files(controller)
-    controller.state["backups"] = [
-        {
-            "basebackup_info": {"end_ts": 0.0},
-            "closed_at": None,
-            "completed_at": None,
-            "recovery_site": False,
-            "stream_id": "1234",
-            "resumable": False,
-            "site": "default",
-        }
-    ]
+    controller.state["backups"] = {
+        "1234": Backup(
+            basebackup_info={"end_ts": 0.0},
+            closed_at=None,
+            completed_at=None,
+            recovery_site=False,
+            stream_id="1234",
+            resumable=False,
+            site="default",
+            broken_at=None,
+        )
+    }
     controller._refresh_backups_list()  # pylint: disable=protected-access
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
@@ -373,8 +372,8 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
         session_tmpdir=session_tmpdir,
     )
     fake_file_names = create_fake_state_files(controller)
-    controller.state["backups"] = [
-        Backup(
+    controller.state["backups"] = {
+        "1234": Backup(
             basebackup_info=BaseBackup(end_ts=0.0),
             closed_at=None,
             completed_at=None,
@@ -382,8 +381,9 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
             stream_id="1234",
             resumable=False,
             site="not_default_site",
+            broken_at=None,
         )
-    ]
+    }
     controller._refresh_backups_list()  # pylint: disable=protected-access
     for file_name in fake_file_names:
         assert not os.path.exists(file_name)
@@ -459,7 +459,7 @@ def test_3_node_service_failover_and_restore(
             assert s1controller.backup_streams
             assert s2controller.backup_streams
             assert mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
-            complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
+            complete_backups = _get_completed_backups(mcontroller)
             assert len(complete_backups) == backup_count
 
         while_asserts(lambda: streams_available_master_streaming_binlogs(1), timeout=30)
@@ -540,7 +540,7 @@ def test_3_node_service_failover_and_restore(
 
                 s3controller = [build_and_initialize_controller()]
                 wait_for_condition(lambda: s3controller[0].state["backups_fetched_at"] != 0, timeout=2)
-                backup = s3controller[0].state["backups"][0]
+                backup = list(s3controller[0].state["backups"].values())[0]
                 s3controller[0].restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
                 master_options = {
@@ -744,7 +744,7 @@ def test_empty_server_backup_and_restore(
         s3controller.backup_settings["backup_minute"] = (s3controller.backup_settings["backup_minute"] + 1) % 60
         s3controller.start()
         wait_for_condition(lambda: s3controller.state["backups_fetched_at"] != 0, timeout=2)
-        backup = s3controller.state["backups"][0]
+        backup = list(s3controller.state["backups"].values())[0]
         s3controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
         wait_for_condition(
@@ -816,26 +816,28 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
 
     # Can add backups but backup being restored is not the last one, does not try to look up new backups
     rc.can_add_binlog_streams.return_value = True
-    controller.state["backups"] = [
-        {
-            "completed_at": 2.0,
-            "site": "a",
-            "stream_id": "2",
-            "basebackup_info": {"end_ts": 1.0},
-            "closed_at": 1.0,
-            "recovery_site": False,
-            "resumable": True,
-        },
-        {
-            "completed_at": 1.0,
-            "site": "a",
-            "stream_id": "1",
-            "basebackup_info": {"end_ts": 1.0},
-            "closed_at": 1.0,
-            "recovery_site": False,
-            "resumable": True,
-        },
-    ]
+    controller.state["backups"] = {
+        "2": Backup(
+            completed_at=2.0,
+            site="a",
+            stream_id="2",
+            basebackup_info={"end_ts": 1.0},
+            closed_at=1.0,
+            recovery_site=False,
+            resumable=True,
+            broken_at=None,
+        ),
+        "1": Backup(
+            completed_at=1.0,
+            site="a",
+            stream_id="1",
+            basebackup_info={"end_ts": 1.0},
+            closed_at=1.0,
+            recovery_site=False,
+            resumable=True,
+            broken_at=None,
+        ),
+    }
     rc.binlog_streams = [
         {"site": "a", "stream_id": "1"},
     ]
@@ -847,21 +849,21 @@ def test_extend_binlog_stream_list(default_backup_site, session_tmpdir):
         {"site": "a", "stream_id": "2"},
     ]
     rc.stream_id = "2"
-    backups.return_value = [
-        {"completed_at": 3.0, "site": "a", "stream_id": "2"},
-        {"completed_at": 2.0, "site": "a", "stream_id": "1"},
-        {"completed_at": 1.0, "site": "a", "stream_id": "0"},
-    ]
+    backups.return_value = {
+        "2": {"completed_at": 3.0, "site": "a", "stream_id": "2"},
+        "1": {"completed_at": 2.0, "site": "a", "stream_id": "1"},
+        "0": {"completed_at": 1.0, "site": "a", "stream_id": "0"},
+    }
     controller.extend_binlog_stream_list()
     backups.assert_called()
     rc.add_new_binlog_streams.assert_not_called()
 
     # Can add backups and restoring last backup, new backup is found and added to list of binlog streams to restore
-    backups.return_value = [
-        {"completed_at": 3.0, "site": "a", "stream_id": "3"},
-        {"completed_at": 2.0, "site": "a", "stream_id": "2"},
-        {"completed_at": 1.0, "site": "a", "stream_id": "1"},
-    ]
+    backups.return_value = {
+        "3": {"completed_at": 3.0, "site": "a", "stream_id": "3"},
+        "2": {"completed_at": 2.0, "site": "a", "stream_id": "2"},
+        "1": {"completed_at": 1.0, "site": "a", "stream_id": "1"},
+    }
     rc.add_new_binlog_streams.return_value = True
     controller.state["restore_options"] = {"binlog_streams": rc.binlog_streams, "foo": "abc"}
     controller.extend_binlog_stream_list()
@@ -904,9 +906,8 @@ def test_multiple_backup_management(master_controller):
     start_time = time.monotonic()
     while time.monotonic() - start_time < 35:
         maybe_flush_binlog()
-        for backup in mcontroller.state["backups"]:
-            seen_backups.add(backup["stream_id"])
-        completed_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
+        seen_backups |= set(mcontroller.state["backups"].keys())
+        completed_backups = _get_completed_backups(mcontroller)
         if len(completed_backups) > highest_backup_count:
             highest_backup_count = len(completed_backups)
         if highest_backup_count >= 3:
@@ -941,7 +942,7 @@ def test_manual_backup_creation(master_controller):
     seen_backups: Set[str] = set()
     # Create up to 10 backups so that we have enough to verify deleting backups when max count is exceeded works
     while time.monotonic() - start_time < 60 and len(seen_backups) < 10:
-        current_backups = set(backup["stream_id"] for backup in mcontroller.state["backups"] if backup["completed_at"])
+        current_backups = set(_get_completed_backups(mcontroller).keys())
         if current_backups - seen_backups:
             mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
             seen_backups.update(current_backups)
@@ -949,7 +950,7 @@ def test_manual_backup_creation(master_controller):
 
     assert len(seen_backups) >= 10
     time.sleep(0.1)
-    current_backups = set(backup["stream_id"] for backup in mcontroller.state["backups"] if backup["completed_at"])
+    current_backups = set(_get_completed_backups(mcontroller).keys())
     assert len(current_backups) == 5
 
 
@@ -1082,7 +1083,7 @@ def test_new_binlog_stream_while_restoring(
         s3controller.stats.timing_manager = timing_manager
         s3controller.start()
         wait_for_condition(lambda: s3controller.state["backups_fetched_at"] != 0, timeout=2)
-        backup = s3controller.state["backups"][0]
+        backup = list(s3controller.state["backups"].values())[0]
         # Start restoring the only backup we have at the moment
         s3controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
@@ -1192,7 +1193,7 @@ def test_binlog_auto_rotation(master_controller):
     # Wait for the upload to finish
     def has_multiple_backups():
         assert len(mcontroller.state["backups"]) == 2
-        assert all(backup["completed_at"] for backup in mcontroller.state["backups"])
+        assert len(_get_completed_backups(mcontroller)) == 2
         assert len(mcontroller.backup_streams) == 1
 
     while_asserts(has_multiple_backups, timeout=15)
@@ -1386,7 +1387,7 @@ def test_periodic_backup_based_on_exceeded_intervals(time_machine, master_contro
         assert controller.backup_streams
         assert controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
 
-        complete_backups = [backup for backup in controller.state["backups"] if backup["completed_at"]]
+        complete_backups = _get_completed_backups(controller)
         assert len(complete_backups) == expected_completed_backups
 
     def flush_binlogs():
@@ -1455,7 +1456,7 @@ def test_changed_backup_hour_is_applied(time_machine, master_controller) -> None
         assert controller.backup_streams
         assert controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
 
-        complete_backups = [backup for backup in controller.state["backups"] if backup["completed_at"]]
+        complete_backups = _get_completed_backups(controller)
         assert len(complete_backups) == expected_completed_backups
 
     def flush_binlogs():
@@ -1521,16 +1522,12 @@ def test_mark_backup_preservation(
     m_controller.switch_to_active_mode()
 
     def wait_for_scheduled_backup(backup_num):
-        completed_backups = [backup for backup in m_controller.state["backups"] if backup["completed_at"] is not None]
-        assert len(completed_backups) == backup_num
+        assert len(_get_completed_backups(m_controller)) == backup_num
 
     def backup_has_preservation(stream_id):
-        for backup in m_controller.state["backups"]:
-            if backup["stream_id"] == stream_id:
-                assert backup["preserve_until"] is not None
-                break
-        else:
-            assert False, f"Backup with stream id {stream_id} not found."
+        backup = m_controller.state["backups"].get(stream_id)
+        assert backup is not None, f"Backup with stream id {stream_id} not found."
+        assert backup["preserve_until"] is not None
 
     current_date = datetime.datetime(2023, 9, 6)
     time_machine.move_to(current_date)
@@ -1538,16 +1535,14 @@ def test_mark_backup_preservation(
 
     # wait for first backup to be created
     while_asserts(lambda: wait_for_scheduled_backup(1), timeout=20)
-    first_stream_id = m_controller.state["backups"][0]["stream_id"]
+    first_stream_id = list(m_controller.state["backups"].keys())[0]
 
     # wait for second backup and preserve it
     current_date += datetime.timedelta(days=1)
     time_machine.move_to(current_date)
     while_asserts(lambda: wait_for_scheduled_backup(2), timeout=20)
 
-    stream_id_to_preserve = [
-        backup["stream_id"] for backup in m_controller.state["backups"] if backup["stream_id"] != first_stream_id
-    ][0]
+    stream_id_to_preserve = list(set(m_controller.state["backups"]) - {first_stream_id})[0]
     preserved_until = datetime.datetime(2023, 9, 15, tzinfo=datetime.timezone.utc)
     m_controller.mark_backup_preservation(
         stream_id=stream_id_to_preserve,
@@ -1561,9 +1556,7 @@ def test_mark_backup_preservation(
     while_asserts(lambda: wait_for_scheduled_backup(2), timeout=20)
 
     # check that the first backup was deleted (due to max backup count was reached and backup is old enough)
-    wait_for_condition(
-        lambda: not any(backup for backup in m_controller.state["backups"] if backup["stream_id"] == first_stream_id)
-    )
+    wait_for_condition(lambda: first_stream_id not in m_controller.state["backups"])
 
     # generate 2 new backups, we should exceed maximum backup count
     current_date += datetime.timedelta(days=1)
@@ -1594,15 +1587,15 @@ def test_unmark_backup_preservation(
     time_machine.move_to(datetime.datetime(2023, 9, 6))
     m_controller.start()
 
-    wait_for_condition(
-        lambda: len([backup for backup in m_controller.state["backups"] if backup["completed_at"] is not None]), timeout=20
-    )
+    wait_for_condition(lambda: len(_get_completed_backups(m_controller)), timeout=20)
 
     # preserve the backup
     preserve_until = datetime.datetime(2023, 9, 10)
-    stream_id_to_preserve = m_controller.state["backups"][0]["stream_id"]
+    stream_id_to_preserve = list(m_controller.state["backups"].keys())[0]
     m_controller.mark_backup_preservation(stream_id=stream_id_to_preserve, preserve_until=preserve_until)
-    wait_for_condition(lambda: m_controller.state["backups"][0]["preserve_until"] is not None, timeout=10)
+    wait_for_condition(
+        lambda: m_controller.state["backups"][stream_id_to_preserve]["preserve_until"] is not None, timeout=10
+    )
 
     time_machine.move_to(datetime.datetime(2023, 9, 7))
     wait_for_condition(lambda: len(m_controller.state["backups"]) == 2, timeout=20)
@@ -1657,12 +1650,11 @@ def test_backup_marked_as_broken_after_failed_restoration(
             lambda: new_controller.state["backups_fetched_at"] != 0 and len(new_controller.state["backups"]) == 1, timeout=2
         )
 
-        assert new_controller.state["backups"][0]["broken_at"] is None
+        stream_id = list(new_controller.state["backups"].keys())[0]
+        assert new_controller.state["backups"][stream_id]["broken_at"] is None
 
         # try to restore
-        new_controller.restore_backup(
-            site=new_controller.state["backups"][0]["site"], stream_id=new_controller.state["backups"][0]["stream_id"]
-        )
+        new_controller.restore_backup(site=new_controller.state["backups"][stream_id]["site"], stream_id=stream_id)
 
         def restoration_is_failed():
             assert new_controller.restore_coordinator
@@ -1670,8 +1662,8 @@ def test_backup_marked_as_broken_after_failed_restoration(
 
         while_asserts(restoration_is_failed, timeout=40)
 
-        refreshed_backup_lists = new_controller.get_backup_list(backup_sites=new_controller.backup_sites)
-        assert refreshed_backup_lists[0]["broken_at"] is not None
+        refreshed_backup_lists = new_controller.get_backups()
+        assert refreshed_backup_lists[stream_id]["broken_at"] is not None
 
     finally:
         m_controller.stop()
@@ -1713,7 +1705,7 @@ def test_restore_failed_basebackup_and_retry_with_prior(
         def all_backups_completed(expected_num):
             backups = m_controller.state["backups"]
             assert len(backups) == expected_num
-            assert all(backup["completed_at"] is not None for backup in backups)
+            assert len(_get_completed_backups(m_controller)) == expected_num
 
         while_asserts(lambda: all_backups_completed(expected_num=2), timeout=30)
 
@@ -1762,7 +1754,7 @@ def test_restore_failed_basebackup_and_retry_with_prior(
             # this one should be successfull
             while_asserts(lambda: restoration_has_phase(RestoreCoordinator.Phase.completed), timeout=40)
 
-            new_controller.get_backup_list(backup_sites=new_controller.backup_sites)
+            new_controller.get_backups()
 
             current_backups = sort_completed_backups(new_controller.state["backups"])
             corrupted_backup = current_backups[1]
@@ -1801,28 +1793,30 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
     controller.backup_settings["backup_age_days_max"] = 1 / 86400
 
     def remove_backup(backup_stream) -> None:
-        controller.state["backups"] = [
-            backup for backup in controller.state["backups"] if backup["stream_id"] != backup_stream.stream_id
-        ]
+        with controller.lock:
+            backups = {
+                stream_id: backup
+                for stream_id, backup in controller.state["backups"].items()
+                if stream_id != backup_stream.stream_id
+            }
+            controller.state_manager.update_state(backups=backups)
 
     mocked_backup_stream_remove.side_effect = remove_backup
 
     def _add_fake_backup(stream_id: str) -> None:
         now = time.time()
-        controller.state["backups"].append(
-            {
-                "basebackup_info": {
-                    "end_ts": now - 20 * 60,
-                },
-                "closed_at": now - 3 * 60,
-                "completed_at": now - 5 * 60,
-                "broken_at": None,
-                "preserve_until": None,
-                "recovery_site": False,
-                "stream_id": stream_id,
-                "resumable": True,
-                "site": "default",
-            }
+        controller.state["backups"][stream_id] = Backup(
+            basebackup_info={
+                "end_ts": now - 20 * 60,
+            },
+            closed_at=now - 3 * 60,
+            completed_at=now - 5 * 60,
+            broken_at=None,
+            preserve_until=None,
+            recovery_site=False,
+            stream_id=stream_id,
+            resumable=True,
+            site="default",
         )
 
     time.sleep(1)
@@ -1840,17 +1834,24 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
 
     # backup 1 should had been removed
     assert len(controller.state["backups"]) == 3
-    assert controller.state["backups"][0]["stream_id"] == "2"
-    assert controller.state["backups"][1]["stream_id"] == "3"
-    assert controller.state["backups"][2]["stream_id"] == "4"
+    assert set(controller.state["backups"].keys()) == {"2", "3", "4"}
 
     _add_fake_backup("5")
     _add_fake_backup("6")
 
     # mark all of backups as broken, except the oldest one
     # in this case we should not remove any backup even if we exceed the max
-    for bid in range(1, len(controller.state["backups"])):
-        controller.state["backups"][bid]["broken_at"] = time.time()
+    with controller.lock:
+        sorted_completed_backups = sort_completed_backups(controller.state["backups"])
+        assert len(sorted_completed_backups) == len(controller.state["backups"])
+
+        updated_backups = {}
+        for backup in sorted_completed_backups:
+            # skip the oldest one
+            if backup["stream_id"] != sorted_completed_backups[0]["stream_id"]:
+                backup["broken_at"] = time.time()
+            updated_backups[backup["stream_id"]] = backup
+        controller.state_manager.update_state(backups=updated_backups)
 
     controller._purge_old_backups()
     assert len(controller.state["backups"]) == 5
@@ -1862,7 +1863,7 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
 
     controller._purge_old_backups()
     assert len(controller.state["backups"]) == 7
-    assert controller.state["backups"][0]["stream_id"] == "3"
+    assert "3" in controller.state["backups"]
 
 
 @pytest.mark.parametrize(
@@ -1894,8 +1895,11 @@ def test_check_if_get_backup_list_fills_attributes_based_on_missing_files(
     file_storage = get_transfer(site_config["object_storage"])
 
     # store fake data for stream 1
-    file_storage.store_file_from_memory("default/1/basebackup.xbstream", b"\x0001\x0002" if backup_has_data else b"")
-    file_storage.store_file_from_memory("default/1/basebackup.json", b'{"binlog_name": "000001.bin"}')
+    if backup_has_data:
+        file_storage.store_file_from_memory(
+            "default/1/basebackup.json",
+            b'{"binlog_name": "000001.bin", "compressed_size": 123}',
+        )
 
     for status in stream_statuses_to_be_marked:
         file_storage.store_file_from_memory(
@@ -1904,17 +1908,20 @@ def test_check_if_get_backup_list_fills_attributes_based_on_missing_files(
             make_fs_metadata({f"{status}_at": time.time()}),
         )
 
-    result = controller.get_backup_list(backup_sites=controller.backup_sites)[0]
+    result = list(controller.get_backups().values())[0]
 
     # it is resumable if backup has data and basebackup.json has information about it
     assert result["resumable"] is backup_has_data
 
-    for key, has_value in result_status_keys_must_have_value.items():
-        assert key in result
-        if has_value:
-            assert result[key] is not None
+    def verify_property_value(value: Optional[float], must_have_value: bool) -> None:
+        if must_have_value:
+            assert value is not None
         else:
-            assert result[key] is None
+            assert value is None
+
+    verify_property_value(result["completed_at"], result_status_keys_must_have_value["completed_at"])
+    verify_property_value(result["closed_at"], result_status_keys_must_have_value["closed_at"])
+    verify_property_value(result["broken_at"], result_status_keys_must_have_value["broken_at"])
 
 
 class LimitedSideEffectMock:
@@ -1940,3 +1947,7 @@ class LimitedSideEffectMock:
             raise Exception()
 
         return self.original_function_to_mock(*args, **kwargs)
+
+
+def _get_completed_backups(controller: Controller) -> Dict[str, Backup]:
+    return {stream_id: backup for stream_id, backup in controller.state["backups"].items() if backup["completed_at"]}

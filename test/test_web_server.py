@@ -167,9 +167,12 @@ async def test_status_update_to_restore(master_controller, web_client):
         # Operation will fail because we faked the backup info
         assert response["phase"] != RestoreCoordinator.Phase.failed
 
-    master_controller[0].state["backups"].append(
-        {"stream_id": "abc", "site": "default", "basebackup_info": {"end_ts": 1234567}}
-    )
+    master_controller[0].state["backups"]["abc"] = {
+        "stream_id": "abc",
+        "site": "default",
+        "basebackup_info": {"end_ts": 1234567},
+    }
+
     await put_and_verify_json_body(web_client, "/status", {"mode": "restore", "site": "default", "stream_id": "abc"})
     master_controller[0].start()
     await awhile_asserts(restore_status_returned, timeout=2)

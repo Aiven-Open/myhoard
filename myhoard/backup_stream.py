@@ -75,6 +75,26 @@ class BaseBackupFailureReason(str, enum.Enum):
     xtrabackup_error = "xtrabackup_error"
 
 
+class BaseBackup(TypedDict, total=False):
+    binlog_index: Optional[int]
+    binlog_name: Optional[str]
+    binlog_position: Optional[int]
+    backup_reason: Optional["BackupStream.BackupReason"]
+    compressed_size: float
+    encryption_key: bool
+    end_size: Optional[int]
+    end_ts: float
+    gtid: str
+    gtid_executed: Dict[str, List[List[int]]]
+    initiated_at: float
+    lsn_info: Optional[Dict[str, float]]
+    normalized_backup_time: Optional[str]
+    number_of_files: int
+    start_size: Optional[int]
+    start_ts: float
+    uploaded_from: int
+
+
 class BackupStream(threading.Thread):
     """Handles creating a single consistent backup stream. 'stream' here refers to uninterrupted sequence
     of backup data that can be used to restore the system to a consistent state. It includes the basebackup,
@@ -121,7 +141,7 @@ class BackupStream(threading.Thread):
         backup_errors: int
         basebackup_errors: int
         basebackup_file_metadata: Optional[Dict]
-        basebackup_info: Dict
+        basebackup_info: BaseBackup
         broken_info: Dict
         closed_info: Dict
         completed_info: Dict
@@ -1007,7 +1027,7 @@ class BackupStream(threading.Thread):
                 self.log.info("Last basebackup GTID %r, truncating GTID executed %r accordingly", last_gtid, gtid_executed)
                 truncate_gtid_executed(gtid_executed, last_gtid)
 
-            info = {
+            info: BaseBackup = {
                 "binlog_index": int(binlog_info["file_name"].split(".")[-1]) if binlog_info else None,
                 "binlog_name": binlog_info["file_name"] if binlog_info else None,
                 "binlog_position": binlog_info["file_position"] if binlog_info else None,
