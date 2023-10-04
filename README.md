@@ -544,6 +544,43 @@ Response on success looks like this:
 }
 ```
 
+
+## PUT /backup/{stream_id}/preserve
+
+Create a request for updating the preservation status of a backup. Request body must be like this:
+
+```
+{
+  "preserve_until": "2023-09-01T00:00:0000",
+  "wait_for_applied_preservation": 3.0,
+}
+```
+
+**stream_id**
+
+Identifier of this backup.
+
+**preserve_until**
+
+Optional datetime value in ISO format for keeping the backup from being deleted.
+If a valid value is provided, the backup will be preserved until the specified datetime.
+If not provided or has a null value, the backup can be deleted due to old age.
+
+**wait_for_applied_preservation**
+
+Optional amount of time to the wait for the preservation request to be effectively executed. The
+operation will block for up to as many seconds as specified by this parameter.
+
+
+Response on success looks like this:
+
+```
+{
+  "success": true
+}
+```
+
+
 ## PUT /replication_state
 
 This call can be used to inform MyHoard of the executed GTIDs on other servers
