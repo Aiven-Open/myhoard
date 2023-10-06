@@ -50,12 +50,17 @@ class BaseBackup(TypedDict):
     end_ts: float
 
 
+class PreserveInfo(TypedDict):
+    preserve_until: Optional[str]
+    remove_after_restore: bool
+
+
 class Backup(TypedDict):
     basebackup_info: BaseBackup
     closed_at: Optional[float]
     completed_at: Optional[float]
     broken_at: Optional[float]
-    preserve_until: Optional[str]
+    preserve_info: Optional[PreserveInfo]
     recovery_site: bool
     stream_id: str
     resumable: bool
@@ -128,7 +133,7 @@ class Controller(threading.Thread):
         last_could_have_purged: float
         mode: "Controller.Mode"
         owned_stream_ids: List[int]
-        pending_preservation_requests: Dict[str, Optional[str]]
+        pending_preservation_requests: Dict[str, PreserveInfo]
         promote_details: Dict[str, Any]
         promote_on_restore_completion: bool
         replication_state: Dict[str, GtidExecuted]
@@ -270,14 +275,22 @@ class Controller(threading.Thread):
                     return
             self.state_manager.update_state(backup_request=new_request)
 
-    def mark_backup_preservation(self, stream_id: str, preserve_until: Optional[datetime.datetime]) -> None:
+    def mark_backup_preservation(
+        self,
+        stream_id: str,
+        preserve_until: Optional[datetime.datetime],
+        remove_after_restore: bool = False,
+    ) -> None:
         backup_to_preserve = self.get_backup_by_stream_id(stream_id)
         if not backup_to_preserve:
             raise Exception(f"Stream {stream_id} was not found in completed backups.")
 
         with self.lock:
             current_requests = dict(self.state["pending_preservation_requests"])
-            current_requests[stream_id] = preserve_until.isoformat() if preserve_until else None
+            current_requests[stream_id] = {
+                "preserve_until": preserve_until.isoformat() if preserve_until else None,
+                "remove_after_restore": remove_after_restore,
+            }
             self.state_manager.update_state(pending_preservation_requests=current_requests)
 
     @property
@@ -610,14 +623,13 @@ class Controller(threading.Thread):
                 completed = resumable and completed_info
                 closed = completed and closed_info
 
-                preserve_until = preserved_info.get("preserve_until")
                 backups.append(
                     {
                         "basebackup_info": basebackup_info,
                         "broken_at": broken_info.get("broken_at"),
                         "closed_at": closed_info["closed_at"] if closed else None,
                         "completed_at": completed_info["completed_at"] if completed else None,
-                        "preserve_until": preserve_until,
+                        "preserve_info": preserved_info if preserved_info else None,
                         "recovery_site": site_config.get("recovery_only", False),
                         "stream_id": site_and_stream_id.rsplit("/", 1)[-1],
                         "resumable": bool(resumable),
@@ -1206,15 +1218,22 @@ class Controller(threading.Thread):
         if self.restore_coordinator.phase is RestoreCoordinator.Phase.failed_basebackup:
             self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
-        if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():
-            self.state_manager.update_state(
-                # Ensure latest backup list is fetched before promotion so that we
-                # start working with appropriate backup streams
-                backups_fetched_at=0,
-                force_promote=True,
-                mode=self.Mode.promote,
-                restore_options={},
-            )
+
+        if self.restore_coordinator.is_complete():
+            restored_backup = self.get_backup_by_stream_id(self.state["restore_options"]["stream_id"])
+            # remove backup preservation if backup was successfully restored
+            if restored_backup.get("preserve_info") and restored_backup["preserve_info"].get("remove_after_restore"):
+                self.mark_backup_preservation(stream_id=self.state["restore_options"]["stream_id"], preserve_until=None)
+
+            if self.state["promote_on_restore_completion"]:
+                self.state_manager.update_state(
+                    # Ensure latest backup list is fetched before promotion so that we
+                    # start working with appropriate backup streams
+                    backups_fetched_at=0,
+                    force_promote=True,
+                    mode=self.Mode.promote,
+                    restore_options={},
+                )
 
     def _mark_failed_restore_backup_as_broken(self) -> None:
         failed_stream_id = self.state["restore_options"]["stream_id"]
@@ -1317,9 +1336,12 @@ class Controller(threading.Thread):
             return
 
         # do not purge backup if its preserved
-        preserve_until = backup["preserve_until"]
-        if preserve_until and datetime.datetime.now(datetime.timezone.utc) < datetime.datetime.fromisoformat(preserve_until):
-            return
+        if backup.get("preserve_info"):
+            preserve_until = backup["preserve_info"].get("preserve_until")
+            if preserve_until and datetime.datetime.now(datetime.timezone.utc) < datetime.datetime.fromisoformat(
+                preserve_until
+            ):
+                return
 
         if time.time() > backup["closed_at"] + self.backup_settings["backup_age_days_max"] * 24 * 60 * 60:
             self.log.info("Backup %r is older than max backup age, dropping it", backup["stream_id"])
@@ -1482,19 +1504,24 @@ class Controller(threading.Thread):
         while self.state["pending_preservation_requests"]:
             # acquire lock since another thread might update the state
             with self.lock:
-                stream_id, preserve_until = list(self.state["pending_preservation_requests"].items())[0]
+                stream_id, preserve_request = list(self.state["pending_preservation_requests"].items())[0]
 
             backup_to_preserve = self.get_backup_by_stream_id(stream_id)
             if backup_to_preserve:
                 self._build_backup_stream(backup_to_preserve).mark_preservation(
-                    preserve_until=datetime.datetime.fromisoformat(preserve_until) if preserve_until else None
+                    preserve_until=(
+                        datetime.datetime.fromisoformat(preserve_request["preserve_until"])
+                        if preserve_request["preserve_until"]
+                        else None
+                    ),
+                    remove_after_restore=preserve_request["remove_after_restore"],
                 )
 
             with self.lock:
                 pending_preservation_requests = {
                     sid: ts
                     for sid, ts in self.state["pending_preservation_requests"].items()
-                    if sid != stream_id and ts != preserve_until
+                    if sid != stream_id and ts["preserve_until"] != preserve_request["preserve_until"]
                 }
                 self.state_manager.update_state(pending_preservation_requests=pending_preservation_requests)
 

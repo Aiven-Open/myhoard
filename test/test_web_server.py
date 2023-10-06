@@ -77,7 +77,7 @@ async def test_backup_list(master_controller, web_client):
             "broken_at",
             "closed_at",
             "completed_at",
-            "preserve_until",
+            "preserve_info",
             "recovery_site",
             "resumable",
             "site",

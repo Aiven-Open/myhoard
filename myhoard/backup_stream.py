@@ -445,7 +445,7 @@ class BackupStream(threading.Thread):
         )
         self.wakeup_event.set()
 
-    def mark_preservation(self, preserve_until: Optional[datetime]) -> None:
+    def mark_preservation(self, preserve_until: Optional[datetime], remove_after_restore: bool = False) -> None:
         if preserve_until:
             self.log.info("Marking stream %s preservation to %s.", self.stream_id, preserve_until)
         else:
@@ -453,6 +453,9 @@ class BackupStream(threading.Thread):
 
         preserved_info = {
             "preserve_until": preserve_until.isoformat() if preserve_until else None,
+            "remove_after_restore": remove_after_restore
+            if preserve_until
+            else None,  # only set when preserve_until is provided
             "server_id": self.server_id,
         }
 

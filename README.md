@@ -552,6 +552,7 @@ Create a request for updating the preservation status of a backup. Request body 
 ```
 {
   "preserve_until": "2023-09-01T00:00:0000",
+  "remove_after_restore": true,
   "wait_for_applied_preservation": 3.0,
 }
 ```
@@ -565,6 +566,11 @@ Identifier of this backup.
 Optional datetime value in ISO format for keeping the backup from being deleted.
 If a valid value is provided, the backup will be preserved until the specified datetime.
 If not provided or has a null value, the backup can be deleted due to old age.
+
+
+**remove_after_restore**
+
+If true, preservation will be removed after the backup is restored.
 
 **wait_for_applied_preservation**
 

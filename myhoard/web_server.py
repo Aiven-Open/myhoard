@@ -84,6 +84,7 @@ class WebServer:
             stream_id = request.match_info["stream_id"]
             body = await self._get_request_json(request)
             preserve_until = body.get("preserve_until")
+            remove_after_restore = body.get("remove_after_restore", False)
 
             if preserve_until is not None:
                 try:
@@ -97,7 +98,11 @@ class WebServer:
                 except ValueError:
                     raise BadRequest("`preserve_until` must be a valid isoformat datetime string.")
 
-            self.controller.mark_backup_preservation(stream_id=stream_id, preserve_until=preserve_until)
+            self.controller.mark_backup_preservation(
+                stream_id=stream_id,
+                preserve_until=preserve_until,
+                remove_after_restore=remove_after_restore,
+            )
             wait_for_applied_preservation = body.get("wait_for_applied_preservation")
             if wait_for_applied_preservation:
                 self.log.info(
@@ -115,8 +120,9 @@ class WebServer:
                         # preservation was removed on time
                         return json_response({"success": True})
 
-                    if (backup["preserve_until"] is None and preserve_until is None) or (
-                        backup["preserve_until"] == preserve_until.isoformat()
+                    backup_preserve_info = backup.get("preserve_info", {})
+                    if (backup_preserve_info.get("preserve_until") is None and preserve_until is None) or (
+                        backup_preserve_info.get("preserve_until") == preserve_until.isoformat()
                     ):
                         self.log.info("Preservation for backup %s was applied.", stream_id)
                         break

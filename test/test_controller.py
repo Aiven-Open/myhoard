@@ -1527,7 +1527,7 @@ def test_mark_backup_preservation(
     def backup_has_preservation(stream_id):
         for backup in m_controller.state["backups"]:
             if backup["stream_id"] == stream_id:
-                assert backup["preserve_until"] is not None
+                assert backup["preserve_info"] is not None
                 break
         else:
             assert False, f"Backup with stream id {stream_id} not found."
@@ -1602,7 +1602,7 @@ def test_unmark_backup_preservation(
     preserve_until = datetime.datetime(2023, 9, 10)
     stream_id_to_preserve = m_controller.state["backups"][0]["stream_id"]
     m_controller.mark_backup_preservation(stream_id=stream_id_to_preserve, preserve_until=preserve_until)
-    wait_for_condition(lambda: m_controller.state["backups"][0]["preserve_until"] is not None, timeout=10)
+    wait_for_condition(lambda: m_controller.state["backups"][0]["preserve_info"] is not None, timeout=10)
 
     time_machine.move_to(datetime.datetime(2023, 9, 7))
     wait_for_condition(lambda: len(m_controller.state["backups"]) == 2, timeout=20)
@@ -1817,7 +1817,7 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
                 "closed_at": now - 3 * 60,
                 "completed_at": now - 5 * 60,
                 "broken_at": None,
-                "preserve_until": None,
+                "preserve_info": None,
                 "recovery_site": False,
                 "stream_id": stream_id,
                 "resumable": True,
