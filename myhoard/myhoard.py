@@ -2,7 +2,7 @@
 from myhoard import version
 from myhoard.controller import Controller
 from myhoard.statsd import StatsClient
-from myhoard.util import detect_running_process_id, wait_for_port
+from myhoard.util import DEFAULT_XTRABACKUP_SETTINGS, detect_running_process_id, wait_for_port
 from myhoard.web_server import WebServer
 
 import argparse
@@ -209,6 +209,7 @@ class MyHoard:
             state_dir=self.config["state_directory"],
             stats=statsd,
             temp_dir=self.config["temporary_directory"],
+            xtrabackup_settings=self.config.get("xtrabackup", DEFAULT_XTRABACKUP_SETTINGS),
         )
         self.controller.start()
         self.web_server = WebServer(

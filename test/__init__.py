@@ -102,6 +102,7 @@ def build_controller(
         state_dir=state_dir,
         stats=build_statsd_client(),
         temp_dir=temp_dir,
+        xtrabackup_settings=myhoard_util.DEFAULT_XTRABACKUP_SETTINGS,
     )
     return controller
 

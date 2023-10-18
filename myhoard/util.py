@@ -32,6 +32,11 @@ ERR_TIMEOUT = 2013
 XTRABACKUP_VERSION_REGEX = re.compile(r"^xtrabackup version ([\d\.\-]).+")
 VERSION_SPLITTING_REGEX = re.compile(r"[\.-]")
 
+DEFAULT_XTRABACKUP_SETTINGS = {
+    "copy_threads": 1,
+    "compress_threads": 1,
+    "encrypt_threads": 1,
+}
 
 GtidRangeTuple = tuple[int, int, str, int, int]
 

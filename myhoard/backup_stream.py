@@ -8,6 +8,7 @@ from .util import (
     add_gtid_ranges_to_executed_set,
     are_gtids_in_executed_set,
     DEFAULT_MYSQL_TIMEOUT,
+    DEFAULT_XTRABACKUP_SETTINGS,
     ERR_TIMEOUT,
     first_contains_gtids_not_in_second,
     GtidExecuted,
@@ -173,6 +174,7 @@ class BackupStream(threading.Thread):
         stats: "StatsClient",
         stream_id: Optional[str] = None,
         temp_dir: str,
+        xtrabackup_settings: Optional[Dict[str, int]] = None,
     ) -> None:
         super().__init__()
         stream_id = stream_id or self.new_stream_id()
@@ -252,6 +254,7 @@ class BackupStream(threading.Thread):
         self.stats = stats
         self.temp_dir = temp_dir
         self.wakeup_event = threading.Event()
+        self.xtrabackup_settings = DEFAULT_XTRABACKUP_SETTINGS | (xtrabackup_settings or {})
 
     @contextlib.contextmanager
     def running(self):
@@ -951,6 +954,9 @@ class BackupStream(threading.Thread):
         start_time = time.time()
         encryption_key = os.urandom(24)
         self.basebackup_operation = BasebackupOperation(
+            copy_threads=self.xtrabackup_settings["copy_threads"],
+            compress_threads=self.xtrabackup_settings["compress_threads"],
+            encrypt_threads=self.xtrabackup_settings["encrypt_threads"],
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             mysql_client_params=self.mysql_client_params,

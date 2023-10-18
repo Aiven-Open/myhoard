@@ -9,7 +9,7 @@ from . import (
     random_basic_string,
 )
 from myhoard.controller import BackupSiteInfo, Controller
-from myhoard.util import atomic_create_file, change_master_to, mysql_cursor, wait_for_port
+from myhoard.util import atomic_create_file, change_master_to, DEFAULT_XTRABACKUP_SETTINGS, mysql_cursor, wait_for_port
 from myhoard.web_server import WebServer
 from py.path import local as LocalPath
 from typing import Callable, Iterator, Optional
@@ -382,11 +382,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
         ],
         "systemd_service": None,
         "temporary_directory": temp_dir,
-        "xtrabackup": {
-            "copy_threads": 1,
-            "compress_threads": 1,
-            "encrypt_threads": 1,
-        },
+        "xtrabackup": DEFAULT_XTRABACKUP_SETTINGS,
     }
 
 
