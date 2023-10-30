@@ -157,6 +157,7 @@ class Controller(threading.Thread):
         stats,
         temp_dir,
         restore_free_memory_percentage=None,
+        xtrabackup_settings: Dict[str, int],
     ):
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -228,6 +229,7 @@ class Controller(threading.Thread):
         self.stats = stats
         self.temp_dir = temp_dir
         self.wakeup_event = threading.Event()
+        self.xtrabackup_settings = xtrabackup_settings
         self._get_upload_backup_site()
         self._update_mode_tag()
 
@@ -756,6 +758,7 @@ class Controller(threading.Thread):
             stats=self.stats,
             stream_id=stream_id,
             temp_dir=self.temp_dir,
+            xtrabackup_settings=self.xtrabackup_settings,
         )
 
     def _delete_backup_stream_state(self, stream_id):
@@ -1728,6 +1731,7 @@ class Controller(threading.Thread):
             stats=self.stats,
             stream_id=stream_id,
             temp_dir=self.temp_dir,
+            xtrabackup_settings=self.xtrabackup_settings,
         )
         self.backup_streams.append(stream)
         self.state_manager.update_state(
