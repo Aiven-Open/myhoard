@@ -76,7 +76,7 @@ class WebServer:
             }
             with self.controller.lock:
                 if self.controller.state["backups_fetched_at"]:
-                    response["backups"] = self.controller.state["backups"]
+                    response["backups"] = list(self.controller.state["backups"].values())
                 return json_response(response)
 
     async def backup_preserve(self, request):
