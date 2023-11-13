@@ -1,3 +1,81 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "myhoard"
+authors = [
+  { name="Aiven", email="opensource@aiven.io" },
+  { name="Rauli Ikonen", email="rauli@aiven.io"},
+]
+description = "MyHoard is a daemon for creating, managing and restoring MySQL backups."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers=[
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Software Development :: Libraries",
+]
+license = { text = "Apache License 2.0" }
+dynamic = ["version"]
+dependencies = [
+    "aiohttp",
+    "botocore",
+    "cryptography >= 0.8",
+    "httplib2",
+    "paramiko",
+    "PyMySQL >= 0.9.2",
+    "PySocks",
+    "rohmu == 1.0.7",
+    "sentry-sdk==1.14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black==22.3.0",
+    "coverage",
+    "coveralls",
+    "flake8",
+    "httplib2",
+    "isort==5.12.0",
+    "mock",
+    "mypy",
+    "pre-commit",
+    "pylint-quotes",
+    "pylint>=2.4.3",
+    "PySocks",
+    "pytest",
+    "pytest-cov",
+    "pytest-mock",
+    "pytest-timeout",
+    "pytest-xdist",
+    "responses",
+    "time-machine",
+    "types-PyMySQL",
+    "types-requests",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/Aiven-Open/myhoard/"
+"Bug Tracker" = "https://github.com/Aiven-Open/myhoard/issues"
+
+[project.scripts]
+myhoard = "myhoard.myhoard:main"
+myhoard_mysql_env_update = "myhoard.update_mysql_environment:main"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "myhoard/version.py"
+
 [tool.black]
 line-length = 125
 

@@ -21,7 +21,7 @@ copyright:
 	grep -EL "Copyright \(c\) 20.* Aiven" $(shell git ls-files "*.py" | grep -v __init__.py)
 
 .PHONY: coverage
-coverage: version
+coverage:
 	[ -d "$(PYTEST_TMP)" ] || mkdir -p "$(PYTEST_TMP)"
 	$(PYTHON) -m pytest $(PYTEST_ARG) --cov-report term-missing --cov-branch --cov-report xml:coverage.xml --cov myhoard test/
 
@@ -30,12 +30,6 @@ coverage: version
 clean:
 	$(RM) -r *.egg-info/ build/ dist/
 	$(RM) ../myhoard_* test-*.xml $(generated)
-
-myhoard/version.py: version.py
-	$(PYTHON) $^ $@
-
-.PHONY: version
-version: myhoard/version.py
 
 .PHONY: rpm
 rpm: $(generated)
