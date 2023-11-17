@@ -9,7 +9,7 @@ Source0:        myhoard-rpm-src.tar
 BuildRequires:  percona-xtrabackup-80 >= 8.0
 BuildRequires:  python3-aiohttp
 BuildRequires:  python3-devel
-BuildRequires:  python3-flake8
+BuildRequires:  python3-ruff
 BuildRequires:  python3-httplib2
 BuildRequires:  python3-isort
 BuildRequires:  python3-pylint
