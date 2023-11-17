@@ -8,3 +8,17 @@ combine_as_imports = true
 profile = "black"
 skip_gitignore = true
 line_length = 125
+
+[tool.ruff]
+target-version = "py311"
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+]
+line-length = 125
+ignore =[
+  "E203",  # Whitespace before ':' (in accordance with Black)
+  "E231",  # Missing whitespace after ',' (in accordance with Black)
+  "E501",  # Max line length
+  "E722",  # do not use bare 'except'
+]
