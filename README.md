@@ -344,6 +344,11 @@ The full path and file name prefix of relay logs. This must be the same as the
 corresponding MySQL configuration option except full path is always required
 here.
 
+**restore_download_workers_count**
+
+Number of worker processes downloading binlogs during a restore,
+defaults to `max(cpu_count - 1, 1)`
+
 **restore_free_memory_percentage**
 
 Maximum percentage of system memory to allow xtrabackup to use while

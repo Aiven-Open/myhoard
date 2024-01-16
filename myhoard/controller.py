@@ -156,6 +156,7 @@ class Controller(threading.Thread):
         state_dir,
         stats,
         temp_dir,
+        restore_download_workers_count: int,
         restore_free_memory_percentage=None,
         xtrabackup_settings: Dict[str, int],
     ):
@@ -197,6 +198,7 @@ class Controller(threading.Thread):
         self.optimize_tables_before_backup = optimize_tables_before_backup
         self.restart_mysqld_callback = restart_mysqld_callback
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
+        self.restore_download_workers_count = restore_download_workers_count
         self.restore_free_memory_percentage: Optional[int] = restore_free_memory_percentage
         self.restore_coordinator: Optional[RestoreCoordinator] = None
         self.seen_basebackup_infos: Dict[str, BaseBackup] = {}
@@ -849,6 +851,7 @@ class Controller(threading.Thread):
         self.log.info("Creating new restore coordinator")
         self.restore_coordinator = RestoreCoordinator(
             binlog_streams=options["binlog_streams"],
+            download_workers_count=self.restore_download_workers_count,
             file_storage_config=storage_config,
             max_binlog_bytes=self.restore_max_binlog_bytes,
             free_memory_percentage=self.restore_free_memory_percentage,

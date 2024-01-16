@@ -155,6 +155,7 @@ class RestoreCoordinator(threading.Thread):
         self,
         *,
         binlog_streams: List[BinlogStream],
+        download_workers_count: int,
         file_storage_config,
         free_memory_percentage,
         max_binlog_bytes=None,
@@ -184,6 +185,7 @@ class RestoreCoordinator(threading.Thread):
         # a basebackup fails for any reason but earlier backups are available and basebackup from one of those
         # can be successfully restored.
         self.binlog_streams = binlog_streams
+        self.download_workers_count = download_workers_count
         self.current_file = None
         self.file_storage: Optional[BaseTransfer] = None
         self.file_storage_config = file_storage_config
@@ -1518,14 +1520,13 @@ class RestoreCoordinator(threading.Thread):
         return f"{local_name}.prefetch"
 
     def _start_process_pool(self) -> None:
-        process_count = max(multiprocessing.cpu_count() - 1, 1)
         config = {
             "object_storage": self.file_storage_config,
             "rsa_private_key_pem": self.rsa_private_key_pem.decode("ascii"),
         }
         self.worker_processes = [
             self.mp_context.Process(target=download_binlog, args=(config, self.queue_out, self.queue_in))
-            for _ in range(process_count)
+            for _ in range(self.download_workers_count)
         ]
         for worker in self.worker_processes:
             worker.start()
