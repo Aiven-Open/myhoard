@@ -362,6 +362,11 @@ here.
 Boolean value. Enables a mechanism to automatically mark backups as broken if restoration fails for
 multiple times in a row. Defaults to `false`
 
+**restore_download_workers_count**
+
+Number of worker processes downloading binlogs during a restore,
+defaults to `max(cpu_count - 1, 1)`
+
 **restore_free_memory_percentage**
 
 Maximum percentage of system memory to allow xtrabackup to use while
