@@ -53,6 +53,7 @@ jobs:
           wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
           sudo dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
           sudo percona-release enable-only tools
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys B7B3B788A8D3785C
           sudo apt update
 
       - id: build-deps
