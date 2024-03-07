@@ -113,19 +113,18 @@ class MyHoard:
         self.systemd_notified = True
 
     def _restart_mysqld(self, *, with_binlog, with_gtids):
-        mysqld_options = []
-        if not with_binlog:
-            mysqld_options.append("--disable-log-bin")
-            # If config says slave-preserve-commit-order=ON MySQL would refuse to start if binlog is
-            # disabled. To prevent that from happening ensure preserve commit order is disabled
-            mysqld_options.append("--skip-slave-preserve-commit-order")
-        if not with_gtids:
-            mysqld_options.append("--gtid-mode=OFF")
-
         systemd_service = self.config.get("systemd_service")
         if systemd_service:
-            self._restart_systemd(mysqld_options=" ".join(mysqld_options), service=systemd_service)
+            self._restart_systemd(with_binlog=with_binlog, with_gtids=with_gtids, service=systemd_service)
         else:
+            mysqld_options = []
+            if not with_binlog:
+                mysqld_options.append("--disable-log-bin")
+                # If config says slave-preserve-commit-order=ON MySQL would refuse to start if binlog is
+                # disabled. To prevent that from happening ensure preserve commit order is disabled
+                mysqld_options.append("--skip-slave-preserve-commit-order")
+            if not with_gtids:
+                mysqld_options.append("--gtid-mode=OFF")
             self._restart_process(mysqld_options=mysqld_options)
 
         # Ensure the server is accepting connections
@@ -152,10 +151,12 @@ class MyHoard:
         self.mysqld_pid = proc.pid
         self.log.info("Process %r started, pid %s", full_command, proc.pid)
 
-    def _restart_systemd(self, *, mysqld_options, service):
+    def _restart_systemd(self, with_binlog, with_gtids, service):
         self.log.info("Restarting service %r", service)
 
-        command = self.config["systemd_env_update_command"] + [mysqld_options or ""]
+        command = self.config["systemd_env_update_command"].copy()
+        command.extend(["-b", "true"] if with_binlog else ["-b", "false"])
+        command.extend(["-g", "true"] if with_gtids else ["-g", "false"])
         try:
             subprocess.run(command, stderr=subprocess.PIPE, stdout=subprocess.PIPE, check=True)
         except subprocess.CalledProcessError as e:
