@@ -247,6 +247,7 @@ class Controller(threading.Thread):
         with self.lock:
             for stream in self.backup_streams:
                 if stream.active_phase == BackupStream.ActivePhase.basebackup:
+                    self.log.info("Not safe to reload while taking basebackup")
                     return False
         return True
 
@@ -1293,7 +1294,7 @@ class Controller(threading.Thread):
                 stream.remove_binlogs(binlogs)
 
     def _purge_old_backups(self):
-        purgeable = [backup for backup in self.state["backups"] if backup["completed_at"]]
+        purgeable = [backup for backup in self.state["backups"] if backup["completed_at"] and not backup["recovery_site"]]
         broken_backups_count = sum(backup["broken_at"] is not None for backup in purgeable)
         # do not consider broken backups for the count, they will still be purged
         # but we should only purge when the count of non-broken backups has exceeded the limit.
