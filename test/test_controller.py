@@ -1782,6 +1782,62 @@ def test_restore_failed_basebackup_and_retry_with_prior(
 
 
 @patch.object(BackupStream, "remove", autospec=True)
+def test_purge_old_backups_should_not_remove_read_only_backups(
+    mocked_backup_stream_remove: MagicMock,
+    default_backup_site,
+    mysql_empty,
+    session_tmpdir,
+) -> None:
+    # pylint: disable=protected-access
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.backup_settings["backup_count_min"] = 0
+    controller.backup_settings["backup_count_max"] = 1
+    # set it to 1 day
+    controller.backup_settings["backup_age_days_max"] = 1
+
+    def remove_backup(backup_stream) -> None:
+        controller.state["backups"] = [
+            backup for backup in controller.state["backups"] if backup["stream_id"] != backup_stream.stream_id
+        ]
+
+    mocked_backup_stream_remove.side_effect = remove_backup
+
+    ten_years_old = time.time() - 3650 * 24 * 60 * 60
+
+    def _append_backup(stream_id: str, ts: float, read_only: bool = True) -> None:
+        controller.state["backups"].append(
+            {
+                "basebackup_info": {"end_ts": ts},
+                "closed_at": ts,
+                "completed_at": ts,
+                "broken_at": None,
+                "preserve_until": None,
+                "recovery_site": read_only,
+                "stream_id": stream_id,
+                "resumable": True,
+                "site": "default",
+            }
+        )
+
+    _append_backup(stream_id="1", ts=ten_years_old, read_only=True)  # no matter how old, should be kept if read-only
+    _append_backup(stream_id="2", ts=ten_years_old, read_only=False)  # old backup, should be purged
+    _append_backup(stream_id="3", ts=time.time(), read_only=False)  # latest backup
+
+    # since _purge_old_backups only purge one backup per call, try to call maximum possible times
+    controller._purge_old_backups()
+    controller._purge_old_backups()
+    controller._purge_old_backups()
+    backup_list = controller.state["backups"]
+    assert len(backup_list) == 2
+    assert all(b["stream_id"] != "2" for b in backup_list)  # backup "2" should be deleted
+
+
+@patch.object(BackupStream, "remove", autospec=True)
 def test_purge_old_backups_exceeding_backup_age_days_max(
     mocked_backup_stream_remove: MagicMock,
     default_backup_site,
