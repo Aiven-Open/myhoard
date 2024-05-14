@@ -327,7 +327,7 @@ class BasebackupRestoreOperation:
             self.log.info("xbstream: %r", line)
 
     def _process_xbstream_output_line_new_file(self, line):
-        if not line.endswith(".qp.xbcrypt"):
+        if not line.endswith(".xbcrypt"):
             return False
 
         self.current_file = line
