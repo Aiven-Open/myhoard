@@ -36,7 +36,7 @@ dependencies = [
     # rohmu is incompatible with latest version snappy 0.7.1
     "python-snappy == 0.6.1",
     "rohmu >= 1.1.2",
-    "sentry-sdk==1.14.0",
+    "sentry-sdk==2.8.0",
 ]
 
 [project.optional-dependencies]
