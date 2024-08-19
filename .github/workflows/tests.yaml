@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - id: checkout-code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Cache APT Packages
@@ -35,7 +35,7 @@ jobs:
           version: 1.0
           packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl
       - id: prepare-python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -102,14 +102,14 @@ jobs:
 
     steps:
       - id: checkout-code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Cache APT Packages
         uses: awalsh128/cache-apt-pkgs-action@v1.1.2
         with:
           version: 1.0
           packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc
       - id: prepare-python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
