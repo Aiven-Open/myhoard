@@ -21,6 +21,7 @@ from .util import (
 )
 from http.client import RemoteDisconnected
 from httplib2 import ServerNotFoundError
+from packaging.version import Version
 from rohmu import get_transfer
 from rohmu.compressor import DecompressSink
 from rohmu.encryptor import DecryptSink
@@ -48,6 +49,7 @@ ERR_BACKUP_IN_PROGRESS = 4085
 
 class BaseBackup(TypedDict):
     end_ts: float
+    mysql_version: Optional[str]
 
 
 class Backup(TypedDict):
@@ -158,6 +160,7 @@ class Controller(threading.Thread):
         temp_dir,
         restore_free_memory_percentage=None,
         xtrabackup_settings: Dict[str, int],
+        restrict_backup_version_higher: Optional[Version] = None,
     ):
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -232,6 +235,7 @@ class Controller(threading.Thread):
         self.xtrabackup_settings = xtrabackup_settings
         self._get_upload_backup_site()
         self._update_mode_tag()
+        self.restrict_backup_version_higher = restrict_backup_version_higher
 
     def is_log_backed_up(self, *, log_index: int):
         return all(
@@ -306,6 +310,13 @@ class Controller(threading.Thread):
                     continue
                 if not backup["basebackup_info"]:
                     raise ValueError(f"Backup {backup!r} cannot be restored")
+                basebackup_mysql_version = backup["basebackup_info"].get("mysql_version")
+                if basebackup_mysql_version and self.restrict_backup_version_higher:
+                    if Version(basebackup_mysql_version) > self.restrict_backup_version_higher:
+                        raise ValueError(
+                            f"Backup was taken with MySQL version {basebackup_mysql_version} which is higher than "
+                            f"allowed {self.restrict_backup_version_higher}: {backup!r}"
+                        )
 
                 if backup.get("broken_at"):
                     raise ValueError(f"Cannot restore a broken backup: {backup!r}")
