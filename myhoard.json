@@ -70,5 +70,6 @@
         "copy_threads": 1,
         "compress_threads": 1,
         "encrypt_threads": 1
-    }
+    },
+    "restrict_backup_version_higher": null
 }

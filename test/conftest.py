@@ -382,6 +382,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
         "systemd_service": None,
         "temporary_directory": temp_dir,
         "xtrabackup": DEFAULT_XTRABACKUP_SETTINGS,
+        "restrict_backup_version_higher": None,
     }
 
 

@@ -14,6 +14,7 @@ from myhoard.util import (
     parse_gtid_range_string,
     partition_sort_and_combine_gtid_ranges,
 )
+from packaging.version import Version
 from rohmu import get_transfer
 from typing import Any, cast, Dict, List, Optional, Set, TypedDict
 from unittest.mock import MagicMock, patch
@@ -375,7 +376,7 @@ def test_backup_state_from_removed_site_is_removed(default_backup_site, mysql_em
     fake_file_names = create_fake_state_files(controller)
     controller.state["backups"] = [
         Backup(
-            basebackup_info=BaseBackup(end_ts=0.0),
+            basebackup_info=BaseBackup(end_ts=0.0, mysql_version=None),
             closed_at=None,
             completed_at=None,
             recovery_site=False,
@@ -1679,6 +1680,31 @@ def test_backup_marked_as_broken_after_failed_restoration(
             new_controller.stop()
 
 
+def test_forbid_to_restore_backup(
+    master_controller,
+) -> None:
+    controller, _ = master_controller
+    controller.restrict_backup_version_higher = Version("8.0.1")
+    controller.state["backups"] = [
+        Backup(
+            basebackup_info=BaseBackup(end_ts=0.0, mysql_version="8.0.30"),
+            closed_at=None,
+            completed_at=None,
+            broken_at=None,
+            preserve_until=None,
+            recovery_site=False,
+            stream_id="1234",
+            resumable=False,
+            site="default",
+        )
+    ]
+    with pytest.raises(ValueError, match="Backup was taken with MySQL version 8.0.30 which is higher than allowed 8.0.1:"):
+        controller.restore_backup(site="default", stream_id="1234")
+    controller.restrict_backup_version_higher = Version("8.0.30")
+    controller.restore_backup(site="default", stream_id="1234")
+    controller.state = controller.Mode.restore
+
+
 @patch.object(RestoreCoordinator, "MAX_BASEBACKUP_ERRORS", 2)
 def test_restore_failed_basebackup_and_retry_with_prior(
     default_backup_site,
@@ -1812,7 +1838,7 @@ def test_purge_old_backups_should_not_remove_read_only_backups(
     def _append_backup(stream_id: str, ts: float, read_only: bool = True) -> None:
         controller.state["backups"].append(
             {
-                "basebackup_info": {"end_ts": ts},
+                "basebackup_info": {"end_ts": ts, "mysql_version": None},
                 "closed_at": ts,
                 "completed_at": ts,
                 "broken_at": None,
@@ -1869,6 +1895,7 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
             {
                 "basebackup_info": {
                     "end_ts": now - 20 * 60,
+                    "mysql_version": None,
                 },
                 "closed_at": now - 3 * 60,
                 "completed_at": now - 5 * 60,

@@ -4,6 +4,7 @@ from myhoard.controller import Controller
 from myhoard.statsd import StatsClient
 from myhoard.util import DEFAULT_XTRABACKUP_SETTINGS, detect_running_process_id, wait_for_port
 from myhoard.web_server import WebServer
+from packaging.version import Version
 
 import argparse
 import asyncio
@@ -192,6 +193,10 @@ class MyHoard:
             tags=statsd_config["tags"],
         )
         mysql = self.config["mysql"]
+        raw_restrict_backup_version_higher = self.config.get("restrict_backup_version_higher")
+        restrict_backup_version_higher = (
+            Version(raw_restrict_backup_version_higher) if raw_restrict_backup_version_higher else None
+        )
         self.controller = Controller(
             backup_settings=self.config["backup_settings"],
             backup_sites=self.config["backup_sites"],
@@ -211,6 +216,7 @@ class MyHoard:
             stats=statsd,
             temp_dir=self.config["temporary_directory"],
             xtrabackup_settings=self.config.get("xtrabackup", DEFAULT_XTRABACKUP_SETTINGS),
+            restrict_backup_version_higher=restrict_backup_version_higher,
         )
         self.controller.start()
         self.web_server = WebServer(

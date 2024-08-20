@@ -116,6 +116,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
 
         assert bs.is_binlog_safe_to_delete(new_binlogs[0])
         assert bs.is_log_backed_up(log_index=new_binlogs[0]["local_index"])
+        assert bs.state["basebackup_info"].get("mysql_version") is not None
 
         # remote_gtid_executed will be updated once the stream notices the new binlog that was uploaded above
         wait_for_condition(lambda: bs_observer.state["remote_gtid_executed"] != gtid_executed)
