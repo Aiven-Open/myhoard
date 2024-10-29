@@ -418,6 +418,71 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
     assert current_index == 2
 
 
+def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):
+    restarts = []
+
+    state_file = os.path.join(session_tmpdir().strpath, "the_state_file.json")
+
+    def _register_restart(**kwargs):
+        restarts.append({**kwargs})
+
+    rc = RestoreCoordinator(
+        binlog_streams=[
+        ],
+        file_storage_config={
+        },
+        free_memory_percentage=80,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory="",
+        mysql_relay_log_index_file="",
+        mysql_relay_log_prefix="",
+        pending_binlogs_state_file="the_pending_binlog_state",
+        rebuild_tables=True,
+        restart_mysqld_callback=lambda **kwargs: _register_restart(**kwargs),
+        rsa_private_key_pem="",
+        site="default",
+        state_file=state_file,
+        stats=build_statsd_client(),
+        stream_id="",
+        target_time="",
+        temp_dir="foo",
+    )
+
+    def _raise_on_cursor():
+        raise InjectedError()
+
+    # we're only interested what happens before querying the cursor, so just raise in that case
+    rc._mysql_cursor = lambda **kwargs: _raise_on_cursor()
+
+    assert len(restarts) == 0
+
+    # first time should restart it
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=False)
+    assert len(restarts) == 1
+
+    # restart with same parameter should not
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=False)
+    assert len(restarts) == 1
+
+    # restart with different parameters should restart it
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=True)
+    assert len(restarts) == 2
+
+    # restart with same parameter should not
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=True)
+    assert len(restarts) == 2
+
+    # restart with previous parameters should restart it again
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=False)
+    assert len(restarts) == 3
+
+
 class InjectedError(Exception):
     pass
 
