@@ -1434,16 +1434,17 @@ class RestoreCoordinator(threading.Thread):
             return found, current_index
 
     def _ensure_mysql_server_is_started(self, *, with_binlog: bool, with_gtids: bool) -> None:
-        if self.state["mysql_params"] == {"with_binlog": with_binlog, "with_gtids": with_gtids}:
-            return
-
-        self.restart_mysqld_callback(with_binlog=with_binlog, with_gtids=with_gtids)
+        params_match = self.state["mysql_params"] == {"with_binlog": with_binlog, "with_gtids": with_gtids}
         server_uuid = self.state["server_uuid"]
+
+        if not params_match:
+            self.restart_mysqld_callback(with_binlog=with_binlog, with_gtids=with_gtids)
+            self.update_state(mysql_params={"with_binlog": with_binlog, "with_gtids": with_gtids})
         if not server_uuid:
             with self._mysql_cursor() as cursor:
                 cursor.execute("SELECT @@GLOBAL.server_uuid AS server_uuid")
                 server_uuid = cursor.fetchone()["server_uuid"]
-        self.update_state(mysql_params={"with_binlog": with_binlog, "with_gtids": with_gtids}, server_uuid=server_uuid)
+            self.update_state(server_uuid=server_uuid)
 
     def _patch_gtid_executed(self, binlog: PendingBinlogInfo) -> None:
         if self.state["gtids_patched"]:
