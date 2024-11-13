@@ -1,4 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from rohmu.errors import FileNotFoundFromStorageError
+
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
 from .binlog_scanner import BinlogInfo
@@ -700,6 +702,9 @@ class BackupStream(threading.Thread):
                 remote_gtid_executed=basebackup_info["gtid_executed"],
             )
             return True
+        except FileNotFoundFromStorageError:
+            self.log.info("Could not find basebackup.json, backup probably not yet finished")
+            return False
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to get basebackup info")
             self.stats.unexpected_exception(ex=ex, where="BackupStream._cache_basebackup_info")
