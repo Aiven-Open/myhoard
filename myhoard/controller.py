@@ -71,6 +71,7 @@ class BackupSiteInfo(TypedDict):
     recovery_only: bool
     object_storage: Dict[str, str]
     encryption_keys: Dict[str, str]
+    split_size: Optional[int]
 
 
 class RestoreOptions(TypedDict):
@@ -586,10 +587,14 @@ class Controller(threading.Thread):
                 closed_info = {}
                 completed_info = {}
                 preserved_info = {}
+                last_split_seen = 0
                 for info in file_storage.list_iter(site_and_stream_id):
                     file_name = info["name"].rsplit("/", 1)[-1]
                     if file_name == "basebackup.xbstream":
                         basebackup_compressed_size = info["size"]
+                    elif file_name.startswith("basebackup.xbstream."):
+                        split_nr = int(file_name.rsplit(".", 1)[-1])
+                        last_split_seen = max(split_nr, last_split_seen)
                     elif file_name == "basebackup.json":
                         # The basebackup info json contents never change after creation so we can use cached
                         # value if available to avoid re-fetching the same content over and over again
@@ -608,8 +613,18 @@ class Controller(threading.Thread):
                         preserved_info = parse_fs_metadata(info["metadata"])
 
                 if basebackup_info and basebackup_compressed_size:
+                    # we're storing the info in the basebackup.json, only use the on-storage size as a fallback
+                    # in case we have a split upload
+                    basebackup_compressed_size = basebackup_info.get("compressed_size", basebackup_compressed_size)
                     basebackup_info = dict(basebackup_info, compressed_size=basebackup_compressed_size)
-                resumable = basebackup_info and basebackup_compressed_size
+                all_splits_accounted_for = False
+                if basebackup_info:
+                    number_of_splits = basebackup_info.get("number_of_splits", 1)
+                    if number_of_splits > 1:
+                        all_splits_accounted_for = number_of_splits == last_split_seen
+                    else:
+                        all_splits_accounted_for = True
+                resumable = basebackup_info and basebackup_compressed_size and all_splits_accounted_for
                 completed = resumable and completed_info
                 closed = completed and closed_info
 
@@ -760,6 +775,7 @@ class Controller(threading.Thread):
             stream_id=stream_id,
             temp_dir=self.temp_dir,
             xtrabackup_settings=self.xtrabackup_settings,
+            split_size=backup_site.get("split_size", 0),
         )
 
     def _delete_backup_stream_state(self, stream_id):
@@ -1733,6 +1749,7 @@ class Controller(threading.Thread):
             stream_id=stream_id,
             temp_dir=self.temp_dir,
             xtrabackup_settings=self.xtrabackup_settings,
+            split_size=backup_site.get("split_size", 0),
         )
         self.backup_streams.append(stream)
         self.state_manager.update_state(

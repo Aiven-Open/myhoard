@@ -659,3 +659,11 @@ def get_xtrabackup_version() -> Tuple[int, ...]:
     if matches is None:
         raise Exception(f"Cannot extract xtrabackup version number from {result.stderr!r}")
     return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(matches[1]) if len(x) > 0)
+
+
+def file_name_for_basebackup_split(base_file_name: str, split_nr: int) -> str:
+    # only append the split nr to splits after the first split to not have to add special cases
+    if split_nr > 1:
+        return f"{base_file_name}.{split_nr:03d}"
+    else:
+        return base_file_name
