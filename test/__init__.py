@@ -175,7 +175,7 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         command = command + ["--gtid-mode=OFF"]
     mysql_config.proc = subprocess.Popen(command)  # pylint: disable=consider-using-with
     print("Started mysqld with pid", mysql_config.proc.pid)
-    wait_for_port(mysql_config.port, wait_time=30)
+    wait_for_port(mysql_config.port, wait_time=60)
 
 
 def port_is_listening(hostname, port, ipv6):
