@@ -13,6 +13,7 @@ from .util import (
     change_master_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
+    file_name_for_basebackup_split,
     get_slave_status,
     GtidExecuted,
     GtidRangeDict,
@@ -853,17 +854,20 @@ class RestoreCoordinator(threading.Thread):
         return None
 
     def _basebackup_data_provider(self, target_stream) -> None:
-        name = self._build_full_name("basebackup.xbstream")
         compressed_size = self.state["basebackup_info"].get("compressed_size")
-        with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
+        with (self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage):
             last_time = [time.monotonic()]
             last_value = [0]
             self.basebackup_bytes_downloaded = 0
+            total_at_last_split_download = [0]
+            current_file_size = [0]
 
             def download_progress(progress, max_progress):
                 if progress and max_progress and compressed_size:
                     # progress may be the actual number of bytes or it may be percentages
-                    self.basebackup_bytes_downloaded = int(compressed_size * progress / max_progress)
+                    self.basebackup_bytes_downloaded = total_at_last_split_download[0] \
+                        + int(current_file_size[0] * progress / max_progress)
+
                     # Track both absolute number and explicitly calculated rate. The rate can be useful as
                     # a separate measurement because downloads are not ongoing all the time and calculating
                     # rate based on raw byte counter requires knowing when the operation started and ended
@@ -876,7 +880,22 @@ class RestoreCoordinator(threading.Thread):
                         stats=self.stats,
                     )
 
-            file_storage.get_contents_to_fileobj(name, target_stream, progress_callback=download_progress)
+            num_splits = self.state["basebackup_info"].get("number_of_splits", 1)
+            name = self._build_full_name("basebackup.xbstream")
+            current_split = 0
+            while num_splits > 0:
+                num_splits -= 1
+                current_split += 1
+
+                file_name_to_use = file_name_for_basebackup_split(name, current_split)
+
+                # get the size of the current split-file so we can calculate the progress
+                current_file_size[0] = file_storage.get_file_size(file_name_to_use)
+
+                self.log.info("Downloading basebackup file: %s (%d bytes)", file_name_to_use, current_file_size[0])
+                file_storage.get_contents_to_fileobj(file_name_to_use, target_stream, progress_callback=download_progress)
+
+                total_at_last_split_download[0] = self.basebackup_bytes_downloaded
 
     def _get_iteration_sleep(self) -> float:
         if self.phase in self.POLL_PHASES:

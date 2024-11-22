@@ -1,6 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+from rohmu.errors import FileNotFoundFromStorageError
+
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
+from .binary_io_slice import BinaryIOSlice
 from .binlog_scanner import BinlogInfo
 from .errors import BlockMismatchError, XtraBackupError
 from .state_manager import StateManager
@@ -10,6 +13,7 @@ from .util import (
     DEFAULT_MYSQL_TIMEOUT,
     DEFAULT_XTRABACKUP_SETTINGS,
     ERR_TIMEOUT,
+    file_name_for_basebackup_split,
     first_contains_gtids_not_in_second,
     GtidExecuted,
     make_fs_metadata,
@@ -34,7 +38,6 @@ from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
 from typing import Any, Callable, cast, Dict, Iterable, Iterator, List, Optional, Set, Tuple, TYPE_CHECKING, TypedDict
-
 import contextlib
 import enum
 import json
@@ -149,6 +152,8 @@ class BackupStream(threading.Thread):
         stream_id: str
         updated_at: float
         valid_local_binlog_found: bool
+        number_of_splits: Optional[int]
+        split_size: Optional[int]
 
     def __init__(
         self,
@@ -175,10 +180,12 @@ class BackupStream(threading.Thread):
         stream_id: Optional[str] = None,
         temp_dir: str,
         xtrabackup_settings: Optional[Dict[str, int]] = None,
+        split_size: Optional[int] = 0,
     ) -> None:
         super().__init__()
         stream_id = stream_id or self.new_stream_id()
         self.basebackup_bytes_uploaded = 0
+        self.split_size = split_size
         self.basebackup_operation: Optional[BasebackupOperation] = None
         self.basebackup_progress: Optional[Dict[str, Any]] = None
         self.compression = compression
@@ -650,23 +657,24 @@ class BackupStream(threading.Thread):
     def _basebackup_stream_handler(self, stream):
         file_storage = self.file_storage_setup_fn()
 
-        metadata = make_fs_metadata(
-            {
-                "backup_started_at": time.time(),
-                "uploaded_from": self.server_id,
-            }
-        )
+        metadata_template = {
+            "backup_started_at": time.time(),
+            "uploaded_from": self.server_id,
+        }
+        metadata = make_fs_metadata(metadata_template)
 
         last_time = [time.monotonic()]
         last_value = [0]
         self.basebackup_bytes_uploaded = 0
 
         def upload_progress(bytes_sent):
-            self.basebackup_bytes_uploaded = bytes_sent
             # Track both absolute number and explicitly calculated rate. The rate can be useful as
             # a separate measurement because uploads are not ongoing all the time and calculating
             # rate based on raw byte counter requires knowing when the operation started and ended
-            self.stats.gauge_int("myhoard.backup_stream.basebackup_bytes_uploaded", self.basebackup_bytes_uploaded)
+            self.stats.gauge_int(
+                "myhoard.backup_stream.basebackup_bytes_uploaded",
+                self.basebackup_bytes_uploaded + bytes_sent
+            )
             last_value[0], last_time[0] = track_rate(
                 current=bytes_sent,
                 last_recorded=last_value[0],
@@ -675,10 +683,45 @@ class BackupStream(threading.Thread):
                 stats=self.stats,
             )
 
-        file_storage.store_file_object(
-            self._build_full_name("basebackup.xbstream"), stream, metadata=metadata, upload_progress_fn=upload_progress
-        )
+        split_nr = 0
+        uploaded_size = 0
+        basebackup_file_path = self._build_full_name("basebackup.xbstream")
+        while (split_nr == 0) or uploaded_size == self.split_size:
+            split_nr += 1
+
+            storage_file_name = file_name_for_basebackup_split(basebackup_file_path, split_nr)
+
+            if self.split_size and self.split_size > 0:
+                stream_to_use = BinaryIOSlice(self.split_size, stream)
+            else:
+                stream_to_use = stream
+
+            self.log.info("Uploading basebackup to %s", storage_file_name)
+            file_storage.store_file_object(
+                storage_file_name,
+                stream_to_use,
+                metadata=metadata,
+                upload_progress_fn=upload_progress
+            )
+
+            # Unfortunately, at least for GCP, the upload_progress_fn doesn't get called for the last chunk,
+            # so we need to get the file-size from object-storage. Which is probably also more robust to API
+            # changes in rohmu.
+            uploaded_size = file_storage.get_file_size(storage_file_name)
+            self.basebackup_bytes_uploaded += uploaded_size
+
+            # don't loop forever if we can't upload anything
+            if not self.split_size or self.split_size < 1:
+                break
+
+        metadata = make_fs_metadata({
+            **metadata_template,
+            "number_of_splits": split_nr,
+            "split_size": self.split_size,
+            "basebackup_compressed_size": self.basebackup_bytes_uploaded,
+        })
         self.state_manager.update_state(basebackup_file_metadata=metadata)
+        self.log.info("Done uploading basebackup files, split into %d files", split_nr)
 
     def _build_full_name(self, name: str) -> str:
         return f"{self.site}/{self.stream_id}/{name}"
@@ -700,6 +743,9 @@ class BackupStream(threading.Thread):
                 remote_gtid_executed=basebackup_info["gtid_executed"],
             )
             return True
+        except FileNotFoundFromStorageError:
+            self.log.info("Could not find basebackup.json, backup probably not yet finished")
+            return False
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to get basebackup info")
             self.stats.unexpected_exception(ex=ex, where="BackupStream._cache_basebackup_info")
@@ -996,8 +1042,6 @@ class BackupStream(threading.Thread):
             # earlier time is disallowed) to ensure the gtid_executed patching happens
             end_time = time.time() + 1
 
-            compressed_size = self.file_storage.get_file_size(self._build_full_name("basebackup.xbstream"))
-
             # Write promotion info so that determining correct binlog sequence does not
             # require special logic for figuring out correct server id at the beginning
             self._write_promotion_info(promoted_at=end_time, start_index=1)
@@ -1012,6 +1056,13 @@ class BackupStream(threading.Thread):
             if last_gtid:
                 self.log.info("Last basebackup GTID %r, truncating GTID executed %r accordingly", last_gtid, gtid_executed)
                 truncate_gtid_executed(gtid_executed, last_gtid)
+
+            if "basebackup_file_metadata" in self.state:
+                basebackup_file_metadata = parse_fs_metadata(self.state["basebackup_file_metadata"])
+                compressed_size = basebackup_file_metadata.get("basebackup_compressed_size")
+            else:
+                basebackup_file_metadata = {}
+                compressed_size = None
 
             info = {
                 "binlog_index": int(binlog_info["file_name"].split(".")[-1]) if binlog_info else None,
@@ -1028,6 +1079,8 @@ class BackupStream(threading.Thread):
                 "lsn_info": self.basebackup_operation.lsn_info,
                 "normalized_backup_time": self.state["normalized_backup_time"],
                 "number_of_files": self.basebackup_operation.number_of_files,
+                "split_size": self.split_size,
+                "number_of_splits": basebackup_file_metadata.get("number_of_splits", 1),
                 "start_size": self.basebackup_operation.data_directory_size_start,
                 "start_ts": start_time,
                 "uploaded_from": self.server_id,

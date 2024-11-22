@@ -22,6 +22,13 @@ def test_restore_coordinator(session_tmpdir, mysql_master, mysql_empty):
     )
 
 
+def test_restore_coordinator_with_split_basebackup(session_tmpdir, mysql_master, mysql_empty):
+    _restore_coordinator_sequence(
+        session_tmpdir, mysql_master, mysql_empty, pitr=False, rebuild_tables=False, fail_and_resume=False,
+        split_size=10_000,
+    )
+
+
 def test_restore_coordinator_pitr(session_tmpdir, mysql_master, mysql_empty):
     _restore_coordinator_sequence(
         session_tmpdir, mysql_master, mysql_empty, pitr=True, rebuild_tables=False, fail_and_resume=False
@@ -41,7 +48,7 @@ def test_restore_coordinator_resume_rebuild_tables(session_tmpdir, mysql_master,
 
 
 def _restore_coordinator_sequence(
-    session_tmpdir, mysql_master, mysql_empty, *, pitr: bool, rebuild_tables: bool, fail_and_resume: bool
+    session_tmpdir, mysql_master, mysql_empty, *, pitr: bool, rebuild_tables: bool, fail_and_resume: bool, split_size: int=0,
 ):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
@@ -80,6 +87,7 @@ def _restore_coordinator_sequence(
         state_file=state_file_name1,
         stats=build_statsd_client(),
         temp_dir=mysql_master.base_dir,
+        split_size=split_size,
     )
     # Use two backup streams to test recovery mode where basebackup is restored from earlier
     # backup and binlogs are applied from several different backups
@@ -98,6 +106,7 @@ def _restore_coordinator_sequence(
         state_file=state_file_name2,
         stats=build_statsd_client(),
         temp_dir=mysql_master.base_dir,
+        split_size=split_size,
     )
 
     data_generator = DataGenerator(
@@ -437,7 +446,7 @@ def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):
         mysql_data_directory="",
         mysql_relay_log_index_file="",
         mysql_relay_log_prefix="",
-        pending_binlogs_state_file="the_pending_binlog_state",
+        pending_binlogs_state_file=os.path.join(session_tmpdir().strpath, "the_pending_binlog_state"),
         rebuild_tables=True,
         restart_mysqld_callback=lambda **kwargs: _register_restart(**kwargs),
         rsa_private_key_pem="",

@@ -1,4 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+import rohmu
+
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
@@ -7,6 +9,7 @@ from rohmu.object_storage.local import LocalTransfer
 from typing import cast, Dict
 
 import json
+import math
 import myhoard.util as myhoard_util
 import os
 import pytest
@@ -26,7 +29,11 @@ def test_backup_stream_with_s3_emulation(session_tmpdir, mysql_master):
     _run_backup_stream_test(session_tmpdir, mysql_master, PatchedBackupStream)
 
 
-def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_stream_class):
+def test_backup_stream_with_split_basebackup_file(session_tmpdir, mysql_master):
+    _run_backup_stream_test(session_tmpdir, mysql_master, BackupStream, split_size=10_000)
+
+
+def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_stream_class, split_size: int = 0):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
         cursor.execute("USE db1")
@@ -60,6 +67,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         state_file=state_file,
         stats=build_statsd_client(),
         temp_dir=mysql_master.base_dir,
+        split_size=split_size,
     )
 
     assert mysql_master.server_id is not None
@@ -92,12 +100,14 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         stats=build_statsd_client(),
         stream_id=bs.stream_id,
         temp_dir=mysql_master.base_dir,
+        split_size=split_size,
     )
 
     with bs_observer.running():
         with bs.running():
             wait_for_condition(bs.is_streaming_binlogs, timeout=15)
             wait_for_condition(lambda: bs_observer.state["last_remote_state_check"], timeout=10)
+            wait_for_condition(lambda: bs_observer.state.get("remote_gtid_executed", []), timeout=10)
 
             with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
                 cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
@@ -150,6 +160,23 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         assert backup["stream_id"]
         assert backup["resumable"]
         assert backup["site"] == "default"
+        assert backup["basebackup_info"]["split_size"] == split_size
+        if split_size:
+            expected_number_of_splits = math.ceil(backup["basebackup_info"]["compressed_size"] / float(split_size))
+            assert backup["basebackup_info"]["number_of_splits"] == expected_number_of_splits
+
+            # verify that all chunks have been uploaded
+            number_of_splits_found = 0
+            file_storage = rohmu.get_transfer(backup_sites["default"]["object_storage"])
+            streams = list(file_storage.list_prefixes("default"))
+            assert len(streams) == 1
+            for site_and_stream_id in streams:
+                for info in file_storage.list_iter(site_and_stream_id):
+                    file_name = info["name"].rsplit("/", 1)[-1]
+                    if file_name.startswith("basebackup.xbstream"):
+                        number_of_splits_found += 1
+
+            assert number_of_splits_found == expected_number_of_splits
 
         with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
             cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")

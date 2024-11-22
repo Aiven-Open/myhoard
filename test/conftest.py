@@ -98,7 +98,7 @@ def mysql_initialize_and_start(
     if mysql_basedir is None and os.path.exists("/opt/mysql"):
         mysql_basedir = "/opt/mysql"
 
-    mysqld_bin = "/usr/sbin/mysqld"
+    mysqld_bin = os.environ.get("MYSQL_BINARY_PATH") or "/usr/sbin/mysqld"
     if not os.path.exists(mysqld_bin):
         mysqld_bin = "/usr/bin/mysqld"
 
