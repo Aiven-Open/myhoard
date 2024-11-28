@@ -1563,6 +1563,7 @@ class Controller(threading.Thread):
             elif backup["resumable"] and not backup["closed_at"]:
                 self.log.info("Starting resumable non-closed stream %r", stream_id)
                 new_stream = self._build_backup_stream(backup)
+                self.stats.increase("myhoard.backup_started", tags={"resumed": "true"})
                 new_stream.start()
                 new_streams[stream_id] = new_stream
             elif not backup["resumable"] and stream_id in self.state["owned_stream_ids"]:
@@ -1756,6 +1757,7 @@ class Controller(threading.Thread):
             backup_request=None,
             owned_stream_ids=self.state["owned_stream_ids"] + [stream_id],
         )
+        self.stats.increase("myhoard.backup_started", tags={"resumed": "false"})
         stream.start()
 
     def _state_file_from_stream_id(self, stream_id):
