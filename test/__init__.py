@@ -98,6 +98,7 @@ def build_controller(
         mysql_relay_log_prefix=mysql_config.config_options.relay_log_file_prefix,
         restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_config, **kwargs),
         restore_max_binlog_bytes=2 * 1024 * 1024,
+        restore_download_workers_count=2,
         server_id=mysql_config.server_id,
         state_dir=state_dir,
         stats=build_statsd_client(),
