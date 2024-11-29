@@ -1,8 +1,8 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
-from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.errors import BlockMismatchError, XtraBackupError
 from myhoard.util import get_mysql_version, mysql_cursor
+from packaging.version import Version
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
 from typing import Optional
 
@@ -156,7 +156,7 @@ class BasebackupOperation:
         params["timeout"] = CURSOR_TIMEOUT_DURING_OPTIMIZE
         with mysql_cursor(**params) as cursor:
             version = get_mysql_version(cursor)
-            if LooseVersion(version) < LooseVersion("8.0.29"):
+            if Version(version) < Version("8.0.29"):
                 return
 
             # allow OPTIMIZE TABLE to run on tables without primary keys

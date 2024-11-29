@@ -15,6 +15,7 @@ from .util import (
     ERR_TIMEOUT,
     file_name_for_basebackup_split,
     first_contains_gtids_not_in_second,
+    get_mysql_version,
     GtidExecuted,
     make_fs_metadata,
     mysql_cursor,
@@ -1024,10 +1025,12 @@ class BackupStream(threading.Thread):
             # FLUSH BINARY LOGS might take a long time if the server is under heavy load,
             # use longer than normal timeout here with multiple retries and increasing timeout.
             connect_params = dict(self.mysql_client_params)
+            mysql_version = None
             for retry, multiplier in [(True, 1), (True, 2), (False, 3)]:
                 try:
                     connect_params["timeout"] = DEFAULT_MYSQL_TIMEOUT * 5 * multiplier
                     with mysql_cursor(**connect_params) as cursor:
+                        mysql_version = get_mysql_version(cursor)
                         cursor.execute("FLUSH BINARY LOGS")
                         cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
                         gtid_executed = parse_gtid_range_string(cast(dict, cursor.fetchone())["gtid_executed"])
@@ -1084,6 +1087,7 @@ class BackupStream(threading.Thread):
                 "start_size": self.basebackup_operation.data_directory_size_start,
                 "start_ts": start_time,
                 "uploaded_from": self.server_id,
+                "mysql_version": mysql_version,
             }
             self.file_storage.store_file_from_memory(
                 self._build_full_name("basebackup.json"),
