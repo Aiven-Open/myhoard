@@ -1,9 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .errors import DiskFullError
-from .util import get_xtrabackup_version
+from .util import get_xtrabackup_version, parse_version, parse_xtrabackup_info
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Final, Optional
+from typing import Final, Optional, Tuple
 
 import base64
 import fnmatch
@@ -56,11 +56,15 @@ class BasebackupRestoreOperation:
         self.stream_handler = stream_handler
         self.temp_dir = None
         self.temp_dir_base = temp_dir
+        self.backup_xtrabackup_info = None
+        self.xtrabackup_version = None
 
     def restore_backup(self):
         if os.path.exists(self.mysql_data_directory):
             raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists")
 
+        self.xtrabackup_version = get_xtrabackup_version()
+        self.log.info("XtraBackup version: %r", self.xtrabackup_version)
         # Write encryption key to file to avoid having it on command line. NamedTemporaryFile has mode 0600
         with tempfile.NamedTemporaryFile() as encryption_key_file:
             encryption_key_file.write(base64.b64encode(self.encryption_key))
@@ -101,6 +105,16 @@ class BasebackupRestoreOperation:
                         self._process_xbstream_input_output()
 
                 self.data_directory_size_start = self._get_directory_size(self.temp_dir)
+                xtrabackup_info_path = os.path.join(self.temp_dir, "xtrabackup_info")
+                if os.path.exists(xtrabackup_info_path):
+                    with open(xtrabackup_info_path) as fh:
+                        xtrabackup_info_text = fh.read()
+                    self.backup_xtrabackup_info = parse_xtrabackup_info(xtrabackup_info_text)
+                    self.log.info(
+                        "Backup info. Tool version: %s, Server version: %s",
+                        self.backup_xtrabackup_info.get("tool_version"),
+                        self.backup_xtrabackup_info.get("server_version"),
+                    )
 
                 # TODO: Get some execution time numbers with non-trivial data sets for --prepare
                 # and --move-back commands and add progress monitoring if necessary (and feasible)
@@ -159,6 +173,12 @@ class BasebackupRestoreOperation:
                 shutil.rmtree(self.temp_dir)
 
         self.data_directory_size_end = self._get_directory_size(self.mysql_data_directory, cleanup=True)
+
+    @property
+    def backup_xtrabackup_version(self) -> Optional[Tuple[int, ...]]:
+        if self.backup_xtrabackup_info is None or "tool_version" not in self.backup_xtrabackup_info:
+            return None
+        return parse_version(self.backup_xtrabackup_info["tool_version"])
 
     def _get_directory_size(self, directory_name, cleanup=False):
         # auto.cnf shouldn't be present to begin with but make extra sure so that we get new server UUID

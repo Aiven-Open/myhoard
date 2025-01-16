@@ -149,6 +149,7 @@ class RestoreCoordinator(threading.Thread):
         server_uuid: Optional[str]
         target_time_reached: bool
         write_relay_log_manually: bool
+        xtrabackup_version_missmatch: bool
 
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
@@ -260,6 +261,7 @@ class RestoreCoordinator(threading.Thread):
             "server_uuid": None,
             "target_time_reached": False,
             "write_relay_log_manually": False,
+            "xtrabackup_version_missmatch": False,
         }
         self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
@@ -314,6 +316,10 @@ class RestoreCoordinator(threading.Thread):
     @property
     def phase(self) -> "RestoreCoordinator.Phase":
         return self.state["phase"]
+
+    @property
+    def xtrabackup_version_missmatch(self) -> bool:
+        return self.state["xtrabackup_version_missmatch"]
 
     def run(self) -> None:
         self.log.info("Restore coordinator running")
@@ -435,6 +441,15 @@ class RestoreCoordinator(threading.Thread):
             self.state_manager.increment_counter(name="basebackup_restore_errors")
             self.state_manager.increment_counter(name="restore_errors")
             self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
+            if (
+                self.basebackup_restore_operation.xtrabackup_version
+                and self.basebackup_restore_operation.backup_xtrabackup_version
+            ):
+                xtrabackup_info_missmatch = (
+                    self.basebackup_restore_operation.xtrabackup_version
+                    != self.basebackup_restore_operation.backup_xtrabackup_version
+                )
+                self.update_state(xtrabackup_info_missmatch=xtrabackup_info_missmatch)
             if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
                 self.log.error(
                     "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS
@@ -855,7 +870,7 @@ class RestoreCoordinator(threading.Thread):
 
     def _basebackup_data_provider(self, target_stream) -> None:
         compressed_size = self.state["basebackup_info"].get("compressed_size")
-        with (self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage):
+        with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
             last_time = [time.monotonic()]
             last_value = [0]
             self.basebackup_bytes_downloaded = 0
@@ -865,8 +880,9 @@ class RestoreCoordinator(threading.Thread):
             def download_progress(progress, max_progress):
                 if progress and max_progress and compressed_size:
                     # progress may be the actual number of bytes or it may be percentages
-                    self.basebackup_bytes_downloaded = total_at_last_split_download[0] \
-                        + int(current_file_size[0] * progress / max_progress)
+                    self.basebackup_bytes_downloaded = total_at_last_split_download[0] + int(
+                        current_file_size[0] * progress / max_progress
+                    )
 
                     # Track both absolute number and explicitly calculated rate. The rate can be useful as
                     # a separate measurement because downloads are not ongoing all the time and calculating

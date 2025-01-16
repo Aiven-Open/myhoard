@@ -385,4 +385,24 @@ def test_restart_unexpected_dead_sql_thread() -> None:
 
 def test_trabackup_version() -> None:
     version = myhoard_util.get_xtrabackup_version()
+    assert len(version) >= 3
     assert version < (99, 99, 99), "version is higher than expected"
+
+
+def test_parse_version() -> None:
+    version = myhoard_util.parse_version("8.0.35-3")
+    assert version == (8, 0, 35, 3)
+
+
+def test_parse_xtrabackup_info() -> None:
+    raw_xtrabackup_info = """
+    name =
+    tool_version = 8.0.30-23
+    server_version = 8.0.30
+    """
+    xtrabackup_info = myhoard_util.parse_xtrabackup_info(raw_xtrabackup_info)
+    assert xtrabackup_info == {
+        "name": "",
+        "tool_version": "8.0.30-23",
+        "server_version": "8.0.30",
+    }
