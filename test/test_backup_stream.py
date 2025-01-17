@@ -1,6 +1,4 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-import rohmu
-
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
@@ -13,6 +11,7 @@ import math
 import myhoard.util as myhoard_util
 import os
 import pytest
+import rohmu
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -150,6 +149,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
                     "directory": backup_target_location,
                     "storage_type": "local",
                 },
+                "split_size": None,
             }
         }
         backups = Controller.get_backup_list(backup_sites)

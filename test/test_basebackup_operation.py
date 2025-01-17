@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_statsd_client, MySQLConfig, restart_mysql
-from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.basebackup_operation import BasebackupOperation
+from packaging.version import Version
 from typing import IO
 from unittest import SkipTest
 from unittest.mock import mock_open, patch
@@ -139,7 +139,7 @@ def test_fails_on_invalid_params(mysql_master):
 def test_backup_with_non_optimized_tables(mysql_master: MySQLConfig) -> None:
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         version = myhoard_util.get_mysql_version(cursor)
-        if LooseVersion(version) < LooseVersion("8.0.29"):
+        if Version(version) < Version("8.0.29"):
             raise SkipTest("DB version doesn't need OPTIMIZE TABLE")
 
         def create_test_db(*, db_name: str, table_name: str, add_pk: bool) -> None:

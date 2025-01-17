@@ -1,6 +1,4 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from rohmu.errors import FileNotFoundFromStorageError
-
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
 from .binary_io_slice import BinaryIOSlice
@@ -33,11 +31,13 @@ from httplib2 import ServerNotFoundError
 from rohmu import errors as rohmu_errors
 from rohmu.compressor import CompressionStream
 from rohmu.encryptor import EncryptorStream
+from rohmu.errors import FileNotFoundFromStorageError
 from rohmu.object_storage.s3 import S3Transfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
 from typing import Any, Callable, cast, Dict, Iterable, Iterator, List, Optional, Set, Tuple, TYPE_CHECKING, TypedDict
+
 import contextlib
 import enum
 import json
@@ -256,6 +256,8 @@ class BackupStream(threading.Thread):
             "stream_id": stream_id,
             "updated_at": time.time(),
             "valid_local_binlog_found": False,
+            "number_of_splits": None,
+            "split_size": None,
         }
         self.state_manager = StateManager(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
@@ -672,8 +674,7 @@ class BackupStream(threading.Thread):
             # a separate measurement because uploads are not ongoing all the time and calculating
             # rate based on raw byte counter requires knowing when the operation started and ended
             self.stats.gauge_int(
-                "myhoard.backup_stream.basebackup_bytes_uploaded",
-                self.basebackup_bytes_uploaded + bytes_sent
+                "myhoard.backup_stream.basebackup_bytes_uploaded", self.basebackup_bytes_uploaded + bytes_sent
             )
             last_value[0], last_time[0] = track_rate(
                 current=bytes_sent,
@@ -698,10 +699,7 @@ class BackupStream(threading.Thread):
 
             self.log.info("Uploading basebackup to %s", storage_file_name)
             file_storage.store_file_object(
-                storage_file_name,
-                stream_to_use,
-                metadata=metadata,
-                upload_progress_fn=upload_progress
+                storage_file_name, stream_to_use, metadata=metadata, upload_progress_fn=upload_progress
             )
 
             # Unfortunately, at least for GCP, the upload_progress_fn doesn't get called for the last chunk,
@@ -714,12 +712,14 @@ class BackupStream(threading.Thread):
             if not self.split_size or self.split_size < 1:
                 break
 
-        metadata = make_fs_metadata({
-            **metadata_template,
-            "number_of_splits": split_nr,
-            "split_size": self.split_size,
-            "basebackup_compressed_size": self.basebackup_bytes_uploaded,
-        })
+        metadata = make_fs_metadata(
+            {
+                **metadata_template,
+                "number_of_splits": split_nr,
+                "split_size": self.split_size,
+                "basebackup_compressed_size": self.basebackup_bytes_uploaded,
+            }
+        )
         self.state_manager.update_state(basebackup_file_metadata=metadata)
         self.log.info("Done uploading basebackup files, split into %d files", split_nr)
 
@@ -1265,9 +1265,9 @@ class BackupStream(threading.Thread):
                             index_name,
                             encrypt_stream,
                             metadata=metadata,
-                            upload_progress_fn=self.binlog_progress_tracker.increment
-                            if self.binlog_progress_tracker
-                            else None,
+                            upload_progress_fn=(
+                                self.binlog_progress_tracker.increment if self.binlog_progress_tracker else None
+                            ),
                         )
                         self.stats.increase("myhoard.binlog.upload")
                     if self.file_uploaded_callback:

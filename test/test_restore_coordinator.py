@@ -24,7 +24,12 @@ def test_restore_coordinator(session_tmpdir, mysql_master, mysql_empty):
 
 def test_restore_coordinator_with_split_basebackup(session_tmpdir, mysql_master, mysql_empty):
     _restore_coordinator_sequence(
-        session_tmpdir, mysql_master, mysql_empty, pitr=False, rebuild_tables=False, fail_and_resume=False,
+        session_tmpdir,
+        mysql_master,
+        mysql_empty,
+        pitr=False,
+        rebuild_tables=False,
+        fail_and_resume=False,
         split_size=10_000,
     )
 
@@ -48,7 +53,14 @@ def test_restore_coordinator_resume_rebuild_tables(session_tmpdir, mysql_master,
 
 
 def _restore_coordinator_sequence(
-    session_tmpdir, mysql_master, mysql_empty, *, pitr: bool, rebuild_tables: bool, fail_and_resume: bool, split_size: int=0,
+    session_tmpdir,
+    mysql_master,
+    mysql_empty,
+    *,
+    pitr: bool,
+    rebuild_tables: bool,
+    fail_and_resume: bool,
+    split_size: int = 0,
 ):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
@@ -428,6 +440,7 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
 
 
 def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):
+    # pylint: disable=W0212,W0108
     restarts = []
 
     state_file = os.path.join(session_tmpdir().strpath, "the_state_file.json")
@@ -436,10 +449,8 @@ def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):
         restarts.append({**kwargs})
 
     rc = RestoreCoordinator(
-        binlog_streams=[
-        ],
-        file_storage_config={
-        },
+        binlog_streams=[],
+        file_storage_config={},
         free_memory_percentage=80,
         mysql_client_params={},
         mysql_config_file_name="",

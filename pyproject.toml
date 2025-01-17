@@ -10,16 +10,16 @@ authors = [
 ]
 description = "MyHoard is a daemon for creating, managing and restoring MySQL backups."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers=[
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Database :: Database Engines/Servers",
     "Topic :: Software Development :: Libraries",
 ]
@@ -37,6 +37,7 @@ dependencies = [
     "python-snappy == 0.6.1",
     "rohmu >= 1.1.2",
     "sentry-sdk==1.14.0",
+    "packaging",
 ]
 
 [project.optional-dependencies]
