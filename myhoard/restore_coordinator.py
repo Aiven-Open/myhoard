@@ -855,7 +855,7 @@ class RestoreCoordinator(threading.Thread):
 
     def _basebackup_data_provider(self, target_stream) -> None:
         compressed_size = self.state["basebackup_info"].get("compressed_size")
-        with (self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage):
+        with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
             last_time = [time.monotonic()]
             last_value = [0]
             self.basebackup_bytes_downloaded = 0
@@ -865,8 +865,9 @@ class RestoreCoordinator(threading.Thread):
             def download_progress(progress, max_progress):
                 if progress and max_progress and compressed_size:
                     # progress may be the actual number of bytes or it may be percentages
-                    self.basebackup_bytes_downloaded = total_at_last_split_download[0] \
-                        + int(current_file_size[0] * progress / max_progress)
+                    self.basebackup_bytes_downloaded = total_at_last_split_download[0] + int(
+                        current_file_size[0] * progress / max_progress
+                    )
 
                     # Track both absolute number and explicitly calculated rate. The rate can be useful as
                     # a separate measurement because downloads are not ongoing all the time and calculating

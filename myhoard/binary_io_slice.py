@@ -1,6 +1,6 @@
 # Copyright (c) 2024 Aiven, Helsinki, Finland. https://aiven.io/
 from types import TracebackType
-from typing import BinaryIO, Type, Iterable, Iterator
+from typing import BinaryIO, Iterable, Iterator, Type
 
 
 class MethodNotSupportedError(Exception):
@@ -14,7 +14,7 @@ class BinaryIOSlice(BinaryIO):
         self._size_remaining = max_file_size
         self.stream = stream
 
-    def read(self, __n: int = ...) -> bytes:
+    def read(self, __n: int = -1) -> bytes:
         if __n < 0:
             to_read = self._size_remaining
         else:
@@ -53,13 +53,13 @@ class BinaryIOSlice(BinaryIO):
     def readable(self) -> bool:
         return self.stream.readable()
 
-    def readline(self, __limit: int = ...) -> bytes:
+    def readline(self, __limit: int = -1) -> bytes:
         raise MethodNotSupportedError()
 
-    def readlines(self, __hint: int = ...) -> list[bytes]:
+    def readlines(self, __hint: int = -1) -> list[bytes]:
         raise MethodNotSupportedError()
 
-    def seek(self, __offset: int, __whence: int = ...) -> int:
+    def seek(self, __offset: int, __whence: int = 0) -> int:
         return self.stream.seek(__offset, __whence)
 
     def seekable(self) -> bool:
@@ -68,7 +68,7 @@ class BinaryIOSlice(BinaryIO):
     def tell(self) -> int:
         return self._max_file_size - self._size_remaining
 
-    def truncate(self, __size: int | None = ...) -> int:
+    def truncate(self, __size: int | None = None) -> int:
         raise MethodNotSupportedError()
 
     def writable(self) -> bool:
@@ -90,6 +90,6 @@ class BinaryIOSlice(BinaryIO):
         return self.stream.__enter__()
 
     def __exit__(
-            self, __t: Type[BaseException] | None, __value: BaseException | None, __traceback: TracebackType | None
+        self, __t: Type[BaseException] | None, __value: BaseException | None, __traceback: TracebackType | None
     ) -> None:
         return self.stream.__exit__(__t, __value, __traceback)
