@@ -1008,11 +1008,12 @@ class BackupStream(threading.Thread):
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
+            optimize_tables_before_backup=self.optimize_tables_before_backup,
             progress_callback=self._basebackup_progress_callback,
+            register_redo_log_consumer=self.xtrabackup_settings["register_redo_log_consumer"],
             stats=self.stats,
             stream_handler=self._basebackup_stream_handler,
             temp_dir=self.temp_dir,
-            optimize_tables_before_backup=self.optimize_tables_before_backup,
         )
         try:
             self.basebackup_operation.create_backup()

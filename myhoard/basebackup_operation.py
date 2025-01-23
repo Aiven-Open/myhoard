@@ -57,6 +57,7 @@ class BasebackupOperation:
         mysql_data_directory,
         optimize_tables_before_backup=False,
         progress_callback=None,
+        register_redo_log_consumer=False,
         stats,
         stream_handler,
         temp_dir,
@@ -85,6 +86,7 @@ class BasebackupOperation:
         self.proc = None
         self.processed_original_bytes = 0
         self.progress_callback = progress_callback
+        self.register_redo_log_consumer = register_redo_log_consumer
         self.stats = stats
         self.stream_handler = stream_handler
         self.temp_dir: Optional[str] = None
@@ -140,6 +142,9 @@ class BasebackupOperation:
                     "--extra-lsndir",
                     self.lsn_dir,
                 ]
+
+                if self.register_redo_log_consumer:
+                    command_line.append("--register-redo-log-consumer")
 
                 with self.stats.timing_manager("myhoard.basebackup.xtrabackup_backup"):
                     with subprocess.Popen(
