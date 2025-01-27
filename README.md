@@ -430,11 +430,19 @@ Note: It is recommended to use more threads for copying than to compress or encr
 
 **xtrabackup.compress_threads**
 
-Number of worker threads created by XtraBackup for parallel compression when taking a backup.  The default value is ``1``.
+Number of worker threads created by XtraBackup for parallel compression when taking a backup. The default value is ``1``.
 
 **xtrabackup.encrypt_threads**
 
 Number of worker threads created by XtraBackup for parallel encryption when taking a backup. The default value is ``1``.
+
+**xtrabackup.register_redo_log_consumer**
+
+Lets XtraBackup register as a redo log consumer at the start of the backup.
+The server does not remove a redo log that Percona XtraBackup (the consumer) has not yet copied.
+The consumer reads the redo log and manually advances the log sequence number (LSN).
+The server blocks the writes during the process. Based on the redo log consumption,
+the server determines when it can purge the log. It is disabled by default.
 
 # HTTP API
 
