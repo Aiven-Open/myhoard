@@ -1224,7 +1224,8 @@ class Controller(threading.Thread):
         self._process_local_binlog_updates()
         self._extend_binlog_stream_list()
         if self.restore_coordinator.phase is RestoreCoordinator.Phase.failed_basebackup:
-            self._mark_failed_restore_backup_as_broken()
+            if self.restore_coordinator.should_mark_backup_as_broken():
+                self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
         if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():
             self.state_manager.update_state(

@@ -98,9 +98,10 @@ def mysql_initialize_and_start(
     if mysql_basedir is None and os.path.exists("/opt/mysql"):
         mysql_basedir = "/opt/mysql"
 
-    mysqld_bin = os.environ.get("MYSQL_BINARY_PATH") or "/usr/sbin/mysqld"
-    if not os.path.exists(mysqld_bin):
-        mysqld_bin = "/usr/bin/mysqld"
+    mysqld_bin = shutil.which("mysqld")
+    assert mysqld_bin, f"mysqld binary not found in PATH: {os.environ['PATH']}"
+    xtrabackup_bin = shutil.which("xtrabackup")
+    assert xtrabackup_bin, f"xtrabackup binary not found in PATH: {os.environ['PATH']}"
 
     test_base_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, name))
     config_path = os.path.join(test_base_dir, "etc")

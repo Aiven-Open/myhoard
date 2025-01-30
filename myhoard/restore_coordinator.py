@@ -15,6 +15,7 @@ from .util import (
     ERR_TIMEOUT,
     file_name_for_basebackup_split,
     get_slave_status,
+    get_xtrabackup_version,
     GtidExecuted,
     GtidRangeDict,
     make_gtid_range_string,
@@ -149,6 +150,7 @@ class RestoreCoordinator(threading.Thread):
         server_uuid: Optional[str]
         target_time_reached: bool
         write_relay_log_manually: bool
+        backup_xtrabackup_version: Tuple[int, ...] | None
 
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
@@ -260,6 +262,7 @@ class RestoreCoordinator(threading.Thread):
             "server_uuid": None,
             "target_time_reached": False,
             "write_relay_log_manually": False,
+            "backup_xtrabackup_version": None,
         }
         self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
@@ -314,6 +317,21 @@ class RestoreCoordinator(threading.Thread):
     @property
     def phase(self) -> "RestoreCoordinator.Phase":
         return self.state["phase"]
+
+    def should_mark_backup_as_broken(self) -> bool:
+        """Determines if the backup should be marked as broken.
+
+        If a backup fails to restore, but the Percona PXB version used to create the backup
+        differs from the current version, we do not mark the backup as "broken"
+        The issue may be related to Percona PXB version compatibility.
+        """
+        if self.phase is not self.Phase.failed_basebackup:
+            return False
+
+        if self.state["backup_xtrabackup_version"] is None:
+            return True
+        xtrabackup_version = get_xtrabackup_version()
+        return xtrabackup_version[:3] == self.state["backup_xtrabackup_version"][:3]  # pylint: disable=E1136
 
     def run(self) -> None:
         self.log.info("Restore coordinator running")
@@ -442,6 +460,9 @@ class RestoreCoordinator(threading.Thread):
                 self.update_state(phase=self.Phase.failed_basebackup)
                 self.stats.increase("myhoard.basebackup_broken")
         finally:
+            self.update_state(
+                backup_xtrabackup_version=self.basebackup_restore_operation.backup_xtrabackup_version,
+            )
             self.basebackup_restore_operation = None
 
     def rebuild_tables(self) -> None:
