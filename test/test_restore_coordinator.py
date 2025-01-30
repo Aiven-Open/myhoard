@@ -4,6 +4,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.state_manager import StateManager
+from myhoard.util import get_xtrabackup_version
 from rohmu.object_storage.local import LocalTransfer
 from typing import Any, cast, Generic, List, Mapping, TypeVar
 from unittest.mock import Mock, patch
@@ -343,6 +344,11 @@ def _restore_coordinator_sequence(
     finally:
         rc.stop()
 
+    assert rc.state["backup_xtrabackup_version"] is not None
+    assert len(rc.state["backup_xtrabackup_version"]) >= 3
+    assert get_xtrabackup_version() == rc.state["backup_xtrabackup_version"]
+    assert rc.should_mark_backup_as_broken() is False
+
     if fail_and_resume:
         assert isinstance(rc.state_manager, FailingStateManager)
         assert rc.state["restore_errors"] == 1
@@ -437,6 +443,36 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
 
     assert apply_finished
     assert current_index == 2
+
+
+def test_should_mark_backup_as_broken(session_tmpdir):
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params="-",
+        mysql_config_file_name="-",
+        mysql_data_directory="/dev/null",
+        mysql_relay_log_index_file="/dev/null",
+        mysql_relay_log_prefix="/dev/null",
+        pending_binlogs_state_file="/dev/null",
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="/dev/null",
+        site="default",
+        state_file=os.path.join(session_tmpdir().strpath, "the_state_file.json"),
+        stats=build_statsd_client(),
+        stream_id="-",
+        target_time=None,
+        temp_dir="/dev/null",
+    )
+    assert not rc.should_mark_backup_as_broken()
+    rc.update_state(phase=rc.Phase.failed_basebackup, backup_xtrabackup_version=None)
+    assert rc.should_mark_backup_as_broken()
+    rc.update_state(backup_xtrabackup_version=(1, 2, 3))
+    assert not rc.should_mark_backup_as_broken()
+    rc.update_state(backup_xtrabackup_version=get_xtrabackup_version())
+    assert rc.should_mark_backup_as_broken()
 
 
 def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):

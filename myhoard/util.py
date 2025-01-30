@@ -29,7 +29,7 @@ ERR_TIMEOUT = 2013
 # The follow lines used to split a version string which might
 # start with something like:
 # xtrabackup version 8.0.30-23.3.aiven
-XTRABACKUP_VERSION_REGEX = re.compile(r"^xtrabackup version ([\d\.\-]).+")
+XTRABACKUP_VERSION_REGEX = re.compile(r"^xtrabackup version ([\d\.\-]+)")
 VERSION_SPLITTING_REGEX = re.compile(r"[\.-]")
 
 DEFAULT_XTRABACKUP_SETTINGS = {
@@ -653,13 +653,28 @@ def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
     cursor.execute("START SLAVE SQL_THREAD")
 
 
+def parse_version(version: str) -> Tuple[int, ...]:
+    return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(version) if len(x) > 0)
+
+
 def get_xtrabackup_version() -> Tuple[int, ...]:
     result = subprocess.run(["xtrabackup", "--version"], capture_output=True, encoding="utf-8", check=True)
     version_line = result.stderr.strip().split("\n")[-1]
     matches = XTRABACKUP_VERSION_REGEX.match(version_line)
     if matches is None:
         raise Exception(f"Cannot extract xtrabackup version number from {result.stderr!r}")
-    return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(matches[1]) if len(x) > 0)
+    return parse_version(matches[1])
+
+
+def parse_xtrabackup_info(xtrabackup_info_text: str) -> dict[str, str]:
+    result = {}
+    for line in xtrabackup_info_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
 
 
 def file_name_for_basebackup_split(base_file_name: str, split_nr: int) -> str:
