@@ -334,6 +334,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "backup_minute": 0,
             "forced_binlog_rotation_interval": 300,
             "upload_site": "default",
+            "incremental": {"enabled": False, "full_backup_week_schedule": "sun,wed"},
         },
         "backup_sites": {
             "default": default_backup_site,
