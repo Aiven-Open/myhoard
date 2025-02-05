@@ -6,26 +6,26 @@ repos:
     -   id: end-of-file-fixer
     -   id: trailing-whitespace
 -   repo: https://github.com/PyCQA/flake8
-    rev: 6.0.0
+    rev: 7.1.1
     hooks:
     -   id: flake8
 -   repo: https://github.com/psf/black
-    rev: 23.1.0
+    rev: 25.1.0
     hooks:
     -   id: black
--   repo: https://github.com/pre-commit/mirrors-pylint
-    rev: v3.0.0a5
+-   repo: https://github.com/pylint-dev/pylint
+    rev: v3.3.4
     hooks:
     -   id: pylint
-        args: [--disable=E0401]
+        args: ["--disable=R,E0401,W0719"]
 -   repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.0.0
+    rev: v1.15.0
     hooks:
     -   id: mypy
         args: [--ignore-missing-imports]
         additional_dependencies: [types-PyMySQL==1.0.19, types-requests==2.27.30]
 -   repo: https://github.com/pycqa/isort
-    rev: 5.12.0
+    rev: 6.0.0
     hooks:
     -   id: isort
         name: isort (python)
