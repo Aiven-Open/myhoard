@@ -1,5 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from .backup_stream import BackupStream, RemoteBinlogInfo
+from .backup_stream import BackupStream, IncrementalBackupInfo, RemoteBinlogInfo
 from .binlog_scanner import BinlogScanner
 from .errors import BadRequest, UnknownBackupSite
 from .restore_coordinator import BinlogStream, RestoreCoordinator
@@ -14,6 +14,7 @@ from .util import (
     GtidRangeDict,
     make_gtid_range_string,
     mysql_cursor,
+    parse_dow_schedule,
     parse_fs_metadata,
     RateTracker,
     relay_log_name,
@@ -48,6 +49,8 @@ ERR_BACKUP_IN_PROGRESS = 4085
 
 class BaseBackup(TypedDict):
     end_ts: float
+    checkpoints_file_content: str | None
+    incremental: bool
 
 
 class Backup(TypedDict):
@@ -65,6 +68,7 @@ class Backup(TypedDict):
 class BackupRequest(TypedDict):
     backup_reason: BackupStream.BackupReason
     normalized_backup_time: str
+    incremental_backup_info: IncrementalBackupInfo | None
 
 
 class BackupSiteInfo(TypedDict):
@@ -84,12 +88,12 @@ class RestoreOptions(TypedDict):
     target_time_approximate_ok: bool
 
 
-def sort_completed_backups(backups: List[Backup]) -> List[Backup]:
+def sort_completed_backups(backups: List[Backup], reverse: bool = False) -> List[Backup]:
     def key(backup):
         assert backup["completed_at"] is not None
         return backup["completed_at"]
 
-    return sorted((backup for backup in backups if backup["completed_at"]), key=key)
+    return sorted((backup for backup in backups if backup["completed_at"]), key=key, reverse=reverse)
 
 
 class Controller(threading.Thread):
@@ -253,10 +257,18 @@ class Controller(threading.Thread):
         return True
 
     def mark_backup_requested(
-        self, *, backup_reason: BackupStream.BackupReason, normalized_backup_time: Optional[str] = None
+        self,
+        *,
+        backup_reason: BackupStream.BackupReason,
+        normalized_backup_time: str | None = None,
+        incremental_backup_info: IncrementalBackupInfo | None = None,
     ) -> None:
         backup_time: str = normalized_backup_time or self._current_normalized_backup_timestamp()
-        new_request: BackupRequest = {"backup_reason": backup_reason, "normalized_backup_time": backup_time}
+        new_request: BackupRequest = {
+            "backup_reason": backup_reason,
+            "normalized_backup_time": backup_time,
+            "incremental_backup_info": incremental_backup_info,
+        }
         with self.lock:
             if self.state["backup_request"]:
                 old_request: BackupRequest = self.state["backup_request"]
@@ -854,6 +866,7 @@ class Controller(threading.Thread):
                 self._start_new_backup(
                     backup_reason=request["backup_reason"],  # pylint: disable=unsubscriptable-object
                     normalized_backup_time=request["normalized_backup_time"],  # pylint: disable=unsubscriptable-object
+                    incremental_backup_info=request["incremental_backup_info"],  # pylint: disable=unsubscriptable-object
                 )
 
     def _create_restore_coordinator_if_missing(self):
@@ -864,6 +877,7 @@ class Controller(threading.Thread):
         backup_site = self._lookup_backup_site(options["site"])
         storage_config = backup_site["object_storage"]
         self.log.info("Creating new restore coordinator")
+        # TODO site change triggers full backup
         self.restore_coordinator = RestoreCoordinator(
             binlog_streams=options["binlog_streams"],
             file_storage_config=storage_config,
@@ -1248,6 +1262,54 @@ class Controller(threading.Thread):
 
         self._build_backup_stream(broken_backup).mark_as_broken()
 
+    def _should_schedule_incremental_backup(self) -> bool:
+        incremental_settings = self.backup_settings.get("incremental", {})
+        if not incremental_settings.get("enabled", False):
+            self.log.info("Incremental backup is disabled in configuration")
+            return False
+
+        dow_idx = datetime.datetime.now(datetime.timezone.utc).weekday()
+        dow_schedule = incremental_settings.get("full_backup_week_schedule")
+        if dow_idx not in parse_dow_schedule(dow_schedule):
+            self.log.info(
+                "According to `full_backup_week_schedule` incremental backup should be scheduled (day: %r)", dow_idx
+            )
+            return True
+
+        self.log.info("According to `full_backup_week_schedule` full backup should be scheduled (day: %r)", dow_idx)
+        return False
+
+    def get_incremental_backup_info(self) -> IncrementalBackupInfo | None:
+        """
+        Incremental backup is possible when all the backups starting from the recent full backup have checkpoints stored
+        """
+        self.log.warning("Determining if incremental backup is possible")
+
+        backups = sort_completed_backups(self.state["backups"], reverse=True)
+        required_streams: List[str] = []
+        prev_backup = None
+        for backup in backups:
+            required_streams.append(backup["stream_id"])
+            if not prev_backup:
+                prev_backup = backup
+            if backup.get("broken_at"):
+                self.log.warning("Incremental backup is not possible - found broken backup %r", backup["stream_id"])
+                return None
+            if not backup["basebackup_info"].get("checkpoints_file_content"):
+                self.log.warning(
+                    "Incremental backup is not possible - backup %r does not have a checkpoint", backup["stream_id"]
+                )
+                return None
+            if not backup["basebackup_info"].get("incremental"):
+                self.log.info("Incremental backup requirements are met.")
+                return {
+                    "last_checkpoint": prev_backup["basebackup_info"]["checkpoints_file_content"],
+                    "required_streams": list(reversed(required_streams)),
+                }
+
+        self.log.warning("Incremental is not possible - no previous backups found")
+        return None
+
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()
         last_normalized_backup_time = self._previous_normalized_backup_timestamp()
@@ -1273,13 +1335,24 @@ class Controller(threading.Thread):
             )
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
+            incremental_backup_info = None
+            if self._should_schedule_incremental_backup():
+                incremental_backup_info = self.get_incremental_backup_info()
+                if not incremental_backup_info:
+                    self.log.warning(
+                        "Incremental backup is configured but not possible to take, proceeding with full backup"
+                    )
+
             self.log.info(
-                "New normalized time %r differs from previous %r, adding new backup request",
+                "New normalized time %r differs from previous %r, adding new backup request (incremental_backup_info: %r)",
                 normalized_backup_time,
                 last_normalized_backup_time,
+                incremental_backup_info,
             )
             self.mark_backup_requested(
-                backup_reason=BackupStream.BackupReason.scheduled, normalized_backup_time=normalized_backup_time
+                backup_reason=BackupStream.BackupReason.scheduled,
+                normalized_backup_time=normalized_backup_time,
+                incremental_backup_info=incremental_backup_info,
             )
 
     def _prepare_streams_for_promotion(self):
@@ -1310,7 +1383,7 @@ class Controller(threading.Thread):
             for stream in self.backup_streams:
                 stream.remove_binlogs(binlogs)
 
-    def _purge_old_backups(self):
+    def _purge_old_backups(self):  # # pylint: disable=too-many-return-statements
         purgeable = [backup for backup in self.state["backups"] if backup["completed_at"] and not backup["recovery_site"]]
         broken_backups_count = sum(backup["broken_at"] is not None for backup in purgeable)
         # do not consider broken backups for the count, they will still be purged
@@ -1328,21 +1401,43 @@ class Controller(threading.Thread):
         if non_broken_backups_count <= self.backup_settings["backup_count_min"]:
             return
 
+        # TODO mark broken all incremental backups up until the full one
+        # TODO Create a full backup if the previous one is broken
+
         # For simplicity only ever drop one backup here. This function
         # is called repeatedly so if there are for any reason more backups
         # to drop they will be dropped soon enough
         purgeable = sort_completed_backups(purgeable)
         backup = purgeable[0]
 
+        def is_backup_incremental(b: Dict[str, Any]) -> bool:
+            return b["basebackup_info"].get("incremental", False)
+
+        # If this is the only full backup, we can't purge it, as following incremental backups depend on this one
+        if not is_backup_incremental(backup) and all(is_backup_incremental(p) for p in purgeable[1:]):
+            self.log.info(
+                "Not purging old backup %r, because following incremental backups depend on it", backup["stream_id"]
+            )
+            return
+
         if not backup["closed_at"]:
             return
 
-        # do not purge backup if its preserved
+        # do not purge backup if this one or any dependant incremental backup is preserved
         preserve_until = backup["preserve_until"]
+        if not is_backup_incremental(backup):
+            for p in purgeable[1:]:
+                if not is_backup_incremental(p):
+                    break
+                preserve_until = max(i for i in [preserve_until, p["preserve_until"]] if i is not None)
+
         if preserve_until and datetime.datetime.now(datetime.timezone.utc) < datetime.datetime.fromisoformat(preserve_until):
             return
 
-        if time.time() > backup["closed_at"] + self.backup_settings["backup_age_days_max"] * 24 * 60 * 60:
+        # If the backup is incremental, we should drop it because there is no leading full backup anyway
+        if is_backup_incremental(backup):
+            self.log.info("Backup %r is incremental, dropping it due to full backup being dropped", backup["stream_id"])
+        elif time.time() > backup["closed_at"] + self.backup_settings["backup_age_days_max"] * 24 * 60 * 60:
             self.log.info("Backup %r is older than max backup age, dropping it", backup["stream_id"])
         elif non_broken_backups_count > self.backup_settings["backup_count_max"]:
             self.log.info(
@@ -1725,7 +1820,13 @@ class Controller(threading.Thread):
 
         return True
 
-    def _start_new_backup(self, *, backup_reason: BackupStream.BackupReason, normalized_backup_time: str) -> None:
+    def _start_new_backup(
+        self,
+        *,
+        backup_reason: BackupStream.BackupReason,
+        normalized_backup_time: str,
+        incremental_backup_info: IncrementalBackupInfo | None = None,
+    ) -> None:
         stream_id = BackupStream.new_stream_id()
         site_id, backup_site = self._get_upload_backup_site()
         stream = BackupStream(
@@ -1752,6 +1853,7 @@ class Controller(threading.Thread):
             temp_dir=self.temp_dir,
             xtrabackup_settings=self.xtrabackup_settings,
             split_size=backup_site.get("split_size", 0),
+            incremental_backup_info=incremental_backup_info,
         )
         self.backup_streams.append(stream)
         self.state_manager.update_state(

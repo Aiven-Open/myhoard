@@ -1,5 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_statsd_client, MySQLConfig, restart_mysql
+from .helpers.incremental import parse_checkpoint_file_content
 from myhoard.basebackup_operation import BasebackupOperation
 from packaging.version import Version
 from typing import IO
@@ -94,6 +95,30 @@ def test_basic_backup(mysql_master, extra_uuid):
 
     # Even almost empty backup is at least 1.5 megs due to standard files that are always included
     assert bytes_read[0] > 1.5 * 1024 * 1024
+
+    # Now add incremental backup
+    assert op.checkpoints_file_content is not None
+    inc_op = BasebackupOperation(
+        encryption_algorithm="AES256",
+        encryption_key=encryption_key,
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
+        progress_callback=progress_callback,
+        stats=build_statsd_client(),
+        stream_handler=stream_handler,
+        temp_dir=mysql_master.base_dir,
+        incremental_since_checkpoint=op.checkpoints_file_content,
+    )
+    inc_op.create_backup()
+    assert inc_op.checkpoints_file_content is not None
+
+    full_backup_checkpoint = parse_checkpoint_file_content(op.checkpoints_file_content)
+    inc_backup_checkpoint = parse_checkpoint_file_content(inc_op.checkpoints_file_content)
+    assert full_backup_checkpoint["backup_type"] == "full-backuped"
+    assert inc_backup_checkpoint["backup_type"] == "incremental"
+    assert full_backup_checkpoint["from_lsn"] == "0"
+    assert full_backup_checkpoint["to_lsn"] == inc_backup_checkpoint["from_lsn"]
 
 
 def test_stream_handler_error_is_propagated(mysql_master):

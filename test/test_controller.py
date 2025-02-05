@@ -1812,7 +1812,11 @@ def test_purge_old_backups_should_not_remove_read_only_backups(
     def _append_backup(stream_id: str, ts: float, read_only: bool = True) -> None:
         controller.state["backups"].append(
             {
-                "basebackup_info": {"end_ts": ts},
+                "basebackup_info": {
+                    "checkpoints_file_content": None,
+                    "end_ts": ts,
+                    "incremental": False,
+                },
                 "closed_at": ts,
                 "completed_at": ts,
                 "broken_at": None,
@@ -1868,7 +1872,9 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
         controller.state["backups"].append(
             {
                 "basebackup_info": {
+                    "checkpoints_file_content": None,
                     "end_ts": now - 20 * 60,
+                    "incremental": False,
                 },
                 "closed_at": now - 3 * 60,
                 "completed_at": now - 5 * 60,
@@ -1996,3 +2002,89 @@ class LimitedSideEffectMock:
             raise Exception()
 
         return self.original_function_to_mock(*args, **kwargs)
+
+
+def test_get_incremental_backup_info(default_backup_site, mysql_empty, session_tmpdir):
+    backup1 = Backup(
+        basebackup_info=BaseBackup(incremental=False, end_ts=1.0, checkpoints_file_content="backup_type = full-backuped..."),
+        closed_at=1,
+        completed_at=1,
+        recovery_site=False,
+        stream_id="1000",
+        resumable=False,
+        site="not_default_site",
+        broken_at=None,
+        preserve_until=None,
+    )
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    import copy
+
+    backup2 = copy.deepcopy(backup1)
+    backup2["basebackup_info"]["incremental"] = True
+    backup2["basebackup_info"]["checkpoints_file_content"] = "backup_type = incremental..."
+    backup2["completed_at"] = 2
+    backup2["closed_at"] = 2
+    backup2["stream_id"] = "1001"
+
+    backup3 = copy.deepcopy(backup1)
+    backup3["basebackup_info"]["incremental"] = True
+    backup3["basebackup_info"]["checkpoints_file_content"] = "backup_type = incremental..."
+    backup3["completed_at"] = 3
+    backup3["closed_at"] = 3
+    backup3["stream_id"] = "1002"
+
+    controller.state["backups"] = [backup1, backup2, backup3]
+    info = controller.get_incremental_backup_info()
+    assert info["required_streams"] == ["1000", "1001", "1002"]
+    assert info["last_checkpoint"] == "backup_type = incremental..."
+
+    # Breaking one of the backups or having no checkpoint should return nothing, as incremental backup is not possible
+    for b in [backup1, backup2, backup3]:
+        b["broken_at"] = 1
+        assert controller.get_incremental_backup_info() is None
+        b["broken_at"] = None
+
+    for b in [backup1, backup2, backup3]:
+        checkpoint = b["basebackup_info"]["checkpoints_file_content"]
+        b["basebackup_info"]["checkpoints_file_content"] = None
+        assert controller.get_incremental_backup_info() is None
+        b["basebackup_info"]["checkpoints_file_content"] = checkpoint
+
+    assert controller.get_incremental_backup_info() is not None
+
+    # For whatever reason there is no full backup in the list
+    backup1["basebackup_info"]["incremental"] = True
+    assert controller.get_incremental_backup_info() is None
+
+    # We have only one full backup
+    backup1["basebackup_info"]["incremental"] = False
+    controller.state["backups"] = [backup1]
+    info = controller.get_incremental_backup_info()
+    assert info["required_streams"] == ["1000"]
+    assert info["last_checkpoint"] == "backup_type = full-backuped..."
+
+
+def test_should_schedule_incremental_backup(
+    time_machine,
+    master_controller,
+) -> None:
+    m_controller, _ = master_controller
+
+    m_controller.backup_settings["incremental"] = {"enabled": False}
+    # pylint: disable=protected-access
+    assert not m_controller._should_schedule_incremental_backup()
+
+    m_controller.backup_settings["incremental"] = {"enabled": True, "full_backup_week_schedule": "wed"}
+    # Travel to Wed
+    time_machine.move_to(datetime.datetime(2025, 2, 5))
+    # pylint: disable=protected-access
+    assert not m_controller._should_schedule_incremental_backup()
+
+    time_machine.move_to(datetime.datetime(2025, 2, 6))
+    # pylint: disable=protected-access
+    assert m_controller._should_schedule_incremental_backup()
