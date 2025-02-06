@@ -406,3 +406,20 @@ def test_parse_xtrabackup_info() -> None:
         "tool_version": "8.0.30-23",
         "server_version": "8.0.30",
     }
+
+
+@pytest.mark.parametrize(
+    "dow_schedule,result",
+    [
+        ("abracadabra", ValueError),
+        ("", ValueError),
+        ("mon,wed", {0, 2}),
+        ("sun", {6}),
+    ],
+)
+def test_parse_dow_schedule(dow_schedule: str, result: set[int] | type) -> None:
+    if not isinstance(result, set):
+        with pytest.raises(result):
+            myhoard_util.parse_dow_schedule(dow_schedule)
+    else:
+        assert myhoard_util.parse_dow_schedule(dow_schedule) == result

@@ -2,7 +2,7 @@
 from myhoard import version
 from myhoard.controller import Controller
 from myhoard.statsd import StatsClient
-from myhoard.util import DEFAULT_XTRABACKUP_SETTINGS, detect_running_process_id, wait_for_port
+from myhoard.util import DEFAULT_XTRABACKUP_SETTINGS, detect_running_process_id, parse_dow_schedule, wait_for_port
 from myhoard.web_server import WebServer
 
 import argparse
@@ -97,6 +97,13 @@ class MyHoard:
         ival = backup_settings["backup_interval_minutes"]
         if (ival > 1440 and ival // 1440 * 1440 != ival) or (ival < 1440 and 1440 // ival * ival != 1440):
             raise Exception("Backup interval must be 1440, multiple of 1440, or integer divisor of 1440")
+
+        incremental = backup_settings.get("incremental", {})
+        if incremental and incremental.get("enabled", False):
+            dow_schedule = incremental.get("full_backup_week_schedule")
+            if not dow_schedule:
+                raise ValueError("Incremental backups require `full_backup_week_schedule`")
+            parse_dow_schedule(dow_schedule)
 
         if self.config["http_address"] not in {"127.0.0.1", "::1", "localhost"}:
             self.log.warning("Binding to non-localhost address %r is highly discouraged", self.config["http_address"])

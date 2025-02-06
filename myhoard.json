@@ -7,7 +7,11 @@
         "backup_interval_minutes": 1440,
         "backup_minute": 0,
         "forced_binlog_rotation_interval": 300,
-        "upload_site": "default"
+        "upload_site": "default",
+        "incremental": {
+            "enabled": false,
+            "full_backup_week_schedule": "sun,wed"
+        }
     },
     "backup_sites": {
         "default": {
