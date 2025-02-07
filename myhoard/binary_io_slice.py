@@ -74,10 +74,10 @@ class BinaryIOSlice(BinaryIO):
     def writable(self) -> bool:
         return False
 
-    def write(self, __s: bytes) -> int:
+    def write(self, __s: bytes) -> int:  # type: ignore[override]
         raise MethodNotSupportedError()
 
-    def writelines(self, __lines: Iterable[bytes]) -> None:
+    def writelines(self, __lines: Iterable[bytes]) -> None:  # type: ignore[override]
         raise MethodNotSupportedError()
 
     def __next__(self) -> bytes:

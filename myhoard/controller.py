@@ -1130,7 +1130,7 @@ class Controller(threading.Thread):
     def _get_site_for_stream_id(self, stream_id: str):
         backup = self.get_backup_by_stream_id(stream_id)
         if not backup:
-            KeyError(f"Stream {stream_id} not found in backups")
+            raise KeyError(f"Stream {stream_id} not found in backups")
         return backup["site"]
 
     def get_backup_by_stream_id(self, stream_id: str):
