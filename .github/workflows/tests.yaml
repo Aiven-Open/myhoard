@@ -14,13 +14,10 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        # only use one version for the lint step
-        # pylint is broken with 3.11, see
-        # https://github.com/PyCQA/pylint/issues/6535
-        python-version: ["3.10"]
+        python-version: ["3.12"]
     env:
       MYSQL_VERSION: mysql-8.0
 
@@ -29,48 +26,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Cache APT Packages
-        uses: awalsh128/cache-apt-pkgs-action@v1.1.2
-        with:
-          version: 1.0
-          packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl
       - id: prepare-python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-
-      - id: mysql-repos
-        run: |
-          wget -c 'https://repo.mysql.com/mysql-apt-config_0.8.22-1_all.deb'
-          echo "mysql-apt-config mysql-apt-config/select-server select $MYSQL_VERSION" | sudo debconf-set-selections
-          echo "mysql-apt-config mysql-apt-config/select-tools select Enabled" | sudo debconf-set-selections
-          echo "mysql-apt-config mysql-apt-config/select-product select Ok" | sudo debconf-set-selections
-          echo "mysql-apt-config mysql-apt-config/tools-component string mysql-tools" | sudo debconf-set-selections
-          sudo dpkg -i mysql-apt-config_0.8.22-1_all.deb
-
-      - id: percona-tools
-        run: |
-          wget https://repo.percona.com/apt/percona-release_latest.$(lsb_release -sc)_all.deb
-          sudo dpkg -i percona-release_latest.$(lsb_release -sc)_all.deb
-          sudo percona-release enable-only tools
-          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys B7B3B788A8D3785C
-          sudo apt update
-
-      - id: build-deps
-        run: |
-          sudo apt-get update
-          sudo apt install -y libsnappy-dev
-          sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew mysql-server percona-xtrabackup-80
-          mysqld --version
-
       - id: python-deps
         run: |
+          sudo apt-get update && sudo apt install -y libsnappy-dev
           pip install -e .
           pip install -e '.[dev]'
-
       - id: pre-commit
         run: pre-commit run --all
-
       - id: copyright
         run: make copyright
 

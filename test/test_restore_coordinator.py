@@ -322,7 +322,7 @@ def _restore_coordinator_sequence(
         rsa_private_key_pem=private_key_pem,
         site="default",
         state_file=state_file_name,
-        state_manager_class=FailingStateManager if fail_and_resume else StateManager,
+        state_manager_class=FailingStateManager if fail_and_resume else StateManager,  # type: ignore[arg-type]
         stats=build_statsd_client(),
         stream_id=bs1.state["stream_id"],
         target_time=pitr_target_time,
