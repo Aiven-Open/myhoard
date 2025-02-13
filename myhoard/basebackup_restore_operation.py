@@ -1,9 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .errors import DiskFullError
-from .util import get_xtrabackup_version, parse_version, parse_xtrabackup_info
+from .util import CHECKPOINT_FILENAME, get_xtrabackup_version, parse_version, parse_xtrabackup_info
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Final, Optional, Tuple
+from typing import Dict, Final, Optional, Tuple
 
 import base64
 import fnmatch
@@ -38,7 +38,8 @@ class BasebackupRestoreOperation:
         mysql_data_directory,
         stats,
         stream_handler,
-        temp_dir,
+        target_dir: str,
+        temp_dir: str,
     ):
         self.current_file = None
         self.data_directory_size_end = None
@@ -51,34 +52,36 @@ class BasebackupRestoreOperation:
         self.mysql_data_directory = mysql_data_directory
         self.number_of_files = 0
         self.prepared_lsn = None
-        self.proc = None
+        self.proc: subprocess.Popen[bytes] | None = None
         self.stats = stats
         self.stream_handler = stream_handler
-        self.temp_dir = None
-        self.temp_dir_base = temp_dir
-        self.backup_xtrabackup_info = None
+        self.target_dir = target_dir
+        self.temp_dir = temp_dir
+        self.backup_xtrabackup_info: Dict[str, str] | None = None
 
-    def restore_backup(self):
-        if os.path.exists(self.mysql_data_directory):
-            raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists")
-
+    def prepare_backup(
+        self, incremental: bool = False, apply_log_only: bool = False, checkpoints_file_content: str | None = None
+    ):
         # Write encryption key to file to avoid having it on command line. NamedTemporaryFile has mode 0600
-        with tempfile.NamedTemporaryFile() as encryption_key_file:
-            encryption_key_file.write(base64.b64encode(self.encryption_key))
-            encryption_key_file.flush()
 
-            cpu_count = multiprocessing.cpu_count()
+        incremental_dir = None
+        try:
+            if incremental:
+                incremental_dir = tempfile.mkdtemp(dir=self.temp_dir, prefix="myhoard_inc_")
 
-            self.temp_dir = tempfile.mkdtemp(dir=self.temp_dir_base)
+            with tempfile.NamedTemporaryFile() as encryption_key_file:
+                encryption_key_file.write(base64.b64encode(self.encryption_key))
+                encryption_key_file.flush()
 
-            try:
+                cpu_count = multiprocessing.cpu_count()
+
                 command_line = [
                     "xbstream",
                     # TODO: Check if it made sense to restore directly to MySQL data directory so that
                     # we could skip the move phase. It's not clear if move does anything worthwhile
                     # except skips a few extra files, which could instead be deleted explicitly
                     "--directory",
-                    self.temp_dir,
+                    self.target_dir if not incremental_dir else incremental_dir,
                     "--extract",
                     "--decompress",
                     "--decompress-threads",
@@ -101,8 +104,9 @@ class BasebackupRestoreOperation:
                         self.proc = xbstream
                         self._process_xbstream_input_output()
 
-                self.data_directory_size_start = self._get_directory_size(self.temp_dir)
-                xtrabackup_info_path = os.path.join(self.temp_dir, "xtrabackup_info")
+                self.data_directory_size_start = self._get_directory_size(self.target_dir)
+
+                xtrabackup_info_path = os.path.join(self.target_dir, "xtrabackup_info")
                 if os.path.exists(xtrabackup_info_path):
                     with open(xtrabackup_info_path) as fh:
                         xtrabackup_info_text = fh.read()
@@ -122,8 +126,20 @@ class BasebackupRestoreOperation:
                     "--no-version-check",
                     "--prepare",
                     "--target-dir",
-                    self.temp_dir,
+                    self.target_dir,
                 ]
+
+                if apply_log_only:
+                    # This is needed to prepare all the backups preceding the one to be restored in case of incremental
+                    command_line.append("--apply-log-only")
+                if incremental_dir:
+                    command_line.extend(["--incremental-dir", incremental_dir])
+
+                if checkpoints_file_content:
+                    checkpoints_file_dir = incremental_dir if incremental_dir else self.target_dir
+                    with open(os.path.join(checkpoints_file_dir, CHECKPOINT_FILENAME), "w") as checkpoints_file:
+                        checkpoints_file.write(checkpoints_file_content)
+
                 # --use-free-memory-pct introduced in 8.0.30, but it doesn't work in 8.0.30 and leads to PBX crash
                 if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 32):
                     command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
@@ -133,42 +149,42 @@ class BasebackupRestoreOperation:
                     ) as prepare:
                         self.proc = prepare
                         self._process_prepare_input_output()
+        finally:
+            if incremental_dir:
+                shutil.rmtree(incremental_dir)
 
-                # As of Percona XtraBackup 8.0.5 the backup contains binlog.index and one binlog that --move-back
-                # tries to restore to appropriate location, presumable with the intent of making MySQL patch gtid_executed
-                # table based on what's in the log. We already have logic for patching the table and we don't need
-                # this logic from XtraBackup. The logic is also flawed as it tries to restore to location that existed
-                # on the source server, which may not be valid for destination server. Just delete the files to disable
-                # that restoration logic.
-                binlog_index = os.path.join(self.temp_dir, "binlog.index")
-                if os.path.exists(binlog_index):
-                    with open(binlog_index) as f:
-                        binlogs = f.read().split("\n")
-                    binlogs = [binlog.rsplit("/", 1)[-1] for binlog in binlogs if binlog.strip()]
-                    self.log.info("Deleting redundant binlog index %r and binlogs %r before move", binlog_index, binlogs)
-                    os.remove(binlog_index)
-                    for binlog_name in binlogs:
-                        binlog_name = os.path.join(self.temp_dir, binlog_name)
-                        if os.path.exists(binlog_name):
-                            os.remove(binlog_name)
+    def restore_backup(self):
+        # As of Percona XtraBackup 8.0.5 the backup contains binlog.index and one binlog that --move-back
+        # tries to restore to appropriate location, presumable with the intent of making MySQL patch gtid_executed
+        # table based on what's in the log. We already have logic for patching the table and we don't need
+        # this logic from XtraBackup. The logic is also flawed as it tries to restore to location that existed
+        # on the source server, which may not be valid for destination server. Just delete the files to disable
+        # that restoration logic.
+        binlog_index = os.path.join(self.target_dir, "binlog.index")
+        if os.path.exists(binlog_index):
+            with open(binlog_index) as f:
+                binlogs = f.read().split("\n")
+            binlogs = [binlog.rsplit("/", 1)[-1] for binlog in binlogs if binlog.strip()]
+            self.log.info("Deleting redundant binlog index %r and binlogs %r before move", binlog_index, binlogs)
+            os.remove(binlog_index)
+            for binlog_name in binlogs:
+                binlog_name = os.path.join(self.target_dir, binlog_name)
+                if os.path.exists(binlog_name):
+                    os.remove(binlog_name)
 
-                command_line = [
-                    "xtrabackup",
-                    # defaults file must be given with --defaults-file=foo syntax, space here does not work
-                    f"--defaults-file={self.mysql_config_file_name}",
-                    "--move-back",
-                    "--no-version-check",
-                    "--target-dir",
-                    self.temp_dir,
-                ]
-                with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_move"):
-                    with subprocess.Popen(
-                        command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                    ) as move_back:
-                        self.proc = move_back
-                        self._process_move_input_output()
-            finally:
-                shutil.rmtree(self.temp_dir)
+        command_line = [
+            "xtrabackup",
+            # defaults file must be given with --defaults-file=foo syntax, space here does not work
+            f"--defaults-file={self.mysql_config_file_name}",
+            "--move-back",
+            "--no-version-check",
+            "--target-dir",
+            self.target_dir,
+        ]
+        with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_move"):
+            with subprocess.Popen(command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as move_back:
+                self.proc = move_back
+                self._process_move_input_output()
 
         self.data_directory_size_end = self._get_directory_size(self.mysql_data_directory, cleanup=True)
 

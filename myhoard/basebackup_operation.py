@@ -1,10 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
 from myhoard.errors import BlockMismatchError, XtraBackupError
-from myhoard.util import get_mysql_version, mysql_cursor
+from myhoard.util import CHECKPOINT_FILENAME, get_mysql_version, mysql_cursor
 from packaging.version import Version
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import base64
 import logging
@@ -61,9 +61,11 @@ class BasebackupOperation:
         stats,
         stream_handler,
         temp_dir,
+        incremental_since_checkpoint: str | None = None,
     ):
         self.abort_reason = None
-        self.binlog_info = None
+        self.binlog_info: Dict[str, Any] | None = None
+        self.checkpoints_file_content: str | None = None
         self.copy_threads = copy_threads
         self.compress_threads = compress_threads
         self.current_file = None
@@ -75,7 +77,9 @@ class BasebackupOperation:
         self.encryption_key = encryption_key
         self.has_block_mismatch = False
         self.log = logging.getLogger(self.__class__.__name__)
-        self.lsn_dir = None
+        self.incremental_since_checkpoint = incremental_since_checkpoint
+        self.prev_checkpoint_dir = None
+        self.lsn_dir: str | None = None
         self.lsn_info = None
         self.mysql_client_params = mysql_client_params
         with open(mysql_config_file_name, "r") as config:
@@ -145,6 +149,12 @@ class BasebackupOperation:
 
                 if self.register_redo_log_consumer:
                     command_line.append("--register-redo-log-consumer")
+
+                if self.incremental_since_checkpoint:
+                    self.prev_checkpoint_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackupcheckpoint")
+                    with open(os.path.join(self.prev_checkpoint_dir, CHECKPOINT_FILENAME), "w") as checkpoint_file:
+                        checkpoint_file.write(self.incremental_since_checkpoint)
+                    command_line.extend(["--incremental-basedir", self.prev_checkpoint_dir])
 
                 with self.stats.timing_manager("myhoard.basebackup.xtrabackup_backup"):
                     with subprocess.Popen(
@@ -262,6 +272,7 @@ class BasebackupOperation:
                 reader_thread = None
 
                 if exit_code == 0:
+                    self._save_checkpoints_file()
                     self._process_binlog_info()
 
         except AbortRequested as ex:
@@ -285,10 +296,9 @@ class BasebackupOperation:
             if reader_thread:
                 reader_thread.join()
             self.log.info("Thread joined")
-            if self.lsn_dir:
-                shutil.rmtree(self.lsn_dir)
-            if self.temp_dir:
-                shutil.rmtree(self.temp_dir)
+            for d in [self.lsn_dir, self.temp_dir, self.prev_checkpoint_dir]:
+                if d:
+                    shutil.rmtree(d)
             self.proc = None
 
         if exit_code != 0:
@@ -353,6 +363,12 @@ class BasebackupOperation:
 
         self.current_file = None
         return True
+
+    def _save_checkpoints_file(self) -> None:
+        assert self.lsn_dir
+
+        with open(os.path.join(self.lsn_dir, CHECKPOINT_FILENAME)) as checkpoints_file:
+            self.checkpoints_file_content = checkpoints_file.read()
 
     def _process_binlog_info(self) -> None:
         assert self.lsn_dir

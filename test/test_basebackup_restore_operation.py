@@ -49,17 +49,20 @@ def test_basic_restore(mysql_master, mysql_empty):
             shutil.copyfileobj(backup_file, stream)
             stream.close()
 
-        restore_op = BasebackupRestoreOperation(
-            encryption_algorithm="AES256",
-            encryption_key=encryption_key,
-            free_memory_percentage=80,
-            mysql_config_file_name=mysql_empty.config_name,
-            mysql_data_directory=mysql_empty.config_options.datadir,
-            stats=build_statsd_client(),
-            stream_handler=input_stream_handler,
-            temp_dir=mysql_empty.base_dir,
-        )
-        restore_op.restore_backup()
+        with tempfile.TemporaryDirectory(dir=mysql_empty.base_dir, prefix="myhoard_target_") as temp_target_dir:
+            restore_op = BasebackupRestoreOperation(
+                encryption_algorithm="AES256",
+                encryption_key=encryption_key,
+                free_memory_percentage=80,
+                mysql_config_file_name=mysql_empty.config_name,
+                mysql_data_directory=mysql_empty.config_options.datadir,
+                stats=build_statsd_client(),
+                stream_handler=input_stream_handler,
+                target_dir=temp_target_dir,
+                temp_dir=mysql_empty.base_dir,
+            )
+            restore_op.prepare_backup()
+            restore_op.restore_backup()
 
         assert restore_op.number_of_files >= backup_op.number_of_files
 
@@ -77,4 +80,119 @@ def test_basic_restore(mysql_master, mysql_empty):
             assert sorted(result["id"] for result in results) == sorted(range(15))
         cursor.execute("SHOW MASTER STATUS")
         new_master_status = cursor.fetchone()
+        assert old_master_status["Executed_Gtid_Set"] == new_master_status["Executed_Gtid_Set"]
+
+
+def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        for db_index in range(5):
+            cursor.execute(f"CREATE DATABASE test{db_index}")
+            cursor.execute(f"CREATE TABLE test{db_index}.foo{db_index} (id integer primary key)")
+            for value in range(10):
+                cursor.execute(f"INSERT INTO test{db_index}.foo{db_index} (id) VALUES ({value})")
+        cursor.execute("FLUSH LOGS")
+
+    encryption_key = os.urandom(24)
+
+    with tempfile.NamedTemporaryFile() as backup_file1, tempfile.NamedTemporaryFile() as backup_file2:
+
+        def build_stream_handler(backup_file):
+            def output_stream_handler(stream):
+                shutil.copyfileobj(stream, backup_file)
+
+            return output_stream_handler
+
+        backup_op = BasebackupOperation(
+            encryption_algorithm="AES256",
+            encryption_key=encryption_key,
+            mysql_client_params=mysql_master.connect_options,
+            mysql_config_file_name=mysql_master.config_name,
+            mysql_data_directory=mysql_master.config_options.datadir,
+            stats=build_statsd_client(),
+            stream_handler=build_stream_handler(backup_file1),
+            temp_dir=mysql_empty.base_dir,
+        )
+        backup_op.create_backup()
+
+        with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+            for db_index in range(5, 10):
+                cursor.execute(f"CREATE DATABASE test{db_index}")
+                cursor.execute(f"CREATE TABLE test{db_index}.foo{db_index} (id integer primary key)")
+                for value in range(10):
+                    cursor.execute(f"INSERT INTO test{db_index}.foo{db_index} (id) VALUES ({value})")
+            cursor.execute("FLUSH LOGS")
+            cursor.execute("SHOW MASTER STATUS")
+            old_master_status = cursor.fetchone()
+            assert old_master_status
+
+        backup_op_inc = BasebackupOperation(
+            encryption_algorithm="AES256",
+            encryption_key=encryption_key,
+            mysql_client_params=mysql_master.connect_options,
+            mysql_config_file_name=mysql_master.config_name,
+            mysql_data_directory=mysql_master.config_options.datadir,
+            stats=build_statsd_client(),
+            stream_handler=build_stream_handler(backup_file2),
+            temp_dir=mysql_empty.base_dir,
+            incremental_since_checkpoint=backup_op.checkpoints_file_content,
+        )
+        backup_op_inc.create_backup()
+
+        def build_input_stream_handler(backup_file):
+            backup_file.seek(0)
+
+            def input_stream_handler(stream):
+                shutil.copyfileobj(backup_file, stream)
+                stream.close()
+
+            return input_stream_handler
+
+        with tempfile.TemporaryDirectory(dir=mysql_empty.base_dir, prefix="myhoard_target_") as temp_target_dir:
+            restore_op = BasebackupRestoreOperation(
+                encryption_algorithm="AES256",
+                encryption_key=encryption_key,
+                free_memory_percentage=80,
+                mysql_config_file_name=mysql_empty.config_name,
+                mysql_data_directory=mysql_empty.config_options.datadir,
+                stats=build_statsd_client(),
+                stream_handler=build_input_stream_handler(backup_file1),
+                target_dir=temp_target_dir,
+                temp_dir=mysql_empty.base_dir,
+            )
+            restore_op.prepare_backup(
+                incremental=False, apply_log_only=True, checkpoints_file_content=backup_op.checkpoints_file_content
+            )
+            restore_op_inc = BasebackupRestoreOperation(
+                encryption_algorithm="AES256",
+                encryption_key=encryption_key,
+                free_memory_percentage=80,
+                mysql_config_file_name=mysql_empty.config_name,
+                mysql_data_directory=mysql_empty.config_options.datadir,
+                stats=build_statsd_client(),
+                stream_handler=build_input_stream_handler(backup_file2),
+                target_dir=temp_target_dir,
+                temp_dir=mysql_empty.base_dir,
+            )
+            restore_op_inc.prepare_backup(
+                incremental=True, apply_log_only=False, checkpoints_file_content=backup_op_inc.checkpoints_file_content
+            )
+            restore_op_inc.restore_backup()
+
+        assert restore_op_inc.number_of_files >= backup_op.number_of_files
+
+    mysql_empty.proc = subprocess.Popen(mysql_empty.startup_command)  # pylint: disable=consider-using-with
+    wait_for_port(mysql_empty.port)
+
+    with myhoard_util.mysql_cursor(
+        password=mysql_master.password,
+        port=mysql_empty.port,
+        user=mysql_master.user,
+    ) as cursor:
+        for db_index in range(10):
+            cursor.execute(f"SELECT id FROM test{db_index}.foo{db_index}")
+            results = cursor.fetchall()
+            assert sorted(result["id"] for result in results) == sorted(range(10))
+        cursor.execute("SHOW MASTER STATUS")
+        new_master_status = cursor.fetchone()
+        assert new_master_status
         assert old_master_status["Executed_Gtid_Set"] == new_master_status["Executed_Gtid_Set"]

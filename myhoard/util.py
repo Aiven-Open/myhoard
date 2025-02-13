@@ -39,6 +39,9 @@ DEFAULT_XTRABACKUP_SETTINGS = {
     "register_redo_log_consumer": False,
 }
 
+DOW_TO_IDX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+CHECKPOINT_FILENAME = "xtrabackup_checkpoints"
+
 GtidRangeTuple = tuple[int, int, str, int, int]
 
 
@@ -54,6 +57,17 @@ class GtidRangeDict(TypedDict):
 # Ideally the contents should be Tuple[int, int] rather than List[int],
 # but that clashes with json deserialization
 GtidExecuted = Dict[str, List[List[int]]]
+
+
+def parse_dow_schedule(dow_schedule: str) -> set[int]:
+    invalid_idx = 7  # mon..sun=0..6
+    res = set(DOW_TO_IDX.get(dow.lower().strip(), invalid_idx) for dow in dow_schedule.split(","))
+    if not res or invalid_idx in res:
+        raise ValueError(
+            "`full_backup_week_schedule` must be a non-empty comma-separated list consisting of "
+            f"\"{', '.join(DOW_TO_IDX.keys())}\""
+        )
+    return res
 
 
 @contextlib.contextmanager

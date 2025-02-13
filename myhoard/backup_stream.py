@@ -79,6 +79,11 @@ class BaseBackupFailureReason(str, enum.Enum):
     xtrabackup_error = "xtrabackup_error"
 
 
+class IncrementalBackupInfo(TypedDict):
+    last_checkpoint: str | None
+    required_streams: List[str] | None
+
+
 class BackupStream(threading.Thread):
     """Handles creating a single consistent backup stream. 'stream' here refers to uninterrupted sequence
     of backup data that can be used to restore the system to a consistent state. It includes the basebackup,
@@ -132,6 +137,7 @@ class BackupStream(threading.Thread):
         backup_reason: Optional["BackupStream.BackupReason"]
         created_at: float
         immediate_scan_required: bool
+        incremental: bool
         initial_latest_complete_binlog_index: Optional[int]
         last_binlog_upload_time: int
         last_processed_local_index: Optional[int]
@@ -181,6 +187,7 @@ class BackupStream(threading.Thread):
         temp_dir: str,
         xtrabackup_settings: Optional[Dict[str, int]] = None,
         split_size: Optional[int] = 0,
+        incremental_backup_info: IncrementalBackupInfo | None = None,
     ) -> None:
         super().__init__()
         stream_id = stream_id or self.new_stream_id()
@@ -195,6 +202,7 @@ class BackupStream(threading.Thread):
         self.file_storage_setup_fn = file_storage_setup_fn
         self.file_storage: Optional["BaseTransfer"] = None
         self.file_uploaded_callback = file_uploaded_callback
+        self.incremental_backup_info = incremental_backup_info
         self.is_running = True
         self.iteration_sleep = BackupStream.ITERATION_SLEEP
         self.last_basebackup_attempt: Optional[float] = None
@@ -236,6 +244,7 @@ class BackupStream(threading.Thread):
             "backup_reason": backup_reason,
             "created_at": time.time(),
             "immediate_scan_required": False,
+            "incremental": incremental_backup_info is not None,
             "initial_latest_complete_binlog_index": latest_complete_binlog_index,
             "last_binlog_upload_time": 0,
             "last_processed_local_index": None,
@@ -1014,6 +1023,9 @@ class BackupStream(threading.Thread):
             stats=self.stats,
             stream_handler=self._basebackup_stream_handler,
             temp_dir=self.temp_dir,
+            incremental_since_checkpoint=(
+                self.incremental_backup_info.get("last_checkpoint") if self.incremental_backup_info else None
+            ),
         )
         try:
             self.basebackup_operation.create_backup()
@@ -1070,12 +1082,17 @@ class BackupStream(threading.Thread):
                 "binlog_name": binlog_info["file_name"] if binlog_info else None,
                 "binlog_position": binlog_info["file_position"] if binlog_info else None,
                 "backup_reason": self.state["backup_reason"],
+                "checkpoints_file_content": self.basebackup_operation.checkpoints_file_content,
                 "compressed_size": compressed_size,
                 "encryption_key": rsa_encrypt_bytes(self.rsa_public_key_pem, encryption_key).hex(),
                 "end_size": self.basebackup_operation.data_directory_size_end,
                 "end_ts": end_time,
                 "gtid": last_gtid,
                 "gtid_executed": gtid_executed,
+                "incremental": self.basebackup_operation.incremental_since_checkpoint is not None,
+                "required_streams": (
+                    self.incremental_backup_info.get("required_streams") if self.incremental_backup_info else None
+                ),
                 "initiated_at": self.created_at,
                 "lsn_info": self.basebackup_operation.lsn_info,
                 "normalized_backup_time": self.state["normalized_backup_time"],
