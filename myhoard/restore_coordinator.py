@@ -9,6 +9,7 @@ from .statsd import StatsClient
 from .table import Table
 from .util import (
     add_gtid_ranges_to_executed_set,
+    BinVersion,
     build_gtid_ranges,
     change_master_to,
     DEFAULT_MYSQL_TIMEOUT,
@@ -150,7 +151,7 @@ class RestoreCoordinator(threading.Thread):
         server_uuid: Optional[str]
         target_time_reached: bool
         write_relay_log_manually: bool
-        backup_xtrabackup_version: Tuple[int, ...] | None
+        backup_xtrabackup_version: BinVersion | None
 
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
