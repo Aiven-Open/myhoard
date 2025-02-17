@@ -58,13 +58,13 @@ jobs:
       matrix:
         include:
           - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26"
+            percona-version: "8.0.32-26-1.jammy"
             python-version: "3.11"
           - mysql-version: "8.0.35"
-            percona-version: "8.0.35-32"
+            percona-version: "8.0.35-32-1.jammy"
             python-version: "3.11"
           - mysql-version: "8.0.35"
-            percona-version: "8.0.35-32"
+            percona-version: "8.0.35-32-1.jammy"
             python-version: "3.12"
 
     steps:
