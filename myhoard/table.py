@@ -1,4 +1,4 @@
-#  Copyright (c) 23 Aiven, Helsinki, Finland. https://aiven.io/
+# Copyright (c) 2025 Aiven, Helsinki, Finland. https://aiven.io/
 from typing import Any, Mapping
 
 import dataclasses

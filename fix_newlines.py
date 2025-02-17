@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025 Aiven, Helsinki, Finland. https://aiven.io/
 from pathlib import Path
 from typing import Collection
 
