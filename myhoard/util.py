@@ -5,9 +5,10 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA1
 from logging import Logger
 from math import log10
+from pathlib import Path
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
-from typing import Dict, Iterable, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -29,7 +30,7 @@ ERR_TIMEOUT = 2013
 # The follow lines used to split a version string which might
 # start with something like:
 # xtrabackup version 8.0.30-23.3.aiven
-XTRABACKUP_VERSION_REGEX = re.compile(r"^xtrabackup version ([\d\.\-]+)")
+XTRABACKUP_VERSION_REGEX = re.compile(r"xtrabackup version ([\d\.\-]+)")
 VERSION_SPLITTING_REGEX = re.compile(r"[\.-]")
 
 DEFAULT_XTRABACKUP_SETTINGS = {
@@ -40,6 +41,12 @@ DEFAULT_XTRABACKUP_SETTINGS = {
 }
 
 GtidRangeTuple = tuple[int, int, str, int, int]
+BinVersion = tuple[int, ...]
+
+
+class BinInfo(NamedTuple):
+    path: Path
+    version: BinVersion
 
 
 class GtidRangeDict(TypedDict):
@@ -653,14 +660,14 @@ def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
     cursor.execute("START SLAVE SQL_THREAD")
 
 
-def parse_version(version: str) -> Tuple[int, ...]:
+def parse_version(version: str) -> BinVersion:
     return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(version) if len(x) > 0)
 
 
-def get_xtrabackup_version() -> Tuple[int, ...]:
-    result = subprocess.run(["xtrabackup", "--version"], capture_output=True, encoding="utf-8", check=True)
+def get_xtrabackup_version(cmd: str | Path = "xtrabackup") -> BinVersion:
+    result = subprocess.run([str(cmd), "--version"], capture_output=True, encoding="utf-8", check=True)
     version_line = result.stderr.strip().split("\n")[-1]
-    matches = XTRABACKUP_VERSION_REGEX.match(version_line)
+    matches = XTRABACKUP_VERSION_REGEX.search(version_line)
     if matches is None:
         raise Exception(f"Cannot extract xtrabackup version number from {result.stderr!r}")
     return parse_version(matches[1])
@@ -683,3 +690,18 @@ def file_name_for_basebackup_split(base_file_name: str, split_nr: int) -> str:
         return f"{base_file_name}.{split_nr:03d}"
     else:
         return base_file_name
+
+
+def find_extra_xtrabackup_executables() -> list[BinInfo]:
+    raw_paths = os.environ.get("PXB_EXTRA_BIN_PATHS")
+    if not raw_paths:
+        return []
+    result = []
+    for extra_raw_path in raw_paths.split(os.pathsep):
+        extra_path = Path(extra_raw_path)
+        if extra_path.is_dir():
+            extra_path = Path(extra_path) / "xtrabackup"
+            if extra_path.exists() and extra_path.is_file():
+                pxb_version = get_xtrabackup_version(extra_path)
+                result.append(BinInfo(version=pxb_version, path=extra_path))
+    return result

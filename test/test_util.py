@@ -12,6 +12,7 @@ import os
 import pymysql
 import pytest
 import random
+import shutil
 import subprocess
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -406,3 +407,16 @@ def test_parse_xtrabackup_info() -> None:
         "tool_version": "8.0.30-23",
         "server_version": "8.0.30",
     }
+
+
+def test_find_extra_xtrabackup_executables() -> None:
+    bin_infos = myhoard_util.find_extra_xtrabackup_executables()
+    assert len(bin_infos) == 0
+    xtrabackup_path = shutil.which("xtrabackup")
+    assert xtrabackup_path is not None
+    xtrabackup_dir = os.path.dirname(xtrabackup_path)
+    with patch.dict(os.environ, {"PXB_EXTRA_BIN_PATHS": xtrabackup_dir}):
+        bin_infos = myhoard_util.find_extra_xtrabackup_executables()
+        assert len(bin_infos) == 1
+        assert bin_infos[0].path.name == "xtrabackup"
+        assert bin_infos[0].version >= (8, 0, 30)

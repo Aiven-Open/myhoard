@@ -1,9 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .errors import DiskFullError
-from .util import get_xtrabackup_version, parse_version, parse_xtrabackup_info
+from .util import BinVersion, find_extra_xtrabackup_executables, get_xtrabackup_version, parse_version, parse_xtrabackup_info
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Final, Optional, Tuple
+from typing import Final, Optional
 
 import base64
 import fnmatch
@@ -101,22 +101,28 @@ class BasebackupRestoreOperation:
                         self.proc = xbstream
                         self._process_xbstream_input_output()
 
+                backup_xtabackup_version = None
                 self.data_directory_size_start = self._get_directory_size(self.temp_dir)
                 xtrabackup_info_path = os.path.join(self.temp_dir, "xtrabackup_info")
                 if os.path.exists(xtrabackup_info_path):
                     with open(xtrabackup_info_path) as fh:
                         xtrabackup_info_text = fh.read()
                     self.backup_xtrabackup_info = parse_xtrabackup_info(xtrabackup_info_text)
+                    backup_xtabackup_raw_version = self.backup_xtrabackup_info.get("tool_version")
+                    backup_xtabackup_version = (
+                        parse_version(backup_xtabackup_raw_version) if backup_xtabackup_raw_version else None
+                    )
                     self.log.info(
                         "Backup info. Tool version: %s, Server version: %s",
-                        self.backup_xtrabackup_info.get("tool_version"),
+                        backup_xtabackup_raw_version,
                         self.backup_xtrabackup_info.get("server_version"),
                     )
 
+                xtrabackup_cmd = self.get_xtrabackup_cmd(backup_xtabackup_version)
                 # TODO: Get some execution time numbers with non-trivial data sets for --prepare
                 # and --move-back commands and add progress monitoring if necessary (and feasible)
                 command_line = [
-                    "xtrabackup",
+                    xtrabackup_cmd,
                     # defaults file must be given with --defaults-file=foo syntax, space here does not work
                     f"--defaults-file={self.mysql_config_file_name}",
                     "--no-version-check",
@@ -153,7 +159,7 @@ class BasebackupRestoreOperation:
                             os.remove(binlog_name)
 
                 command_line = [
-                    "xtrabackup",
+                    xtrabackup_cmd,
                     # defaults file must be given with --defaults-file=foo syntax, space here does not work
                     f"--defaults-file={self.mysql_config_file_name}",
                     "--move-back",
@@ -172,8 +178,18 @@ class BasebackupRestoreOperation:
 
         self.data_directory_size_end = self._get_directory_size(self.mysql_data_directory, cleanup=True)
 
+    @staticmethod
+    def get_xtrabackup_cmd(backup_xtrabackup_version: BinVersion | None) -> str:
+        xtrabackup_cmd = "xtrabackup"
+        if backup_xtrabackup_version:
+            for bin_info in find_extra_xtrabackup_executables():
+                if bin_info.version[:3] == backup_xtrabackup_version[:3]:
+                    xtrabackup_cmd = str(bin_info.path)
+                    break
+        return xtrabackup_cmd
+
     @property
-    def backup_xtrabackup_version(self) -> Optional[Tuple[int, ...]]:
+    def backup_xtrabackup_version(self) -> Optional[BinVersion]:
         if self.backup_xtrabackup_info is None or "tool_version" not in self.backup_xtrabackup_info:
             return None
         return parse_version(self.backup_xtrabackup_info["tool_version"])
