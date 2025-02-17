@@ -1,3 +1,4 @@
+# Copyright (c) 2025 Aiven, Helsinki, Finland. https://aiven.io/
 from enum import Enum
 from myhoard.statsd import StatsClient
 from socket import socket
