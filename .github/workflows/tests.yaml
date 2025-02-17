@@ -74,7 +74,7 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@v1.1.2
         with:
           version: 1.0
-          packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1t64 libmecab2 psmisc
+          packages: sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc
       - id: prepare-python
         uses: actions/setup-python@v5
         with:
