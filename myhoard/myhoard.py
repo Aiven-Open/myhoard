@@ -2,7 +2,12 @@
 from myhoard import version
 from myhoard.controller import Controller
 from myhoard.statsd import StatsClient
-from myhoard.util import DEFAULT_XTRABACKUP_SETTINGS, detect_running_process_id, wait_for_port
+from myhoard.util import (
+    DEFAULT_XTRABACKUP_SETTINGS,
+    detect_running_process_id,
+    find_extra_xtrabackup_executables,
+    wait_for_port,
+)
 from myhoard.web_server import WebServer
 
 import argparse
@@ -100,6 +105,10 @@ class MyHoard:
 
         if self.config["http_address"] not in {"127.0.0.1", "::1", "localhost"}:
             self.log.warning("Binding to non-localhost address %r is highly discouraged", self.config["http_address"])
+
+        extra_pxb_bins = find_extra_xtrabackup_executables()
+        if extra_pxb_bins:
+            self.log.info("Found extra xtrabackup binaries: %r", extra_pxb_bins)
 
         self.log.info("Configuration loaded")
 
