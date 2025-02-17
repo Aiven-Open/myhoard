@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12"]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,7 +49,7 @@ jobs:
         run: pre-commit run --all-files
 
   unittest:
-    runs-on: ubuntu-${{ matrix.ubuntu-version }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       # this isn't a standard matrix because some version testing doesn't make sense
@@ -58,21 +58,14 @@ jobs:
       matrix:
         include:
           - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26-1.focal"
-            python-version: "3.10"
-            ubuntu-version: "20.04"
-          - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26-1.focal"
+            percona-version: "8.0.32-26"
             python-version: "3.11"
-            ubuntu-version: "20.04"
           - mysql-version: "8.0.35"
-            percona-version: "8.0.35-30-1.focal"
+            percona-version: "8.0.35-32"
             python-version: "3.11"
-            ubuntu-version: "20.04"
           - mysql-version: "8.0.35"
-            percona-version: "8.0.35-30-1.focal"
+            percona-version: "8.0.35-32"
             python-version: "3.12"
-            ubuntu-version: "20.04"
 
     steps:
       - id: checkout-code
