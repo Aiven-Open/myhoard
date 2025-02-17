@@ -49,7 +49,7 @@ jobs:
         run: pre-commit run --all-files
 
   unittest:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       # this isn't a standard matrix because some version testing doesn't make sense
