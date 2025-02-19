@@ -7,7 +7,11 @@
         "backup_interval_minutes": 1440,
         "backup_minute": 0,
         "forced_binlog_rotation_interval": 300,
-        "upload_site": "default"
+        "upload_site": "default",
+        "incremental": {
+            "enabled": false,
+            "full_backup_week_schedule": "sun,wed"
+        }
     },
     "backup_sites": {
         "default": {
@@ -47,6 +51,7 @@
         "relay_log_index_file": "/var/lib/mysql/relay.index",
         "relay_log_prefix": "/var/lib/mysql/relay"
     },
+    "restore_auto_mark_backups_broken": false,
     "restore_free_memory_percentage": null,
     "restore_max_binlog_bytes": 4294967296,
     "sentry_dsn": null,

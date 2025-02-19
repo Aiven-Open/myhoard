@@ -95,6 +95,30 @@ def test_basic_backup(mysql_master, extra_uuid):
     # Even almost empty backup is at least 1.5 megs due to standard files that are always included
     assert bytes_read[0] > 1.5 * 1024 * 1024
 
+    # Now add incremental backup
+    assert op.checkpoints_file_content is not None
+    inc_op = BasebackupOperation(
+        encryption_algorithm="AES256",
+        encryption_key=encryption_key,
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
+        progress_callback=progress_callback,
+        stats=build_statsd_client(),
+        stream_handler=stream_handler,
+        temp_dir=mysql_master.base_dir,
+        incremental_since_checkpoint=op.checkpoints_file_content,
+    )
+    inc_op.create_backup()
+    assert inc_op.checkpoints_file_content is not None
+
+    full_backup_checkpoint = myhoard_util.parse_xtrabackup_info(op.checkpoints_file_content)
+    inc_backup_checkpoint = myhoard_util.parse_xtrabackup_info(inc_op.checkpoints_file_content)
+    assert full_backup_checkpoint["backup_type"] == "full-backuped"
+    assert inc_backup_checkpoint["backup_type"] == "incremental"
+    assert full_backup_checkpoint["from_lsn"] == "0"
+    assert full_backup_checkpoint["to_lsn"] == inc_backup_checkpoint["from_lsn"]
+
 
 def test_stream_handler_error_is_propagated(mysql_master):
     def stream_handler(_stream):
@@ -220,18 +244,18 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
     )
     # lsn_dir is not specified
     with pytest.raises(AssertionError):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info is None
 
     op.lsn_dir = "/tmp/lsn-dir"
     with patch("builtins.open", side_effect=FileNotFoundError):
         with pytest.raises(FileNotFoundError):
-            op._process_binlog_info()  # pylint: disable=protected-access
+            op._process_xtrabackup_info()  # pylint: disable=protected-access
         assert op.binlog_info is None
 
     line = "abrakadabra"
     with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info is None
 
     line = (
@@ -239,7 +263,7 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
         "'00006582-5ce4-11ea-9748-22f28f5a4c51:1-55419,00ae3f16-75ce-11ea-9b71-7266f0f43b98:1-4104'"
     )
     with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info == {
         "file_name": "binlog.000220",
         "file_position": 236,
@@ -248,7 +272,7 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
 
     line = "binlog_pos = filename 'binlog.000221', position '238'"
     with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info == {
         "file_name": "binlog.000221",
         "file_position": 238,

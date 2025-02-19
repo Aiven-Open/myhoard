@@ -334,6 +334,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "backup_minute": 0,
             "forced_binlog_rotation_interval": 300,
             "upload_site": "default",
+            "incremental": {"enabled": False, "full_backup_week_schedule": "sun,wed"},
         },
         "backup_sites": {
             "default": default_backup_site,
@@ -360,6 +361,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "relay_log_index_file": mysql_master.config_options.relay_log_index_file,
             "relay_log_prefix": mysql_master.config_options.relay_log_file_prefix,
         },
+        "restore_auto_mark_backups_broken": True,
         "restore_free_memory_percentage": 50,
         "restore_max_binlog_bytes": 4294967296,
         "sentry_dsn": None,

@@ -3,6 +3,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA1
+from functools import cache
 from logging import Logger
 from math import log10
 from pathlib import Path
@@ -40,6 +41,10 @@ DEFAULT_XTRABACKUP_SETTINGS = {
     "register_redo_log_consumer": False,
 }
 
+# Indexes of this array are used for mapping the days (0..6), order is important
+DOW_ORDERED = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+CHECKPOINT_FILENAME = "xtrabackup_checkpoints"
+
 GtidRangeTuple = tuple[int, int, str, int, int]
 BinVersion = tuple[int, ...]
 
@@ -61,6 +66,19 @@ class GtidRangeDict(TypedDict):
 # Ideally the contents should be Tuple[int, int] rather than List[int],
 # but that clashes with json deserialization
 GtidExecuted = Dict[str, List[List[int]]]
+
+
+def parse_dow_schedule(dow_schedule: str) -> set[int]:
+    try:
+        res = set(DOW_ORDERED.index(dow.lower().strip()) for dow in dow_schedule.split(","))
+        if not res:
+            raise ValueError("Invalid DOW schedule")
+    except ValueError:
+        raise ValueError(
+            "`full_backup_week_schedule` must be a non-empty comma-separated list consisting of "
+            f"\"{', '.join(DOW_ORDERED)}\""
+        )
+    return res
 
 
 @contextlib.contextmanager
@@ -664,6 +682,7 @@ def parse_version(version: str) -> BinVersion:
     return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(version) if len(x) > 0)
 
 
+@cache
 def get_xtrabackup_version(cmd: str | Path = "xtrabackup") -> BinVersion:
     result = subprocess.run([str(cmd), "--version"], capture_output=True, encoding="utf-8", check=True)
     version_line = result.stderr.strip().split("\n")[-1]
@@ -679,7 +698,10 @@ def parse_xtrabackup_info(xtrabackup_info_text: str) -> dict[str, str]:
         line = line.strip()
         if not line:
             continue
-        key, value = line.split("=", 1)
+        try:
+            key, value = line.split("=", 1)
+        except ValueError:
+            continue
         result[key.strip()] = value.strip()
     return result
 

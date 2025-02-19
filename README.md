@@ -19,6 +19,7 @@ backup daemon for PostgreSQL.
   standby servers)
 - Almost no extra local disk space requirements for creating and restoring
   backups
+- Incremental backups
 
 Fault-resilience and monitoring:
 
@@ -214,6 +215,18 @@ Name of the backup site to which new backups should be created to. See
 `backup_sites` for more information. Only needs to be defined if multiple
 non-recovery backup sites are present.
 
+**incremental.enabled**
+
+Boolean setting, which controls periodic incremental backups, according to the schedule
+`incremental.full_backup_week_schedule`
+
+**incremental.full_backup_week_schedule**
+
+A string of comma-separated days of the week: `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`.
+Defines on which days full backups should be taken, thus other days incremental backups will be done.
+E.g. if the value of this setting is `sun,wed`, then full backup is taken on Sundays and Wednesdays, other days of the
+week incremental backups will be scheduled. Requires `"incremental.enabled": true`.
+
 **backup_sites**
 
 Object storage configurations and encryption keys. This is an object with
@@ -343,6 +356,11 @@ here.
 The full path and file name prefix of relay logs. This must be the same as the
 corresponding MySQL configuration option except full path is always required
 here.
+
+**restore_auto_mark_backups_broken**
+
+Boolean value. Enables a mechanism to automatically mark backups as broken if restoration fails for
+multiple times in a row. Defaults to `false`
 
 **restore_free_memory_percentage**
 
@@ -526,7 +544,8 @@ binary log file. Request body must be like this:
 ```
 {
   "backup_type": "{basebackup|binlog}",
-  "wait_for_upload": 3.0
+  "wait_for_upload": 3.0,
+  "incremental": false
 }
 ```
 
@@ -543,6 +562,12 @@ backed up.
 This is only valid in case `backup_type` is `binlog`. In that case the
 operation will block for up to as many seconds as specified by this parameter
 for the binary log upload to complete before returning.
+
+**incremental**
+
+Boolean value, when `true` - requests incremental base backup if possible.
+Setting is used only in combination with `basebackup` backup_type.
+Defaults to `false`.
 
 Response on success looks like this:
 

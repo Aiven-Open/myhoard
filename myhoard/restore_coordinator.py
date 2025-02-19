@@ -23,6 +23,7 @@ from .util import (
     mysql_cursor,
     parse_fs_metadata,
     parse_gtid_range_string,
+    parse_version,
     read_gtids_from_log,
     relay_log_name,
     restart_unexpected_dead_sql_thread,
@@ -32,6 +33,7 @@ from .util import (
     track_rate,
 )
 from contextlib import suppress
+from functools import partial
 from pymysql import OperationalError
 from rohmu import errors as rohmu_errors
 from rohmu.transfer_pool import TransferPool
@@ -45,6 +47,7 @@ import multiprocessing
 import os
 import pymysql
 import queue
+import tempfile
 import threading
 import time
 
@@ -148,6 +151,8 @@ class RestoreCoordinator(threading.Thread):
         promotions: List
         remote_read_errors: int
         restore_errors: int
+        required_backups: List[Dict]
+        required_backups_restored: int
         server_uuid: Optional[str]
         target_time_reached: bool
         write_relay_log_manually: bool
@@ -179,8 +184,10 @@ class RestoreCoordinator(threading.Thread):
         target_time=None,
         target_time_approximate_ok=None,
         temp_dir: str,
+        auto_mark_backups_broken: bool = False,
     ):
         super().__init__()
+        self.auto_mark_backups_broken = auto_mark_backups_broken
         self.basebackup_bytes_downloaded = 0
         self.basebackup_restore_operation: Optional[BasebackupRestoreOperation] = None
         self.binlog_poll_interval = self.BINLOG_POLL_INTERVAL
@@ -259,6 +266,8 @@ class RestoreCoordinator(threading.Thread):
             "prefetched_binlogs": {},
             "promotions": [],
             "remote_read_errors": 0,
+            "required_backups": [],
+            "required_backups_restored": 0,
             "restore_errors": 0,
             "server_uuid": None,
             "target_time_reached": False,
@@ -326,6 +335,10 @@ class RestoreCoordinator(threading.Thread):
         differs from the current version, we do not mark the backup as "broken"
         The issue may be related to Percona PXB version compatibility.
         """
+
+        if not self.auto_mark_backups_broken:
+            return False
+
         if self.phase is not self.Phase.failed_basebackup:
             return False
 
@@ -410,8 +423,35 @@ class RestoreCoordinator(threading.Thread):
         basebackup_info = self._load_file_data("basebackup.json")
         if not basebackup_info:
             return
+
+        required_backups = []
+        if basebackup_info.get("incremental"):
+            # We need to load all backups infos until the latest full one
+            for idx, stream_id in enumerate(basebackup_info["required_streams"]):
+                info = self._load_file_data("basebackup.json", stream_id=stream_id)
+                if not info:
+                    self.log.error("Required backup %r is not complete, cannot restore", stream_id)
+                    return
+                # Light validation that we actually have full backup and potentially following incremental ones
+                if info.get("incremental", False) != (idx > 0):
+                    self.log.error(
+                        "Unexpected order of backup types, full backup should be followed by incremental ones (if any)"
+                    )
+                    self.state_manager.increment_counter(name="restore_errors")
+                    self.update_state(phase=self.Phase.failed)
+                    return
+
+                completed_info = self._load_file_data("completed.json", stream_id=stream_id)
+                if not completed_info:
+                    self.log.error("Required backup %r is not complete, cannot restore", stream_id)
+                    self.state_manager.increment_counter(name="restore_errors")
+                    return
+
+                required_backups.append((stream_id, info))
+
         self.update_state(
             basebackup_info=basebackup_info,
+            required_backups=required_backups,
             phase=self.Phase.initiating_binlog_downloads,
         )
 
@@ -419,52 +459,130 @@ class RestoreCoordinator(threading.Thread):
         self._fetch_more_binlog_infos()
         self.update_state(phase=self.Phase.restoring_basebackup)
 
-    def restore_basebackup(self) -> None:
-        start_time = time.monotonic()
-        encryption_key = rsa_decrypt_bytes(
-            self.rsa_private_key_pem, bytes.fromhex(self.state["basebackup_info"]["encryption_key"])
-        )
+    def _run_basebackup_restore_operation(
+        self,
+        backup_info: Dict[str, Any],
+        target_dir: str,
+        temp_dir: str,
+        stream_id: str,
+        prepare_only: bool = False,
+        apply_log_only: bool = False,
+        incremental: bool = False,
+    ) -> None:
+        encryption_key = rsa_decrypt_bytes(self.rsa_private_key_pem, bytes.fromhex(backup_info["encryption_key"]))
         self.basebackup_restore_operation = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
             stats=self.stats,
-            stream_handler=self._basebackup_data_provider,
-            temp_dir=self.temp_dir,
+            stream_handler=partial(self._basebackup_data_provider, stream_id=stream_id),
+            target_dir=target_dir,
+            temp_dir=temp_dir,
             free_memory_percentage=self.free_memory_percentage,
+            backup_tool_version=backup_info.get("tool_version"),
         )
         try:
-            try:
+            self.basebackup_restore_operation.prepare_backup(
+                apply_log_only=apply_log_only,
+                incremental=incremental,
+                checkpoints_file_content=backup_info.get("checkpoints_file_content"),
+            )
+            if not prepare_only:
                 self.basebackup_restore_operation.restore_backup()
-            except DiskFullError:
-                self.stats.increase("myhoard.disk_full_errors")
-                self.update_state(phase=self.Phase.failed)
-                raise
-            duration = time.monotonic() - start_time
-            self.log.info("Basebackup restored in %.2f seconds", duration)
-            next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
-            self.update_state(
-                phase=next_phase,
-                basebackup_restore_duration=duration,
-                last_rebuilt_table=None,
-            )
-        except Exception as ex:  # pylint: disable=broad-except
-            self.log.exception("Failed to restore basebackup: %r", ex)
-            self.state_manager.increment_counter(name="basebackup_restore_errors")
-            self.state_manager.increment_counter(name="restore_errors")
-            self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
-            if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
-                self.log.error(
-                    "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS
+        except DiskFullError:
+            self.stats.increase("myhoard.disk_full_errors")
+            self.update_state(phase=self.Phase.failed)
+            raise
+
+    def restore_basebackup(self) -> None:
+        if os.path.exists(self.mysql_data_directory):
+            raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists")
+
+        start_time = time.monotonic()
+        restore_basebackup_info = self.state["basebackup_info"]
+        required_backups = self.state.get("required_backups", [])
+
+        last_tool_version: str | None = None
+
+        with tempfile.TemporaryDirectory(dir=self.temp_dir, prefix="myhoard_target_") as temp_target_dir:
+            try:
+                if required_backups:
+                    self.log.info(
+                        "Restoring previous basebackups required by currently restored backup: %r",
+                        [b[0] for b in required_backups],
+                    )
+                    for idx, required_backup in enumerate(required_backups, 1):
+                        stream_id, required_basebackup_info = required_backup
+                        current_start_time = time.monotonic()
+                        self.log.info(
+                            "Preparing required backup (incremental: %r): %r (%r/%r), tool version: %r",
+                            required_basebackup_info["incremental"],
+                            stream_id,
+                            idx,
+                            len(required_backups),
+                            required_basebackup_info.get("tool_version"),
+                        )
+                        last_tool_version = required_basebackup_info.get("tool_version")
+                        self._run_basebackup_restore_operation(
+                            required_basebackup_info,
+                            target_dir=temp_target_dir,
+                            temp_dir=self.temp_dir,
+                            stream_id=stream_id,
+                            prepare_only=True,
+                            apply_log_only=True,
+                            incremental=(idx != 1),  # Only the first one should be full
+                        )
+                        self.update_state(required_backups_restored=idx)
+                        current_duration = time.monotonic() - current_start_time
+                        self.log.info(
+                            "Basebackup %r/%r prepared in %.2f seconds", idx, len(required_backups), current_duration
+                        )
+
+                self.log.info("Preparing and restoring backup: %r", self.stream_id)
+
+                last_tool_version = restore_basebackup_info.get("tool_version")
+                self._run_basebackup_restore_operation(
+                    restore_basebackup_info,
+                    stream_id=self.stream_id,
+                    target_dir=temp_target_dir,
+                    prepare_only=False,
+                    apply_log_only=False,
+                    temp_dir=self.temp_dir,
+                    incremental=restore_basebackup_info.get("incremental", False),
                 )
-                self.update_state(phase=self.Phase.failed_basebackup)
-                self.stats.increase("myhoard.basebackup_broken")
-        finally:
-            self.update_state(
-                backup_xtrabackup_version=self.basebackup_restore_operation.backup_xtrabackup_version,
-            )
-            self.basebackup_restore_operation = None
+
+                duration = time.monotonic() - start_time
+
+                self.log.info("Basebackup fully restored in %.2f seconds", duration)
+                self.stats.gauge_float(
+                    "myhoard.basebackup_restore.total_time", duration, tags={"incremental": len(required_backups) > 0}
+                )
+
+                next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
+                self.update_state(
+                    phase=next_phase,
+                    basebackup_restore_duration=duration,
+                    last_rebuilt_table=None,
+                )
+
+            except Exception as ex:  # pylint: disable=broad-except
+                self.log.exception("Failed to restore basebackup: %r", ex)
+                self.state_manager.increment_counter(name="basebackup_restore_errors")
+                self.state_manager.increment_counter(name="restore_errors")
+                self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
+                if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
+                    self.log.error(
+                        "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS
+                    )
+                    self.update_state(phase=self.Phase.failed_basebackup)
+                    self.stats.increase("myhoard.basebackup_broken")
+            finally:
+                if self.basebackup_restore_operation:
+                    self.update_state(
+                        backup_xtrabackup_version=parse_version(last_tool_version) if last_tool_version else None
+                    )
+                    self.basebackup_restore_operation = None
 
     def rebuild_tables(self) -> None:
         excluded_tables = {
@@ -854,13 +972,13 @@ class RestoreCoordinator(threading.Thread):
         stream_id = binlog_stream["stream_id"]
         return f"{site}/{stream_id}/{name}"
 
-    def _build_full_name(self, name: str) -> str:
-        return f"{self.site}/{self.stream_id}/{name}"
+    def _build_full_name(self, name: str, stream_id: str | None = None) -> str:
+        return f"{self.site}/{stream_id or self.stream_id}/{name}"
 
-    def _load_file_data(self, name, missing_ok=False):
+    def _load_file_data(self, name, missing_ok=False, stream_id: str | None = None):
         try:
             with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
-                info_str, _ = file_storage.get_contents_to_string(self._build_full_name(name))
+                info_str, _ = file_storage.get_contents_to_string(self._build_full_name(name, stream_id))
             return json.loads(info_str)
         except rohmu_errors.FileNotFoundFromStorageError as ex:
             if not missing_ok:
@@ -875,7 +993,7 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
         return None
 
-    def _basebackup_data_provider(self, target_stream) -> None:
+    def _basebackup_data_provider(self, target_stream, stream_id: str | None = None) -> None:
         compressed_size = self.state["basebackup_info"].get("compressed_size")
         with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
             last_time = [time.monotonic()]
@@ -904,7 +1022,7 @@ class RestoreCoordinator(threading.Thread):
                     )
 
             num_splits = self.state["basebackup_info"].get("number_of_splits", 1)
-            name = self._build_full_name("basebackup.xbstream")
+            name = self._build_full_name("basebackup.xbstream", stream_id=stream_id)
             current_split = 0
             while num_splits > 0:
                 num_splits -= 1
