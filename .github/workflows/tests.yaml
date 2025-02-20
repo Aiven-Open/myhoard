@@ -14,34 +14,39 @@ on:
 
 jobs:
   lint:
+    name: Run pre-commit hooks
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        python-version: ["3.12"]
-    env:
-      MYSQL_VERSION: mysql-8.0
-
     steps:
-      - id: checkout-code
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - id: prepare-python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - id: python-deps
+          python-version: "3.12"
+      - name: Check copyright
+        run: scripts/copyright.sh
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Cache pre-commit environment
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-${{ matrix.python-version }}-
+      - name: Generate version file
         run: |
-          sudo apt-get update && sudo apt install -y libsnappy-dev
-          pip install -e .
-          pip install -e '.[dev]'
-      - id: pre-commit
-        run: pre-commit run --all
-      - id: copyright
-        run: make copyright
+          cat <<EOF > myhoard/version.py
+          __version__ = version = '0.0.0'
+          __version_tuple__ = version_tuple = (0, 0, 0)
+          EOF
+      - name: Run pre-commit
+        run: pre-commit run --all-files
 
   unittest:
-    runs-on: ubuntu-${{ matrix.ubuntu-version }}
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       # this isn't a standard matrix because some version testing doesn't make sense
@@ -50,21 +55,14 @@ jobs:
       matrix:
         include:
           - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26-1.focal"
-            python-version: "3.10"
-            ubuntu-version: "20.04"
-          - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26-1.focal"
+            percona-version: "8.0.32-26-1.jammy"
             python-version: "3.11"
-            ubuntu-version: "20.04"
           - mysql-version: "8.0.35"
-            percona-version: "8.0.35-30-1.focal"
+            percona-version: "8.0.35-32-1.jammy"
             python-version: "3.11"
-            ubuntu-version: "20.04"
           - mysql-version: "8.0.35"
-            percona-version: "8.0.35-30-1.focal"
+            percona-version: "8.0.35-32-1.jammy"
             python-version: "3.12"
-            ubuntu-version: "20.04"
 
     steps:
       - id: checkout-code
