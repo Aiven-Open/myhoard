@@ -306,6 +306,7 @@ def _restore_coordinator_sequence(
             {"site": "default", "stream_id": bs1.state["stream_id"]},
             {"site": "default", "stream_id": bs2.state["stream_id"]},
         ],
+        download_workers_count=2,
         file_storage_config={
             "directory": backup_target_location,
             "storage_type": "local",
@@ -418,6 +419,7 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
         # We do not connect to the db in this call we just need a RestoreCoordinator object
         rc = RestoreCoordinator(
             binlog_streams=[],
+            download_workers_count=2,
             file_storage_config={},
             free_memory_percentage=80,
             mysql_client_params=restored_connect_options,
