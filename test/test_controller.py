@@ -2,20 +2,23 @@
 from __future__ import annotations
 
 from . import build_controller, DataGenerator, get_mysql_config_options, MySQLConfig, wait_for_condition, while_asserts
+from .helpers.version import xtrabackup_version_to_string
 from myhoard.backup_stream import BackupStream
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
 from myhoard.controller import Backup, BaseBackup, Controller, sort_completed_backups
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
     change_master_to,
+    get_xtrabackup_version,
     GtidExecuted,
     make_fs_metadata,
     mysql_cursor,
     parse_gtid_range_string,
+    parse_version,
     partition_sort_and_combine_gtid_ranges,
 )
 from rohmu import get_transfer
-from typing import Any, cast, Dict, List, Optional, Set, TypedDict
+from typing import Any, Callable, cast, Dict, List, Optional, Set, TypedDict
 from unittest.mock import MagicMock, patch
 
 import contextlib
@@ -1073,7 +1076,7 @@ def test_new_binlog_stream_while_restoring(
         binlog_uploaded = False
 
         @contextlib.contextmanager
-        def timing_manager(block_name):
+        def timing_manager(block_name, tags=None):  # pylint: disable=unused-argument
             if block_name == "myhoard.basebackup_restore.xtrabackup_move":
                 while not binlog_uploaded:
                     time.sleep(0.1)
@@ -1812,7 +1815,12 @@ def test_purge_old_backups_should_not_remove_read_only_backups(
     def _append_backup(stream_id: str, ts: float, read_only: bool = True) -> None:
         controller.state["backups"].append(
             {
-                "basebackup_info": {"end_ts": ts},
+                "basebackup_info": {
+                    "checkpoints_file_content": None,
+                    "end_ts": ts,
+                    "incremental": False,
+                    "tool_version": "8.0.30",
+                },
                 "closed_at": ts,
                 "completed_at": ts,
                 "broken_at": None,
@@ -1828,13 +1836,51 @@ def test_purge_old_backups_should_not_remove_read_only_backups(
     _append_backup(stream_id="2", ts=ten_years_old, read_only=False)  # old backup, should be purged
     _append_backup(stream_id="3", ts=time.time(), read_only=False)  # latest backup
 
-    # since _purge_old_backups only purge one backup per call, try to call maximum possible times
-    controller._purge_old_backups()
-    controller._purge_old_backups()
     controller._purge_old_backups()
     backup_list = controller.state["backups"]
     assert len(backup_list) == 2
     assert all(b["stream_id"] != "2" for b in backup_list)  # backup "2" should be deleted
+
+
+def add_fake_backup(
+    controller: Controller,
+    stream_id: str,
+    incremental: bool = False,
+    completed_at: float | None = time.time() - 5 * 60,
+    closed_at: float | None = time.time() - 3 * 60,
+    broken_at: float | None = None,
+    preserve_until: str | None = None,
+) -> Backup:
+    now = time.time()
+    backup = Backup(
+        basebackup_info=BaseBackup(
+            checkpoints_file_content=None,
+            end_ts=now - 20 * 60,
+            incremental=incremental,
+            tool_version="8.0.30",
+        ),
+        closed_at=closed_at,
+        completed_at=completed_at,
+        broken_at=broken_at,
+        preserve_until=preserve_until,
+        recovery_site=False,
+        stream_id=stream_id,
+        resumable=True,
+        site="default",
+    )
+    backups = controller.state["backups"]
+    backups.append(backup)
+    controller.state_manager.update_state(backups=backups)
+    return backup
+
+
+def patched_remove_backup(controller: Controller) -> Callable:
+    def remove_backup(backup_stream: BackupStream) -> None:
+        controller.state["backups"] = [
+            backup for backup in controller.state["backups"] if backup["stream_id"] != backup_stream.stream_id
+        ]
+
+    return remove_backup
 
 
 @patch.object(BackupStream, "remove", autospec=True)
@@ -1856,69 +1902,133 @@ def test_purge_old_backups_exceeding_backup_age_days_max(
     # set it to 1 sec
     controller.backup_settings["backup_age_days_max"] = 1 / 86400
 
-    def remove_backup(backup_stream) -> None:
-        controller.state["backups"] = [
-            backup for backup in controller.state["backups"] if backup["stream_id"] != backup_stream.stream_id
-        ]
+    # 1 / 86400 * 24 * 60 * 60
 
-    mocked_backup_stream_remove.side_effect = remove_backup
-
-    def _add_fake_backup(stream_id: str) -> None:
-        now = time.time()
-        controller.state["backups"].append(
-            {
-                "basebackup_info": {
-                    "end_ts": now - 20 * 60,
-                },
-                "closed_at": now - 3 * 60,
-                "completed_at": now - 5 * 60,
-                "broken_at": None,
-                "preserve_until": None,
-                "recovery_site": False,
-                "stream_id": stream_id,
-                "resumable": True,
-                "site": "default",
-            }
-        )
+    mocked_backup_stream_remove.side_effect = patched_remove_backup(controller)
 
     time.sleep(1)
-    _add_fake_backup("1")
-    _add_fake_backup("2")
+    add_fake_backup(controller, "1")
+    add_fake_backup(controller, "2")
 
     # no backups should be purged, since we didn't exceed the max
     controller._purge_old_backups()
     assert len(controller.state["backups"]) == 2
 
     # exceed the backup limit
-    _add_fake_backup("3")
-    _add_fake_backup("4")
+    add_fake_backup(controller, "3")
+    add_fake_backup(controller, "4")
     controller._purge_old_backups()
 
-    # backup 1 should had been removed
-    assert len(controller.state["backups"]) == 3
-    assert controller.state["backups"][0]["stream_id"] == "2"
-    assert controller.state["backups"][1]["stream_id"] == "3"
-    assert controller.state["backups"][2]["stream_id"] == "4"
+    # two first backups should have been removed
+    assert len(controller.state["backups"]) == 2
+    assert controller.state["backups"][0]["stream_id"] == "3"
+    assert controller.state["backups"][1]["stream_id"] == "4"
 
-    _add_fake_backup("5")
-    _add_fake_backup("6")
+    add_fake_backup(controller, "5")
+    add_fake_backup(controller, "6")
 
-    # mark all of backups as broken, except the oldest one
+    # mark all backups as broken, except the oldest one
     # in this case we should not remove any backup even if we exceed the max
     for bid in range(1, len(controller.state["backups"])):
         controller.state["backups"][bid]["broken_at"] = time.time()
 
     controller._purge_old_backups()
-    assert len(controller.state["backups"]) == 5
+    assert len(controller.state["backups"]) == 4
 
-    # now add some healthy backups and exceed limit, it should purge backup 2
-    _add_fake_backup("7")
-    _add_fake_backup("8")
-    _add_fake_backup("9")
+    # now add some healthy backups and exceed limit, it should purge backup 3
+    add_fake_backup(controller, "7")
+    add_fake_backup(controller, "8")
+    add_fake_backup(controller, "9")
 
     controller._purge_old_backups()
-    assert len(controller.state["backups"]) == 7
-    assert controller.state["backups"][0]["stream_id"] == "3"
+    assert len(controller.state["backups"]) == 6
+    assert controller.state["backups"][0]["stream_id"] == "4"
+
+
+@pytest.mark.parametrize(
+    "backups_data,expected_result",
+    [
+        pytest.param([], 0, id="No backups"),
+        pytest.param([(False, None), (False, None), (False, None)], 3, id="All full intact backups"),
+        pytest.param([(False, None), (False, time.time()), (False, None)], 2, id="All full backups, one broken"),
+        pytest.param([(False, None), (True, None), (True, None)], 3, id="Full backup and two incremental, all intact"),
+        pytest.param([(False, time.time()), (True, None), (True, None)], 0, id="Incremental backups, full broken"),
+        pytest.param(
+            [(False, None), (True, time.time()), (True, None)], 1, id="Incremental backups, incremental in the middle broken"
+        ),
+        pytest.param([(False, None), (True, None), (True, time.time())], 2, id="Incremental backups, last one broken"),
+        pytest.param(
+            [(False, time.time()), (True, None), (True, None), (False, None)],
+            1,
+            id="Incremental backups, multiple full backups, first one broken",
+        ),
+        pytest.param(
+            [(False, None), (True, None), (True, time.time()), (False, None)],
+            3,
+            id="Incremental backups, multiple full backups, one incremental broken",
+        ),
+        pytest.param(
+            [(False, None), (True, None), (True, None), (False, None), (True, None)], 5, id="Incremental backups, all intact"
+        ),
+    ],
+)
+def test_count_non_broken_backups(
+    backups_data: list[tuple[bool, float | None]], expected_result: int, default_backup_site, mysql_empty, session_tmpdir
+):
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    for idx, b in enumerate(backups_data):
+        incremental, broken_at = b
+        add_fake_backup(controller, str(idx), incremental=incremental, broken_at=broken_at)
+
+    assert Controller.count_non_broken_backups(controller.state["backups"]) == expected_result
+
+
+@patch.object(BackupStream, "remove", autospec=True)
+def test_purge_old_incremental_backups_exceeding_backup_age_days_max(
+    mocked_backup_stream_remove: MagicMock,
+    default_backup_site,
+    mysql_empty,
+    session_tmpdir,
+) -> None:
+    # pylint: disable=protected-access
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.backup_settings["backup_count_min"] = 2
+    controller.backup_settings["backup_count_max"] = 3
+    # set it to 1 sec
+    controller.backup_settings["backup_age_days_max"] = 1 / 86400
+
+    mocked_backup_stream_remove.side_effect = patched_remove_backup(controller)
+
+    time.sleep(1)
+    add_fake_backup(controller, "1")
+    add_fake_backup(controller, "2", incremental=True)
+    add_fake_backup(controller, "3", incremental=True)
+    add_fake_backup(controller, "4", incremental=True)
+    controller._purge_old_backups()
+
+    # backup 1 would have been removed if it did not have following incremental backups
+    assert len(controller.state["backups"]) == 4
+
+    # Add full backup and two incremental ones to that previous backups could be purged
+    add_fake_backup(controller, "5")
+    add_fake_backup(controller, "6", incremental=True)
+    add_fake_backup(controller, "7", incremental=True)
+    controller._purge_old_backups()
+    assert len(controller.state["backups"]) == 3
+
+    assert controller.state["backups"][0]["stream_id"] == "5"
+    assert controller.state["backups"][1]["stream_id"] == "6"
+    assert controller.state["backups"][2]["stream_id"] == "7"
 
 
 @pytest.mark.parametrize(
@@ -1996,3 +2106,365 @@ class LimitedSideEffectMock:
             raise Exception()
 
         return self.original_function_to_mock(*args, **kwargs)
+
+
+def test_get_incremental_backup_info(default_backup_site, mysql_empty, session_tmpdir):
+
+    backup1 = Backup(
+        basebackup_info=BaseBackup(
+            incremental=False,
+            end_ts=1.0,
+            checkpoints_file_content="backup_type = full-backuped...",
+            tool_version=xtrabackup_version_to_string(get_xtrabackup_version()),
+        ),
+        closed_at=1,
+        completed_at=1,
+        recovery_site=False,
+        stream_id="1000",
+        resumable=False,
+        site="not_default_site",
+        broken_at=None,
+        preserve_until=None,
+    )
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    import copy
+
+    backup2 = copy.deepcopy(backup1)
+    backup2["basebackup_info"]["incremental"] = True
+    backup2["basebackup_info"]["checkpoints_file_content"] = "backup_type = incremental..."
+    backup2["completed_at"] = 2
+    backup2["closed_at"] = 2
+    backup2["stream_id"] = "1001"
+
+    backup3 = copy.deepcopy(backup1)
+    backup3["basebackup_info"]["incremental"] = True
+    backup3["basebackup_info"]["checkpoints_file_content"] = "backup_type = incremental..."
+    backup3["completed_at"] = 3
+    backup3["closed_at"] = 3
+    backup3["stream_id"] = "1002"
+
+    controller.state["backups"] = [backup1, backup2, backup3]
+    info = controller.get_incremental_backup_info()
+    assert info["required_streams"] == ["1000", "1001", "1002"]
+    assert info["last_checkpoint"] == "backup_type = incremental..."
+
+    # Breaking one of the backups or having no checkpoint should return nothing, as incremental backup is not possible
+    for b in [backup1, backup2, backup3]:
+        b["broken_at"] = 1
+        assert controller.get_incremental_backup_info() is None
+        b["broken_at"] = None
+
+    for b in [backup1, backup2, backup3]:
+        checkpoint = b["basebackup_info"]["checkpoints_file_content"]
+        b["basebackup_info"]["checkpoints_file_content"] = None
+        assert controller.get_incremental_backup_info() is None
+        b["basebackup_info"]["checkpoints_file_content"] = checkpoint
+
+    assert controller.get_incremental_backup_info() is not None
+
+    # For whatever reason there is no full backup in the list
+    backup1["basebackup_info"]["incremental"] = True
+    assert controller.get_incremental_backup_info() is None
+
+    # We have only one full backup
+    backup1["basebackup_info"]["incremental"] = False
+    controller.state["backups"] = [backup1]
+    info = controller.get_incremental_backup_info()
+    assert info["required_streams"] == ["1000"]
+    assert info["last_checkpoint"] == "backup_type = full-backuped..."
+
+
+@pytest.mark.parametrize(
+    "backup_tool_version,tool_version,expected_incremental",
+    ((None, "8.0.30-12", False), ("8.0.30-10", "8.0.30-12", False), ("8.0.30-12", "8.0.30-12", True)),
+)
+def test_get_incremental_backup_info_version_check(
+    default_backup_site,
+    mysql_empty,
+    session_tmpdir,
+    backup_tool_version: str | None,
+    tool_version: str,
+    expected_incremental: bool,
+) -> None:
+    backup1 = Backup(
+        basebackup_info=BaseBackup(
+            incremental=False,
+            end_ts=1.0,
+            checkpoints_file_content="backup_type = full-backuped...",
+            tool_version=backup_tool_version,
+        ),
+        closed_at=1,
+        completed_at=1,
+        recovery_site=False,
+        stream_id="1000",
+        resumable=False,
+        site="not_default_site",
+        broken_at=None,
+        preserve_until=None,
+    )
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.state["backups"] = [backup1]
+    with patch("myhoard.controller.get_xtrabackup_version", return_value=parse_version(tool_version)):
+        info = controller.get_incremental_backup_info()
+        if expected_incremental:
+            assert info
+            assert info["required_streams"] == ["1000"]
+            assert info["last_checkpoint"] == "backup_type = full-backuped..."
+        else:
+            assert info is None
+
+
+def test_should_schedule_incremental_backup(
+    time_machine,
+    master_controller,
+) -> None:
+    m_controller, _ = master_controller
+
+    m_controller.backup_settings["incremental"] = {"enabled": False}
+    # pylint: disable=protected-access
+    assert not m_controller._should_schedule_incremental_backup()
+
+    m_controller.backup_settings["incremental"] = {"enabled": True, "full_backup_week_schedule": "wed"}
+    # Travel to Wed
+    time_machine.move_to(datetime.datetime(2025, 2, 5))
+    # pylint: disable=protected-access
+    assert not m_controller._should_schedule_incremental_backup()
+
+    time_machine.move_to(datetime.datetime(2025, 2, 6))
+    # pylint: disable=protected-access
+    assert m_controller._should_schedule_incremental_backup()
+
+
+@pytest.mark.parametrize(
+    "backups,expected_no_purge_reason,travel_to_datetime,backup_settings_extra",
+    [
+        pytest.param([], Controller.NoPurgeReason.no_completed_backups, None, None, id="No backups"),
+        pytest.param(
+            [{"stream_id": "stream1", "completed_at": None}, {"stream_id": "stream2", "completed_at": None}],
+            Controller.NoPurgeReason.no_completed_backups,
+            None,
+            None,
+            id="No complete backups",
+        ),
+        pytest.param(
+            [{"stream_id": "stream1", "incremental": True}], None, None, None, id="Drop leading incremental backup"
+        ),
+        pytest.param(
+            [{"stream_id": "stream1", "incremental": True}, {"stream_id": "stream2", "incremental": True}],
+            None,
+            None,
+            None,
+            id="Drop leading incremental backup",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "incremental": True},
+                {"stream_id": "stream2"},
+                {"stream_id": "stream3"},
+            ],
+            None,
+            None,
+            None,
+            id="Drop leading incremental backup",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1"},
+                {"stream_id": "stream2", "incremental": True},
+                {"stream_id": "stream3", "incremental": True},
+                {"stream_id": "stream4", "incremental": True, "broken_at": 1},
+            ],
+            Controller.NoPurgeReason.within_max_amount,
+            None,
+            None,
+            id="More than max backups, but not with broken ones",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1"},
+                {"stream_id": "stream2", "incremental": True},
+                {"stream_id": "stream3", "incremental": True, "broken_at": 1},
+            ],
+            Controller.NoPurgeReason.min_amount_required,
+            None,
+            None,
+            id="Less than required min backups amount excluding broken",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1"},
+                {"stream_id": "stream2", "incremental": True, "closed_at": None},
+                {
+                    "stream_id": "stream3",
+                },
+                {"stream_id": "stream4", "incremental": True},
+            ],
+            Controller.NoPurgeReason.non_closed_backup,
+            None,
+            None,
+            id="Non closed incremental backup should prevent purging full backup",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "closed_at": None},
+                {"stream_id": "stream2", "incremental": True},
+                {"stream_id": "stream3"},
+                {"stream_id": "stream4", "incremental": True},
+            ],
+            Controller.NoPurgeReason.non_closed_backup,
+            None,
+            None,
+            id="Non closed backup should prevent purging",
+        ),
+        pytest.param(
+            [
+                {
+                    "stream_id": "stream1",
+                    "preserve_until": (
+                        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+                    ).isoformat(),
+                },
+                {"stream_id": "stream2"},
+                {"stream_id": "stream3"},
+                {"stream_id": "stream4"},
+            ],
+            Controller.NoPurgeReason.preserved_backup,
+            None,
+            None,
+            id="Full backup is preserved",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1"},
+                {
+                    "stream_id": "stream2",
+                    "preserve_until": (
+                        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+                    ).isoformat(),
+                },
+                {"stream_id": "stream3"},
+                {"stream_id": "stream4"},
+            ],
+            None,
+            None,
+            None,
+            id="One of full backups is preserved",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1"},
+                {
+                    "stream_id": "stream2",
+                    "preserve_until": (
+                        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+                    ).isoformat(),
+                    "incremental": True,
+                },
+                {"stream_id": "stream3"},
+                {"stream_id": "stream4"},
+            ],
+            Controller.NoPurgeReason.preserved_backup,
+            None,
+            None,
+            id="Incremental backup is preserved",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "closed_at": time.time() - 24 * 60 * 60},
+                {
+                    "stream_id": "stream2",
+                    "closed_at": time.time(),
+                    "incremental": True,
+                },
+                {"stream_id": "stream3", "incremental": True},
+                {"stream_id": "stream4"},
+                {"stream_id": "stream5", "incremental": True},
+            ],
+            Controller.NoPurgeReason.required_backup_within_retention,
+            None,
+            {"backup_age_days_max": 1},
+            id="Full backup expired, but incremental one did not",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "closed_at": time.time() - 24 * 60 * 60},
+                {
+                    "stream_id": "stream2",
+                    "closed_at": time.time() - 24 * 60 * 60,
+                    "incremental": True,
+                },
+                {"stream_id": "stream3"},
+                {"stream_id": "stream4"},
+                {"stream_id": "stream5"},
+                {"stream_id": "stream6", "incremental": True},
+            ],
+            None,
+            None,
+            {"backup_age_days_max": 1},
+            id="Backups out of retention",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "closed_at": time.time()},
+                {"stream_id": "stream2"},
+                {"stream_id": "stream3"},
+            ],
+            Controller.NoPurgeReason.requirements_not_met,
+            None,
+            {"backup_age_days_max": 1},
+            id="Nothing to purge, no old backups, max threshold not reached",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "closed_at": time.time() - 24 * 60 * 60},
+                {"stream_id": "stream2"},
+                {"stream_id": "stream3", "incremental": True},
+            ],
+            Controller.NoPurgeReason.min_amount_required,
+            None,
+            {"backup_age_days_max": 1, "backup_count_min": 3, "backup_count_max": 5},
+            id="Purging old backup would leave less than min backups",
+        ),
+    ],
+)
+def test_get_backup_to_purge(
+    time_machine,
+    backups: list[Dict[str, Any]],
+    default_backup_site,
+    mysql_empty,
+    session_tmpdir,
+    expected_no_purge_reason: Controller.NoPurgeReason | None,
+    travel_to_datetime: datetime.datetime | None,
+    backup_settings_extra: Dict[str, Any] | None,
+):
+    # pylint: disable=protected-access
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+    controller.backup_settings["backup_count_min"] = 2
+    controller.backup_settings["backup_count_max"] = 3
+    controller.backup_settings["backup_age_days_max"] = 1 / 86400
+    if backup_settings_extra:
+        controller.backup_settings.update(backup_settings_extra)
+    if travel_to_datetime is not None:
+        time_machine.move_to(travel_to_datetime)
+
+    for b in backups:
+        add_fake_backup(controller, **b)
+    if expected_no_purge_reason is None:
+        assert controller._get_backup_to_purge() == controller.state["backups"][0]
+    else:
+        assert controller._get_backup_to_purge() == expected_no_purge_reason

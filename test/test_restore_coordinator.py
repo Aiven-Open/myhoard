@@ -465,6 +465,7 @@ def test_should_mark_backup_as_broken(session_tmpdir):
         stream_id="-",
         target_time=None,
         temp_dir="/dev/null",
+        auto_mark_backups_broken=True,
     )
     assert not rc.should_mark_backup_as_broken()
     rc.update_state(phase=rc.Phase.failed_basebackup, backup_xtrabackup_version=None)

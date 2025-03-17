@@ -23,7 +23,7 @@ RUN apt update && \
         liblz4-1 liblz4-dev libldap2-dev libsasl2-dev libsasl2-modules-gssapi-mit libkrb5-dev wget \
         libreadline-dev libudev-dev libev-dev libev4 libprocps-dev vim-common
 # Download boost and percona-xtrabackup
-RUN wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
+RUN wget https://archives.boost.io/release/1.77.0/source/boost_1_77_0.tar.gz && \
     tar -zxvf boost_1_77_0.tar.gz
 
 
@@ -83,9 +83,9 @@ COPY --from=builder-percona-server /usr/local/mysql/bin /usr/bin
 COPY --from=builder-percona-server /usr/local/mysql/lib /usr/lib
 
 ADD requirement* /src/
-RUN scripts/install-python-deps
 RUN sudo scripts/create-user
 
 ADD . /src/
+RUN scripts/install-python-deps
 RUN git config --global --add safe.directory /src
 RUN python -m pip install -e .

@@ -400,6 +400,7 @@ def test_parse_xtrabackup_info() -> None:
     name =
     tool_version = 8.0.30-23
     server_version = 8.0.30
+    unparsable line
     """
     xtrabackup_info = myhoard_util.parse_xtrabackup_info(raw_xtrabackup_info)
     assert xtrabackup_info == {
@@ -420,3 +421,20 @@ def test_find_extra_xtrabackup_executables() -> None:
         assert len(bin_infos) == 1
         assert bin_infos[0].path.name == "xtrabackup"
         assert bin_infos[0].version >= (8, 0, 30)
+
+
+@pytest.mark.parametrize(
+    "dow_schedule,result",
+    [
+        ("abracadabra", ValueError),
+        ("", ValueError),
+        ("mon,wed", {0, 2}),
+        ("sun", {6}),
+    ],
+)
+def test_parse_dow_schedule(dow_schedule: str, result: set[int] | type) -> None:
+    if not isinstance(result, set):
+        with pytest.raises(result):
+            myhoard_util.parse_dow_schedule(dow_schedule)
+    else:
+        assert myhoard_util.parse_dow_schedule(dow_schedule) == result
