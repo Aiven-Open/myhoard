@@ -84,6 +84,33 @@ async def test_backup_list(master_controller, web_client):
             "stream_id",
         }
         assert set(backup) == expected
+        basebackup_info_expected = {
+            "binlog_index",
+            "binlog_name",
+            "binlog_position",
+            "backup_reason",
+            "checkpoints_file_content",
+            "compressed_size",
+            "encryption_key",
+            "end_size",
+            "end_ts",
+            "gtid",
+            "gtid_executed",
+            "incremental",
+            "required_streams",
+            "initiated_at",
+            "lsn_info",
+            "normalized_backup_time",
+            "number_of_files",
+            "split_size",
+            "number_of_splits",
+            "start_size",
+            "start_ts",
+            "tool_version",
+            "server_version",
+            "uploaded_from",
+        }
+        assert basebackup_info_expected == set(backup["basebackup_info"].keys())
 
     await awhile_asserts(has_backup)
 

@@ -96,6 +96,7 @@ class BasebackupOperation:
         self.temp_dir: Optional[str] = None
         self.temp_dir_base = temp_dir
         self.tool_version: str | None = None
+        self.server_version: str | None = None
 
     def abort(self, reason):
         """Aborts ongoing backup generation"""
@@ -401,6 +402,7 @@ class BasebackupOperation:
             self.log.warning("binlog info wasn't found in `xtrabackup_info` file")
 
         self.tool_version = backup_xtrabackup_info.get("tool_version")
+        self.server_version = backup_xtrabackup_info.get("server_version")
 
     def _process_output_line_lsn_info(self, line):
         match = self.lsn_re.search(line)

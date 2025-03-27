@@ -1114,6 +1114,7 @@ class BackupStream(threading.Thread):
                 "start_size": self.basebackup_operation.data_directory_size_start,
                 "start_ts": start_time,
                 "tool_version": self.basebackup_operation.tool_version,
+                "server_version": self.basebackup_operation.server_version,
                 "uploaded_from": self.server_id,
             }
             self.file_storage.store_file_from_memory(

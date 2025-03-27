@@ -278,3 +278,5 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
         "file_position": 238,
         "gtid": None,
     }
+    assert op.tool_version == "8.0.30-23.1.aiven"
+    assert op.server_version == "8.0.30"
