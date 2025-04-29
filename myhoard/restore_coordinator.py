@@ -684,6 +684,7 @@ class RestoreCoordinator(threading.Thread):
 
         initial_round = binlogs[0]["adjusted_remote_index"] == 1
         final_round = binlogs[-1]["adjusted_remote_index"] == self.pending_binlogs[-1]["adjusted_remote_index"]
+
         if initial_round and not mysql_started:
             self._rename_prefetched_binlogs(binlogs)
             with open(self.mysql_relay_log_index_file, "wb") as index_file:
@@ -739,6 +740,7 @@ class RestoreCoordinator(threading.Thread):
                             "MASTER_HOST": "dummy",
                             "RELAY_LOG_FILE": names[0],
                             "RELAY_LOG_POS": relay_log_pos,
+                            "PRIVILEGE_CHECKS_USER": None,
                         },
                     )
                 except (pymysql.err.InternalError, pymysql.err.OperationalError) as ex:

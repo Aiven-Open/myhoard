@@ -726,6 +726,7 @@ class Controller(threading.Thread):
             options = {
                 "MASTER_AUTO_POSITION": 0,
                 "MASTER_HOST": "dummy",
+                "PRIVILEGE_CHECKS_USER": None,
                 "RELAY_LOG_FILE": first_name,
                 "RELAY_LOG_POS": 4,
             }
