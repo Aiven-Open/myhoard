@@ -128,7 +128,11 @@ def atomic_create_file(
 
 def change_master_to(*, cursor, options):
     """Constructs and executes CHANGE MASTER TO command based on given options"""
-    option_items = ", ".join(f"{k}={v!r}" for k, v in options.items())
+
+    def null_if_value_is_none(v):
+        return f"{v!r}" if v is not None else "NULL"
+
+    option_items = ", ".join(f"{k}={null_if_value_is_none(v)}" for k, v in options.items())
     sql = f"CHANGE MASTER TO {option_items}"
     cursor.execute(sql)
 
