@@ -292,7 +292,9 @@ class RestoreCoordinator(threading.Thread):
 
     @property
     def basebackup_bytes_total(self) -> int:
-        return self.state["basebackup_info"].get("compressed_size") or 0
+        bytes_total = self.state["basebackup_info"].get("compressed_size") or 0
+        bytes_total += sum([info.get("compressed_size") or 0 for _, info in self.state.get("required_backups", [])])
+        return bytes_total
 
     @property
     def binlogs_being_restored(self) -> int:
@@ -504,6 +506,7 @@ class RestoreCoordinator(threading.Thread):
         required_backups = self.state.get("required_backups", [])
 
         last_tool_version: str | None = None
+        self.basebackup_bytes_downloaded = 0
 
         with tempfile.TemporaryDirectory(dir=self.temp_dir, prefix="myhoard_target_") as temp_target_dir:
             try:
@@ -1000,7 +1003,6 @@ class RestoreCoordinator(threading.Thread):
         with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
             last_time = [time.monotonic()]
             last_value = [0]
-            self.basebackup_bytes_downloaded = 0
             total_at_last_split_download = [0]
             current_file_size = [0]
 

@@ -561,3 +561,43 @@ class FailingStateManager(Generic[T], StateManager[T]):
         if not self.has_failed and kwargs.get("last_rebuilt_table") == "`db1`.`t1`":
             self.has_failed = True
             raise InjectedError()
+
+
+@pytest.mark.parametrize(
+    "basebackup_info,required_backups,expected_bytes_total",
+    [
+        [{}, [], 0],
+        [{"compressed_size": None}, [("1", {"compressed_size": None})], 0],
+        [{"compressed_size": 100}, [("1", {"compressed_size": None})], 100],
+        [{"compressed_size": 200}, [], 200],
+        [{"compressed_size": 0}, [("1", {"compressed_size": 300})], 300],
+        [{"compressed_size": 10}, [("1", {"compressed_size": 20}), ("2", {"compressed_size": 30})], 60],
+    ],
+)
+def test_basebackup_bytes_total(
+    session_tmpdir,
+    basebackup_info: dict[str, Any],
+    required_backups: list[tuple[str, dict[str, Any]]],
+    expected_bytes_total: int,
+) -> None:
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params="-",
+        mysql_config_file_name="-",
+        mysql_data_directory="/dev/null",
+        mysql_relay_log_index_file="/dev/null",
+        mysql_relay_log_prefix="/dev/null",
+        pending_binlogs_state_file="/dev/null",
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="/dev/null",
+        site="default",
+        state_file=os.path.join(session_tmpdir().strpath, "the_state_file.json"),
+        stats=build_statsd_client(),
+        stream_id="-",
+        temp_dir=session_tmpdir().strpath,
+    )
+    rc.update_state(basebackup_info=basebackup_info, required_backups=required_backups)
+    assert rc.basebackup_bytes_total == expected_bytes_total
