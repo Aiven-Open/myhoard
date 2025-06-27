@@ -53,7 +53,7 @@ build-dep-fedora:
 
 .PHONY: build-dep-ubuntu
 build-dep-ubuntu:
-	sudo apt install -y lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc python-is-python3
+	sudo apt install -y lsb-release wget tzdata libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc python-is-python3
 
 # local development, don't use in CI
 # prerequisite
