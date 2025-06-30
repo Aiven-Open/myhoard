@@ -7,7 +7,7 @@ trap "rm -f Dockerfile.myhoard-test-temp" EXIT
 cat > Dockerfile.myhoard-test-temp <<EOM
 FROM python:${PYTHON_VERSION}-bullseye
 RUN apt-get update && apt-get install -y \
-    sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
+    sudo lsb-release wget tzdata libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
   && rm -rf /var/lib/apt/lists/*
 ENV MYSQL_VERSION=${MYSQL_VERSION}
 ENV PERCONA_VERSION=${PERCONA_VERSION}

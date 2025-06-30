@@ -68,7 +68,7 @@ ARG MYSQL_VERSION=8.0.30
 ENV MYSQL_VERSION=${MYSQL_VERSION}
 
 RUN apt-get update && apt-get install -y \
-    sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
+    sudo lsb-release wget tzdata libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
   && rm -rf /var/lib/apt/lists/*
 ADD scripts /src/scripts
 ADD Makefile /src/
