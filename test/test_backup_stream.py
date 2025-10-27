@@ -1,4 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
+
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
@@ -12,6 +13,7 @@ import myhoard.util as myhoard_util
 import os
 import pytest
 import rohmu
+import sys
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -32,7 +34,7 @@ def test_backup_stream_with_split_basebackup_file(session_tmpdir, mysql_master):
     _run_backup_stream_test(session_tmpdir, mysql_master, BackupStream, split_size=10_000)
 
 
-def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_stream_class, split_size: int = 0):
+def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_stream_class, split_size: int = sys.maxsize):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
         cursor.execute("USE db1")

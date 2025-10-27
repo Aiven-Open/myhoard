@@ -44,6 +44,7 @@ import json
 import logging
 import os
 import pymysql
+import sys
 import threading
 import time
 import uuid
@@ -192,7 +193,11 @@ class BackupStream(threading.Thread):
         super().__init__()
         stream_id = stream_id or self.new_stream_id()
         self.basebackup_bytes_uploaded = 0
-        self.split_size = split_size
+        self.split_size = (
+            file_storage_setup_fn().calculate_max_unknown_file_size()
+            if split_size == 0
+            else min(split_size, file_storage_setup_fn().calculate_max_unknown_file_size())
+        )
         self.basebackup_operation: Optional[BasebackupOperation] = None
         self.basebackup_progress: Optional[Dict[str, Any]] = None
         self.compression = compression
@@ -703,7 +708,7 @@ class BackupStream(threading.Thread):
 
             storage_file_name = file_name_for_basebackup_split(basebackup_file_path, split_nr)
 
-            if self.split_size and self.split_size > 0:
+            if self.split_size and 0 < self.split_size < sys.maxsize:
                 stream_to_use = BinaryIOSlice(self.split_size, stream)
             else:
                 stream_to_use = stream
