@@ -194,6 +194,7 @@ class BasebackupRestoreOperation:
                 if bin_info.version[:3] == backup_xtrabackup_version[:3]:
                     xtrabackup_cmd = str(bin_info.path)
                     break
+        self.log.info("get_xtrabackup_cmd: using %s for version %s", xtrabackup_cmd, backup_xtrabackup_version)
         return xtrabackup_cmd
 
     def _get_directory_size(self, directory_name, cleanup=False):
