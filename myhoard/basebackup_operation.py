@@ -158,7 +158,7 @@ class BasebackupOperation:
 
                 with self.stats.timing_manager(
                     "myhoard.basebackup.xtrabackup_backup",
-                    tags={"incremental": (self.incremental_since_checkpoint is not None)},
+                    tags={"incremental": self.is_incremental()},
                 ):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -168,6 +168,9 @@ class BasebackupOperation:
 
         self.data_directory_size_end, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress(estimated_progress=100)
+
+    def is_incremental(self) -> bool:
+        return self.incremental_since_checkpoint is not None
 
     def _optimize_tables(self) -> None:
         params = dict(self.mysql_client_params)
@@ -205,7 +208,7 @@ class BasebackupOperation:
                 database_and_tables.append((database, table))
 
             for database, table in database_and_tables:
-                self.stats.increase(metric="myhoard.basebackup.optimize_table")
+                self.stats.increase(metric="myhoard.basebackup.optimize_table", tags={"incremental": self.is_incremental()})
                 self.log.info("Optimizing table %r.%r", database, table)
                 # sending it as parameters doesn't work
                 cursor.execute(f"OPTIMIZE TABLE `{database}`.`{table}`")
@@ -426,7 +429,9 @@ class BasebackupOperation:
             estimated_total_bytes,
             estimated_progress,
         )
-        self.stats.gauge_float("myhoard.basebackup.estimated_progress", estimated_progress)
+        self.stats.gauge_float(
+            "myhoard.basebackup.estimated_progress", estimated_progress, tags={"incremental": self.is_incremental()}
+        )
 
         if self.progress_callback:
             self.progress_callback(
