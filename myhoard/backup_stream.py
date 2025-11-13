@@ -614,7 +614,9 @@ class BackupStream(threading.Thread):
                     if self.state["closed_info"] and self.active_phase != self.ActivePhase.none:
                         self._handle_pending_mark_as_closed()
                     if self.active_phase == self.ActivePhase.basebackup:
-                        self.stats.gauge_int("myhoard.backup_stream.basebackup_requested", 1)
+                        self.stats.gauge_int(
+                            "myhoard.backup_stream.basebackup_requested", 1, tags={"incremental": self.is_incremental}
+                        )
                         self._take_basebackup()
                     if self.is_streaming_binlogs():
                         self._upload_binlogs()
@@ -637,7 +639,7 @@ class BackupStream(threading.Thread):
                 self.log.exception("Unexpected exception in mode %s", self.mode)
                 self.stats.unexpected_exception(ex=ex, where="BackupStream.run")
                 self.state_manager.increment_counter(name="backup_errors")
-                self.stats.increase("myhoard.backup_stream.errors")
+                self.stats.increase("myhoard.backup_stream.errors", tags={"incremental": self.is_incremental})
                 # Limit counter max value or else we'll get to exponent that cannot be handled anymore
                 sleep_time = min(1.5 ** min(consecutive_errors, 20), 30.0)
                 consecutive_errors += 1
@@ -698,6 +700,7 @@ class BackupStream(threading.Thread):
                 last_recorded_time=last_time[0],
                 metric_name="myhoard.backup_stream.basebackup_upload_rate",
                 stats=self.stats,
+                tags={"incremental": self.is_incremental},
             )
 
         split_nr = 0
@@ -1136,11 +1139,19 @@ class BackupStream(threading.Thread):
             )
             uncompressed_size = self.basebackup_operation.data_directory_size_end
             if uncompressed_size:
-                self.stats.gauge_int("myhoard.basebackup.bytes_uncompressed", uncompressed_size)
+                self.stats.gauge_int(
+                    "myhoard.basebackup.bytes_uncompressed", uncompressed_size, tags={"incremental": self.is_incremental}
+                )
             if compressed_size:
-                self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
+                self.stats.gauge_int(
+                    "myhoard.basebackup.bytes_compressed", compressed_size, tags={"incremental": self.is_incremental}
+                )
             if uncompressed_size and compressed_size:
-                self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
+                self.stats.gauge_float(
+                    "myhoard.basebackup.compression_ratio",
+                    uncompressed_size / compressed_size,
+                    tags={"incremental": self.is_incremental},
+                )
         except (
             gaierror,
             GeneralProxyError,
@@ -1153,13 +1164,17 @@ class BackupStream(threading.Thread):
             self.state_manager.increment_counter(name="basebackup_errors")
             self.stats.increase(
                 "myhoard.basebackup.errors",
-                tags={"ex": ex.__class__.__name__, "reason": BaseBackupFailureReason.network_error},
+                tags={
+                    "ex": ex.__class__.__name__,
+                    "reason": BaseBackupFailureReason.network_error,
+                    "incremental": self.is_incremental,
+                },
             )
             self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
 
-            tags = {"ex": ex.__class__.__name__}
+            tags = {"ex": ex.__class__.__name__, "incremental": self.is_incremental}
             # explicitly tag block mismatch errors, this way we can relate high redo log activity to xtrabackup errors
             if isinstance(ex, BlockMismatchError):
                 tags["reason"] = BaseBackupFailureReason.block_mismatch_error

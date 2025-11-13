@@ -9,7 +9,7 @@ from math import log10
 from pathlib import Path
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
-from typing import Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
+from typing import Any, Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -543,7 +543,16 @@ def get_mysql_version(cursor: pymysql.cursors.DictCursor) -> Optional[str]:
         return None
 
 
-def track_rate(*, current, last_recorded, last_recorded_time, metric_name, min_increase=1_000_000, stats):
+def track_rate(
+    *,
+    current,
+    last_recorded,
+    last_recorded_time,
+    metric_name,
+    min_increase=1_000_000,
+    stats,
+    tags: dict[str, Any] | None = None,
+):
     """Calculates rate of change given current value and previously handled value and time. If there is
     a relevant change (as defined by min_increase) and some time has passed, the current rate of change
     is sent as integer gauge using given stats client and metric name. Returns the values to pass to the
@@ -555,7 +564,7 @@ def track_rate(*, current, last_recorded, last_recorded_time, metric_name, min_i
         diff = current - last_recorded
         per_second = int(diff / time_elapsed)
         if per_second > 0:
-            stats.gauge_int(metric_name, per_second)
+            stats.gauge_int(metric_name, per_second, tags=tags)
             return_value = current
             return_time = now
     return return_value, return_time
