@@ -32,7 +32,7 @@ RUN wget https://archives.boost.io/release/1.77.0/source/boost_1_77_0.tar.gz && 
 ###############################################
 FROM builder-percona AS builder-percona-xtrabackup
 
-RUN wget https://downloads.percona.com/downloads/Percona-XtraBackup-LATEST/Percona-XtraBackup-${PERCONA_XTRA_VERSION}/source/tarball/percona-xtrabackup-${PERCONA_XTRA_VERSION}.tar.gz && \
+RUN wget https://downloads.percona.com/downloads/percona-distribution-mysql-ps/percona-distribution-mysql-ps-${MYSQL_VERSION}/source/tarball/percona-xtrabackup-${PERCONA_XTRA_VERSION}.tar.gz && \
     tar -zxvf percona-xtrabackup-${PERCONA_XTRA_VERSION}.tar.gz
 # Build percona-xtrabackup
 RUN cd percona-xtrabackup-${PERCONA_XTRA_VERSION} && \
@@ -48,7 +48,7 @@ RUN cd percona-xtrabackup-${PERCONA_XTRA_VERSION} && \
 ###############################################
 FROM builder-percona AS builder-percona-server
 
-RUN wget https://downloads.percona.com/downloads/Percona-Server-LATEST/Percona-Server-${PERCONA_SERVER_VERSION}/source/tarball/percona-server-${PERCONA_SERVER_VERSION}.tar.gz && \
+RUN wget https://downloads.percona.com/downloads/percona-distribution-mysql-ps/percona-distribution-mysql-ps-${MYSQL_VERSION}/source/tarball/percona-server-${PERCONA_SERVER_VERSION}.tar.gz && \
     tar -zxvf percona-server-${PERCONA_SERVER_VERSION}.tar.gz
 # Build percona-xtrabackup
 RUN cd percona-server-${PERCONA_SERVER_VERSION} && \
