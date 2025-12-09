@@ -14,6 +14,7 @@ from .util import (
     GtidExecuted,
     GtidRangeDict,
     make_gtid_range_string,
+    mask_fields,
     mysql_cursor,
     parse_dow_schedule,
     parse_fs_metadata,
@@ -1970,7 +1971,10 @@ class Controller(threading.Thread):
 
         assert self.restore_coordinator is not None
         if earlier_backup:
-            self.log.info("Earlier backup %r is available, restoring basebackup from that", earlier_backup)
+            self.log.info(
+                "Earlier backup %r is available, restoring basebackup from that",
+                mask_fields(earlier_backup, ["basebackup_info", "encryption_key"]),
+            )
             options = self.state["restore_options"]
             self.restore_coordinator.stop()
             self.state_manager.update_state(
