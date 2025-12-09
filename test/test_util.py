@@ -438,3 +438,50 @@ def test_parse_dow_schedule(dow_schedule: str, result: set[int] | type) -> None:
             myhoard_util.parse_dow_schedule(dow_schedule)
     else:
         assert myhoard_util.parse_dow_schedule(dow_schedule) == result
+
+
+@pytest.mark.parametrize(
+    "input,path,output",
+    [
+        (
+            {"basebackup_info": {
+                "binlog_index": 3894,
+                "encryption_key": "<PLAIN TEXT>",
+            }},
+            ["basebackup_info", "encryption_key"],
+            {"basebackup_info": {
+                "binlog_index": 3894,
+                "encryption_key": "***MASKED***",
+            }},
+        ),
+        (
+            {"basebackup_info": {"level2":{
+                "binlog_index": 3894,
+                "encryption_key": "<PLAIN TEXT>",
+            }}},
+            ["basebackup_info", "level2", "encryption_key"],
+            {"basebackup_info": {"level2":{
+                "binlog_index": 3894,
+                "encryption_key": "***MASKED***",
+            }}},
+        ),
+        (
+                {"basebackup_info": {"level2":{
+                    "binlog_index": 3894,
+                    "encryption_key": "<PLAIN TEXT>",
+                }}},
+                ["basebackup_info", "encryption_key"],
+                {"basebackup_info": {"level2":{
+                    "binlog_index": 3894,
+                    "encryption_key": "<PLAIN TEXT>",
+                }}},
+        ),
+        (
+                {"encryption_key": "<PLAIN TEXT>"},
+                ["encryption_key"],
+                {"encryption_key": "***MASKED***"},
+        ),
+    ],
+)
+def test_mask_fields(input: dict, path:list [str], output: dict) -> None:
+    assert myhoard_util.mask_fields(input, path) == output
