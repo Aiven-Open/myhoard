@@ -31,7 +31,7 @@ dependencies = [
     "httplib2",
     "PyMySQL >= 0.9.2",
     "PySocks",
-    "rohmu >= 2.8.0",
+    "rohmu >= 2.8.2",
     "sentry-sdk >= 1.14.0",
     "packaging",
 ]
