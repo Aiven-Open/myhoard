@@ -426,6 +426,19 @@ class RestoreCoordinator(threading.Thread):
         if not basebackup_info:
             return
 
+        # Check if backup is marked as broken before attempting restoration
+        # This allows us to skip retry attempts and proceed directly to fallback logic
+        broken_info = self._load_file_data("broken.json", missing_ok=True)
+        if broken_info:
+            self.log.warning(
+                "Backup %r is marked as broken (broken_at: %r), skipping basebackup restoration and proceeding to fallback",
+                self.stream_id,
+                broken_info.get("broken_at"),
+            )
+            self.update_state(phase=self.Phase.failed_basebackup)
+            self.stats.increase("myhoard.basebackup_skipped_broken")
+            return
+
         required_backups = []
         if basebackup_info.get("incremental"):
             # We need to load all backups infos until the latest full one
