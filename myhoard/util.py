@@ -740,3 +740,20 @@ def find_extra_xtrabackup_executables() -> list[BinInfo]:
                 pxb_version = get_xtrabackup_version(extra_path)
                 result.append(BinInfo(version=pxb_version, path=extra_path))
     return result
+
+
+def mask_fields(data: dict, path: list[str], mask_value: str = "***MASKED***") -> dict:
+    masked_data = data.copy()
+    if len(path) < 1:
+        return masked_data
+    current_data = masked_data
+    for key in path[:-1]:
+        if key in current_data and isinstance(current_data[key], dict):
+            current_data[key] = current_data[key].copy()
+            current_data = current_data[key]
+        else:
+            return masked_data
+    key = path[-1]
+    if key in current_data:
+        current_data[key] = mask_value
+    return masked_data
