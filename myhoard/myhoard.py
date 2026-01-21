@@ -21,9 +21,10 @@ import subprocess
 import sys
 
 try:
-    from systemd import daemon  # pylint: disable=no-name-in-module
+    from systemd import daemon, journal  # pylint: disable=no-name-in-module
 except ImportError:
     daemon = None
+    journal = None
 
 
 class MyHoard:
@@ -265,7 +266,22 @@ def main(args=None):
         print("config file path must be given with --config or via env MYHOARD_CONFIG", file=sys.stderr)
         return 1
 
-    logging.basicConfig(level=arg.log_level, format="%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s")
+    log_format = "%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s"
+    handlers = []
+    if journal and not sys.stderr.isatty():
+        handler = journal.JournalHandler(SYSLOG_IDENTIFIER="myhoard")
+        # Log format without timestamp as journald adds it
+        log_format = "%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s"
+        handler.setFormatter(logging.Formatter(log_format))
+        handlers.append(handler)
+
+    kwargs = {"level": arg.log_level}
+    if handlers:
+        kwargs["handlers"] = handlers
+    else:
+        kwargs["format"] = log_format
+
+    logging.basicConfig(**kwargs)
 
     hoard = MyHoard(arg.config)
     return hoard.run()
