@@ -72,7 +72,7 @@ class Backup(TypedDict):
 class BackupRequest(TypedDict):
     backup_reason: BackupStream.BackupReason
     normalized_backup_time: str
-    incremental_backup_info: IncrementalBackupInfo | None
+    incremental_requested: bool
 
 
 class BackupSiteInfo(TypedDict):
@@ -267,13 +267,13 @@ class Controller(threading.Thread):
         *,
         backup_reason: BackupStream.BackupReason,
         normalized_backup_time: str | None = None,
-        incremental_backup_info: IncrementalBackupInfo | None = None,
+        incremental_requested: bool = False,
     ) -> None:
         backup_time: str = normalized_backup_time or self._current_normalized_backup_timestamp()
         new_request: BackupRequest = {
             "backup_reason": backup_reason,
             "normalized_backup_time": backup_time,
-            "incremental_backup_info": incremental_backup_info,
+            "incremental_requested": incremental_requested,
         }
         with self.lock:
             if self.state["backup_request"]:
@@ -870,10 +870,13 @@ class Controller(threading.Thread):
         with self.lock:
             if self.state["backup_request"]:
                 request: BackupRequest = self.state["backup_request"]
+                incremental_backup_info = None
+                if request["incremental_requested"]:  # pylint: disable=unsubscriptable-object
+                    incremental_backup_info = self.get_incremental_backup_info()
                 self._start_new_backup(
                     backup_reason=request["backup_reason"],  # pylint: disable=unsubscriptable-object
                     normalized_backup_time=request["normalized_backup_time"],  # pylint: disable=unsubscriptable-object
-                    incremental_backup_info=request["incremental_backup_info"],  # pylint: disable=unsubscriptable-object
+                    incremental_backup_info=incremental_backup_info,
                 )
 
     def _create_restore_coordinator_if_missing(self):
@@ -1363,24 +1366,20 @@ class Controller(threading.Thread):
             )
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
-            incremental_backup_info = None
-            if self._should_schedule_incremental_backup():
-                incremental_backup_info = self.get_incremental_backup_info()
-                if not incremental_backup_info:
-                    self.log.warning(
-                        "Incremental backup is configured but not possible to take, proceeding with full backup"
-                    )
+            incremental_requested = self._should_schedule_incremental_backup()
+            if incremental_requested:
+                self.log.info("Incremental backup is scheduled, it might fallback later to full if not possible to execute")
 
             self.log.info(
-                "New normalized time %r differs from previous %r, adding new backup request (incremental_backup_info: %r)",
+                "New normalized time %r differs from previous %r, adding new backup request (incremental_requested: %r)",
                 normalized_backup_time,
                 last_normalized_backup_time,
-                incremental_backup_info,
+                incremental_requested,
             )
             self.mark_backup_requested(
                 backup_reason=BackupStream.BackupReason.scheduled,
                 normalized_backup_time=normalized_backup_time,
-                incremental_backup_info=incremental_backup_info,
+                incremental_requested=incremental_requested,
             )
 
     def _prepare_streams_for_promotion(self):
