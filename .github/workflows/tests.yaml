@@ -26,6 +26,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsystemd-dev
       - id: prepare-python
         uses: actions/setup-python@v5
         with:
@@ -72,7 +74,7 @@ jobs:
         uses: awalsh128/cache-apt-pkgs-action@v1.1.2
         with:
           version: 1.0
-          packages: sudo lsb-release wget tzdata libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc
+          packages: sudo lsb-release wget tzdata libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc libsystemd-dev
       - id: prepare-python
         uses: actions/setup-python@v5
         with:
