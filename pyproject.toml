@@ -54,6 +54,7 @@ dev = [
     "pytest-timeout",
     "pytest-xdist",
     "responses",
+    "systemd-python",
     "time-machine",
     "types-PyMySQL",
     "types-requests",
