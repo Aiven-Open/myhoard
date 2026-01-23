@@ -3,7 +3,7 @@ from aiohttp import web
 from aiohttp.web_response import json_response
 from datetime import datetime, timezone
 from myhoard.backup_stream import BackupStream
-from myhoard.controller import Controller, IncrementalBackupInfo
+from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 
 import asyncio
@@ -48,13 +48,8 @@ class WebServer:
                 if backup_type == self.BackupType.basebackup:
                     if wait_for_upload:
                         raise BadRequest("wait_for_upload currently not supported for basebackup")
-                    incremental_backup_info: IncrementalBackupInfo | None = None
-                    if incremental:
-                        incremental_backup_info = self.controller.get_incremental_backup_info()
-                        if not incremental_backup_info:
-                            self.log.warning("Can't schedule incremental backup, proceeding with full backup")
                     self.controller.mark_backup_requested(
-                        backup_reason=BackupStream.BackupReason.requested, incremental_backup_info=incremental_backup_info
+                        backup_reason=BackupStream.BackupReason.requested, incremental_requested=incremental
                     )
                 elif backup_type == self.BackupType.binlog:
                     log_index = self.controller.rotate_and_back_up_binlog()
