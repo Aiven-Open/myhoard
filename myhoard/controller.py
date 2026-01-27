@@ -862,11 +862,12 @@ class Controller(threading.Thread):
             self.state_manager.update_state(promote_details=promote_details)
 
     def _create_new_backup_stream_if_requested_and_max_streams_not_exceeded(self):
-        # Only ever have two open backup streams. Uploading binlogs to more streams than that is
-        # unlikely to improve the system behavior. We'll create new backup stream once the latter
-        # one catches up with the first, the first is marked as closed, and removed from our list.
-        if len(self.backup_streams) >= 2:
-            return
+        # Only ever have one "active" backup stream.
+        # Having multiple backup streams adds complexity, increases node resource usage, and
+        # more easily triggers various latent bugs.
+        for existing_backup_stream in self.backup_streams:
+            if not existing_backup_stream.is_in_terminal_state():
+                return
         with self.lock:
             if self.state["backup_request"]:
                 request: BackupRequest = self.state["backup_request"]
