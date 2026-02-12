@@ -1302,7 +1302,10 @@ class BackupStream(threading.Thread):
             else:
                 log_action = "uploaded local"
                 existing_remote_key = self.state["local_index_to_remote_key"].get(self.current_upload_index)
-                if existing_remote_key:
+                # Only remote copy when source and destination are on the same site (same key prefix).
+                # If site changes, copy can fail due to cross cloud configuration for example; upload from local instead.
+                # The format of the key is "{site}/{stream_id}/{name}"
+                if existing_remote_key and existing_remote_key.split("/")[0] == remote_binlog["remote_key"].split("/")[0]:
                     log_action = "remote copied"
                     self.file_storage.copy_file(
                         source_key=existing_remote_key, destination_key=remote_binlog["remote_key"], metadata=metadata
