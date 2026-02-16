@@ -6,7 +6,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.controller import BackupSiteInfo, Controller
 from myhoard.statsd import StatsClient
 from packaging.version import Version
-from typing import List, Optional, Type, TypeVar
+from typing import Dict, List, Optional, Type, TypeVar
 
 import asyncio
 import contextlib
@@ -71,6 +71,8 @@ def build_controller(
     session_tmpdir,
     state_dir: Optional[str] = None,
     temp_dir: Optional[str] = None,
+    upload_site: Optional[str] = None,
+    extra_backup_sites: Optional[Dict[str, BackupSiteInfo]] = None,
 ) -> T:
     Controller.ITERATION_SLEEP = 0.1
     Controller.BACKUP_REFRESH_INTERVAL_BASE = 0.1
@@ -83,17 +85,25 @@ def build_controller(
     temp_dir = temp_dir or os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
     os.makedirs(temp_dir, exist_ok=True)
 
+    backup_sites = {"default": default_backup_site}
+    if extra_backup_sites:
+        backup_sites.update(extra_backup_sites)
+
+    backup_settings: Dict = {
+        "backup_age_days_max": 14,
+        "backup_count_max": 100,
+        "backup_count_min": 14,
+        "backup_hour": 3,
+        "backup_interval_minutes": 1440,
+        "backup_minute": 0,
+        "forced_binlog_rotation_interval": 300,
+    }
+    if upload_site:
+        backup_settings["upload_site"] = upload_site
+
     controller = cls(
-        backup_settings={
-            "backup_age_days_max": 14,
-            "backup_count_max": 100,
-            "backup_count_min": 14,
-            "backup_hour": 3,
-            "backup_interval_minutes": 1440,
-            "backup_minute": 0,
-            "forced_binlog_rotation_interval": 300,
-        },
-        backup_sites={"default": default_backup_site},
+        backup_settings=backup_settings,
+        backup_sites=backup_sites,
         binlog_purge_settings={
             "enabled": True,
             "min_binlog_age_before_purge": 30,
