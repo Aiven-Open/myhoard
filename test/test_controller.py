@@ -8,7 +8,7 @@ from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
 from myhoard.controller import Backup, BaseBackup, Controller, sort_completed_backups
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
-    change_master_to,
+    change_replication_source_to,
     get_xtrabackup_version,
     GtidExecuted,
     make_fs_metadata,
@@ -297,7 +297,7 @@ def test_promoted_node_does_not_resume_streams_for_backups_initiated_by_old_mast
         # Simulate a case where the old/leaving master creates a new
         # backup after the promotion process of the standby was triggered.
         with mysql_cursor(**standby1.connect_options) as cursor:
-            cursor.execute("STOP SLAVE IO_THREAD")
+            cursor.execute("STOP REPLICA IO_THREAD")
         s1_controller.switch_to_active_mode()
 
         m_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
@@ -496,19 +496,19 @@ def test_3_node_service_failover_and_restore(
         # Note that we're not stopping master or data generation to master here to ensure rogue master case works.
         with mysql_cursor(**standby1.connect_options) as cursor1:
             with mysql_cursor(**standby2.connect_options) as cursor2:
-                cursor1.execute("STOP SLAVE IO_THREAD")
-                cursor2.execute("STOP SLAVE IO_THREAD")
+                cursor1.execute("STOP REPLICA IO_THREAD")
+                cursor2.execute("STOP REPLICA IO_THREAD")
 
                 # Wait for SQL threads to apply any relay logs that got downloaded from master
                 def relay_log_applied():
                     for cursor in [cursor1, cursor2]:
-                        cursor.execute("SHOW SLAVE STATUS")
-                        status = cursor.fetchone()["Slave_SQL_Running_State"]
+                        cursor.execute("SHOW REPLICA STATUS")
+                        status = cursor.fetchone()["Replica_SQL_Running_State"]
                         assert re.match("(Slave|Replica) has read all relay log; waiting for more updates", status)
 
                 while_asserts(relay_log_applied, timeout=30)
-                cursor1.execute("STOP SLAVE SQL_THREAD")
-                cursor2.execute("STOP SLAVE SQL_THREAD")
+                cursor1.execute("STOP REPLICA SQL_THREAD")
+                cursor2.execute("STOP REPLICA SQL_THREAD")
 
                 # Pick whichever standby got furthest in replication as new master
                 cursor1.execute("SELECT @@GLOBAL.gtid_executed AS executed")
@@ -547,17 +547,17 @@ def test_3_node_service_failover_and_restore(
                 s3controller[0].restore_backup(site=backup["site"], stream_id=backup["stream_id"])
 
                 master_options = {
-                    "MASTER_AUTO_POSITION": 1,
-                    "MASTER_CONNECT_RETRY": 0.1,
-                    "MASTER_HOST": "127.0.0.1",
-                    "MASTER_PASSWORD": new_master.password,
-                    "MASTER_PORT": new_master.port,
-                    "MASTER_SSL": 0,
-                    "MASTER_USER": master.user,
+                    "SOURCE_AUTO_POSITION": 1,
+                    "SOURCE_CONNECT_RETRY": 0.1,
+                    "SOURCE_HOST": "127.0.0.1",
+                    "SOURCE_PASSWORD": new_master.password,
+                    "SOURCE_PORT": new_master.port,
+                    "SOURCE_SSL": 0,
+                    "SOURCE_USER": master.user,
                 }
                 new_mcontroller.switch_to_active_mode()
-                change_master_to(cursor=standby_cursor, options=master_options)
-                standby_cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
+                change_replication_source_to(cursor=standby_cursor, options=master_options)
+                standby_cursor.execute("START REPLICA IO_THREAD, SQL_THREAD")
 
                 # Wait for backup promotion steps to complete
                 wait_for_condition(lambda: new_mcontroller.mode == Controller.Mode.active, timeout=30)
@@ -603,8 +603,8 @@ def test_3_node_service_failover_and_restore(
                 wait_for_condition(restore_complete, timeout=120)
 
                 with mysql_cursor(**mysql_empty.connect_options) as standby3_cursor:
-                    change_master_to(cursor=standby3_cursor, options=master_options)
-                    standby3_cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
+                    change_replication_source_to(cursor=standby3_cursor, options=master_options)
+                    standby3_cursor.execute("START REPLICA IO_THREAD, SQL_THREAD")
                     s3controller[0].switch_to_observe_mode()
 
                     time.sleep(phase_duration)

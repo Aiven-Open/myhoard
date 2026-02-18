@@ -11,11 +11,11 @@ from .util import (
     add_gtid_ranges_to_executed_set,
     BinVersion,
     build_gtid_ranges,
-    change_master_to,
+    change_replication_source_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
     file_name_for_basebackup_split,
-    get_slave_status,
+    get_replica_status,
     get_xtrabackup_version,
     GtidExecuted,
     GtidRangeDict,
@@ -26,9 +26,9 @@ from .util import (
     parse_version,
     read_gtids_from_log,
     relay_log_name,
+    ReplicaStatus,
     restart_unexpected_dead_sql_thread,
     rsa_decrypt_bytes,
-    SlaveStatus,
     sort_and_filter_binlogs,
     track_rate,
 )
@@ -51,10 +51,10 @@ import tempfile
 import threading
 import time
 
-# "Could not initialize master info structure; more error messages can be found in the MySQL error log"
+# "Could not initialize source info structure; more error messages can be found in the MySQL error log"
 # Happens when using multithreaded SQL apply and provided relay logs do not contain sufficient data to
 # initialize the threads.
-ER_MASTER_INFO = 1201
+ER_SOURCE_INFO = 1201
 
 
 class PendingBinlogInfo(TypedDict):
@@ -722,7 +722,7 @@ class RestoreCoordinator(threading.Thread):
                 all_gtids_applied = True
 
         if initial_round and not mysql_started:
-            self._purge_old_slave_data()
+            self._purge_old_replica_data()
 
         self._ensure_mysql_server_is_started(**mysql_params)
 
@@ -734,37 +734,37 @@ class RestoreCoordinator(threading.Thread):
                 # Start from where basebackup ended for first binlog and for later iterations after file magic bytes
                 initial_position = self.state["binlog_position"] or self.state["basebackup_info"]["binlog_position"] or 4
                 relay_log_pos = initial_position if initial_round else 4
-                self.log.info("Changing master position to %s in file %s", relay_log_pos, names[0])
+                self.log.info("Changing replication source position to %s in file %s", relay_log_pos, names[0])
                 try:
-                    change_master_to(
+                    change_replication_source_to(
                         cursor=cursor,
                         options={
-                            "MASTER_AUTO_POSITION": 0,
-                            "MASTER_HOST": "dummy",
+                            "SOURCE_AUTO_POSITION": 0,
+                            "SOURCE_HOST": "dummy",
                             "RELAY_LOG_FILE": names[0],
                             "RELAY_LOG_POS": relay_log_pos,
                             "PRIVILEGE_CHECKS_USER": None,
                         },
                     )
                 except (pymysql.err.InternalError, pymysql.err.OperationalError) as ex:
-                    if ex.args[0] != ER_MASTER_INFO:
+                    if ex.args[0] != ER_SOURCE_INFO:
                         raise ex
                     # In some situations the MySQL SQL threads go into a bad state and always fail when doing
-                    # CHANGE MASTER TO. It's not clear what's the exact case when that happens but seems to be
+                    # CHANGE REPLICATION SOURCE TO. It's not clear what's the exact case when that happens but seems to be
                     # related to applying relay log that contains some transactions that have already been
-                    # previously applied. Making more relay logs available does not help. Only RESET SLAVE
+                    # previously applied. Making more relay logs available does not help. Only RESET REPLICA
                     # seems to fix it.
-                    # Unfortunately RESET SLAVE is not always safe. Namely if there are any temporary tables those
+                    # Unfortunately RESET REPLICA is not always safe. Namely if there are any temporary tables those
                     # get dropped and restoration will not be successful so we cannot use this approach when any
                     # temp tables exist. In such cases there's no easy solution. Starting from scratch with in
                     # single threaded mode would work.
                     self.log.warning("Failed to initialize new restore position: %r", ex)
-                    self.stats.increase("myhoard.restore.change_master_to_failed")
+                    self.stats.increase("myhoard.restore.change_replication_source_to_failed")
                     cursor.execute("SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.INNODB_TEMP_TABLE_INFO")
                     temp_tables = cursor.fetchone()["count"]
                     if temp_tables:
                         # TODO: Should automatically redo the entire restoration from scratch with single thread
-                        self.log.error("%s temporary tables exist, cannot safely perform RESET SLAVE", temp_tables)
+                        self.log.error("%s temporary tables exist, cannot safely perform RESET REPLICA", temp_tables)
                         self.stats.increase("myhoard.restore.cannot_reset")
                         raise ex
                     # Next attempt might work better if we have more binary logs available so try fetching some
@@ -772,17 +772,17 @@ class RestoreCoordinator(threading.Thread):
                     # Reset the binlogs picked for apply value so that new binlogs are added to the list as soon
                     # as those have been downloaded
                     self.update_state(binlogs_picked_for_apply=0)
-                    # Undo rename for files in current batch (RESET SLAVE would delete all the files)
+                    # Undo rename for files in current batch (RESET REPLICA would delete all the files)
                     self._rename_prefetched_binlogs_back(binlogs)
-                    cursor.execute("RESET SLAVE")
+                    cursor.execute("RESET REPLICA")
                     # Store new index adjustment; first binlog in current list should be number one.
-                    # Also FLUSH RELAY LOGS has no effect right after RESET SLAVE so instruct later code
+                    # Also FLUSH RELAY LOGS has no effect right after RESET REPLICA so instruct later code
                     # to manually regenerate new relay index file.
                     self.update_state(
                         binlog_name_offset=1 - binlogs[0]["adjusted_remote_index"], write_relay_log_manually=True
                     )
                     return
-                sql = "START SLAVE SQL_THREAD"
+                sql = "START REPLICA SQL_THREAD"
                 if until_after_gtids:
                     sql += f" UNTIL SQL_AFTER_GTIDS = '{until_after_gtids}'"
                 cursor.execute(sql)
@@ -792,12 +792,12 @@ class RestoreCoordinator(threading.Thread):
             del prefetched_binlogs[binlog["remote_key"]]
         pending_binlogs = self.pending_binlogs[len(binlogs) :]
         # Mark target_time_reached as True if we started applying the last binlog whose info we had previously
-        # fetched to avoid more binlogs being retrieved in case we're syncing against active master
+        # fetched to avoid more binlogs being retrieved in case we're syncing against active source
         target_time_reached = self.state["target_time_reached"]
         if not pending_binlogs:
             # TODO: Some time based threshold might be better. Like if more than 10 minutes elapsed while processing
             # the last batch then try fetching still more entries, otherwise consider sync to be complete.
-            # If the last batch takes a long time to apply it could be the master that will be connected to has
+            # If the last batch takes a long time to apply it could be the source that will be connected to has
             # already purged the binary logs that are needed by this server.
             target_time_reached = True
 
@@ -854,7 +854,7 @@ class RestoreCoordinator(threading.Thread):
 
         self._fetch_more_binlog_infos()
 
-        apply_finished, current_index = self._check_sql_slave_status()
+        apply_finished, current_index = self._check_sql_replica_status()
         applying_binlogs = self.state["applying_binlogs"]
         applied_binlog_count = 0
         gtid_executed = self.state["gtid_executed"] or self.state["basebackup_info"]["gtid_executed"]
@@ -896,14 +896,14 @@ class RestoreCoordinator(threading.Thread):
     def finalize_restoration(self) -> None:
         # If there were no binary logs to restore MySQL server has not been started yet and trying
         # to connect to it would fail. If it hasn't been started (no mysql_params specified) it also
-        # doesn't have slave configured or running so we can just skip the calls below.
+        # doesn't have replica configured or running so we can just skip the calls below.
         if self.state["mysql_params"]:
             with self._mysql_cursor() as cursor:
-                cursor.execute("STOP SLAVE")
-                # Do RESET SLAVE to ensure next CHANGE MASTER TO will work normally and also to get rid
+                cursor.execute("STOP REPLICA")
+                # Do RESET REPLICA to ensure next CHANGE REPLICATION SOURCE TO will work normally and also to get rid
                 # of any possible leftover relay logs (if we did PITR there could be relay log with some
                 # transactions that haven't been applied)
-                cursor.execute("RESET SLAVE")
+                cursor.execute("RESET REPLICA")
         self._ensure_mysql_server_is_started(with_binlog=True, with_gtids=True)
         self.update_state(phase=self.Phase.completed)
         self.log.info("Backup restoration completed")
@@ -1177,7 +1177,7 @@ class RestoreCoordinator(threading.Thread):
             with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
                 for info in file_storage.list_iter(self._build_binlog_full_name("promotions")):
                     # There could theoretically be multiple promotions with the same
-                    # index value if new master got promoted but then failed before
+                    # index value if new primary got promoted but then failed before
                     # managing to upload any binlogs. To cope with that only keep one
                     # promotion info per server id (the one with most recent timestamp)
                     info = parse_fs_metadata(info["metadata"])
@@ -1408,8 +1408,8 @@ class RestoreCoordinator(threading.Thread):
 
     def _generate_updated_relay_log_index(self, binlogs: List[PendingBinlogInfo], names: List[str], cursor) -> None:
         # Should already be stopped but just to make sure
-        cursor.execute("STOP SLAVE")
-        replica_status = get_slave_status(cursor)
+        cursor.execute("STOP REPLICA")
+        replica_status = get_replica_status(cursor)
         # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
         initial_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
 
@@ -1432,8 +1432,8 @@ class RestoreCoordinator(threading.Thread):
                     # File must end with linefeed or else last line will not be processed correctly
                     index_file.write(("\n".join(names) + "\n").encode("utf-8"))
             self.update_state(last_flushed_index=last_flushed_index, write_relay_log_manually=False)
-            cursor.execute("SHOW SLAVE STATUS")
-            replica_status = get_slave_status(cursor)
+            cursor.execute("SHOW REPLICA STATUS")
+            replica_status = get_replica_status(cursor)
             # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
             final_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
             self.log.info(
@@ -1459,10 +1459,10 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index
         self.update_state(last_renamed_index=last_renamed_index)
 
-    def _purge_old_slave_data(self) -> None:
-        # Remove potentially conflicting slave data from backup (unfortunately it's not possible to exclude these tables
+    def _purge_old_replica_data(self) -> None:
+        # Remove potentially conflicting replica data from backup (unfortunately it's not possible to exclude these tables
         # from the backup using xtrabackup at the moment). In some cases, e.g. when rotate event appears in the relay
-        # log (coming from master binlog) and mysql has some information about non-existing replication in these tables,
+        # log (coming from primary binlog) and mysql has some information about non-existing replication in these tables,
         # it tries to read previous relays logs in order to find last rotate event, but those relay logs do not exist
         # anymore.
         self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
@@ -1486,10 +1486,10 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index - 1
         self.update_state(last_flushed_index=last_renamed_index, last_renamed_index=last_renamed_index)
 
-    def _start_sql_thread_if_not_running(self, slave_status: SlaveStatus) -> None:
+    def _start_sql_thread_if_not_running(self, replica_status: ReplicaStatus) -> None:
         # Sometimes mysqld can be OOM-killed during the backup restoration.
         # In that case we should check if SQL thread is running and try restarting it if it is not.
-        if slave_status["Slave_SQL_Running"] == "Yes":
+        if replica_status["Replica_SQL_Running"] == "Yes":
             return
 
         # Try to start SQL thread with an incremental delay
@@ -1504,20 +1504,20 @@ class RestoreCoordinator(threading.Thread):
         self.sql_thread_restart_time = time.monotonic()
         self.sql_thread_restart_count += 1
         with self._mysql_cursor() as cursor:
-            restart_unexpected_dead_sql_thread(cursor, slave_status, self.stats, self.log)
+            restart_unexpected_dead_sql_thread(cursor, replica_status, self.stats, self.log)
 
-    def _check_sql_slave_status(self) -> tuple[bool, int]:
+    def _check_sql_replica_status(self) -> tuple[bool, int]:
         expected_range = self.state["current_executed_gtid_target"]
         expected_index = self.state["current_relay_log_target"]
 
         with self._mysql_cursor() as cursor:
-            slave_status = get_slave_status(cursor)
-            if not slave_status:
+            replica_status = get_replica_status(cursor)
+            if not replica_status:
                 raise Exception(
-                    "No status available from SHOW SLAVE STATUS, perhaps MySQL was restarted while applying binlog."
+                    "No status available from SHOW REPLICA STATUS, perhaps MySQL was restarted while applying binlog."
                 )
-            current_file = slave_status["Relay_Log_File"]
-            sql_running_state = slave_status["Slave_SQL_Running_State"]
+            current_file = replica_status["Relay_Log_File"]
+            sql_running_state = replica_status["Replica_SQL_Running_State"]
             current_index = int(current_file.rsplit(".", 1)[-1])
             if expected_index is not None and current_index < expected_index:
                 self.log.debug("Expected relay log name not reached (%r < %r)", current_index, expected_index)
@@ -1548,7 +1548,7 @@ class RestoreCoordinator(threading.Thread):
                         )
                         return True, expected_index
                 else:
-                    self._start_sql_thread_if_not_running(slave_status)
+                    self._start_sql_thread_if_not_running(replica_status)
                     return False, current_index
 
             # The batch we're applying might not have contained any GTIDs
@@ -1579,21 +1579,21 @@ class RestoreCoordinator(threading.Thread):
                     if expected_index is not None and current_index < expected_index:
                         current_index = expected_index
                 else:
-                    self._start_sql_thread_if_not_running(slave_status)
+                    self._start_sql_thread_if_not_running(replica_status)
 
             if found:
-                cursor.execute("STOP SLAVE")
-                # Current file could've been updated since we checked it the first time before slave was stopped.
+                cursor.execute("STOP REPLICA")
+                # Current file could've been updated since we checked it the first time before replica was stopped.
                 # Get the latest value here so that we're sure to start from correct index
-                replica_status = get_slave_status(cursor)
+                replica_status = get_replica_status(cursor)
                 if not replica_status:
                     raise Exception(
-                        "No status available from SHOW SLAVE STATUS, perhaps MySQL was restarted while applying binlog."
+                        "No status available from SHOW REPLICA STATUS, perhaps MySQL was restarted while applying binlog."
                     )
                 current_file = replica_status["Relay_Log_File"]
                 last_index = int(current_file.rsplit(".", 1)[-1])
                 if last_index > current_index:
-                    self.log.info("Relay index incremented from %s to %s after STOP SLAVE", current_index, last_index)
+                    self.log.info("Relay index incremented from %s to %s after STOP REPLICA", current_index, last_index)
                     current_index = last_index
             return found, current_index
 

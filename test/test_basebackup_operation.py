@@ -24,17 +24,23 @@ def test_basic_backup(mysql_master, extra_uuid):
         cursor.execute("COMMIT")
         # Insert second source_uuid into gtid_executed to test that this is parsed correctly
         if extra_uuid:
-            cursor.execute(
-                "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
-                f"VALUES ('{extra_uuid}', 1, 1)"
-            )
+            if mysql_master.version >= Version("8.1.0"):
+                cursor.execute(
+                    "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end, gtid_tag) "
+                    f"VALUES ('{extra_uuid}', 1, 1, 'myhoard')"
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
+                    f"VALUES ('{extra_uuid}', 1, 1)"
+                )
             cursor.execute("COMMIT")
 
     if extra_uuid:
         restart_mysql(mysql_master)
 
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         master_status = cursor.fetchone()
 
     # Executed_Gtid_Set has linefeeds in it but XtraBackup (8.0) strips those away, do the same here
@@ -85,7 +91,7 @@ def test_basic_backup(mysql_master, extra_uuid):
 
     # Taking basebackup might flush binary logs
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         master_status = cursor.fetchone()
 
     assert op.binlog_info

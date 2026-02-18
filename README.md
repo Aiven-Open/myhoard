@@ -869,7 +869,7 @@ The following metrics are exported by myhoard:
 **myhoard.restore.basebackup_bytes_downloaded**
 **myhoard.restore.binlogs_restored**
 **myhoard.restore.cannot_reset**
-**myhoard.restore.change_master_to_failed**
+**myhoard.restore.change_replication_source_to_failed**
 **myhoard.restore.pending_binlogs**
 **myhoard.restore.unexpected_extra_relay_log**
 **myhoard.restore_errors**

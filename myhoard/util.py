@@ -126,14 +126,14 @@ def atomic_create_file(
         raise
 
 
-def change_master_to(*, cursor, options):
-    """Constructs and executes CHANGE MASTER TO command based on given options"""
+def change_replication_source_to(*, cursor, options):
+    """Constructs and executes CHANGE REPLICATION SOURCE TO command based on given options"""
 
     def null_if_value_is_none(v):
         return f"{v!r}" if v is not None else "NULL"
 
     option_items = ", ".join(f"{k}={null_if_value_is_none(v)}" for k, v in options.items())
-    sql = f"CHANGE MASTER TO {option_items}"
+    sql = f"CHANGE REPLICATION SOURCE TO {option_items}"
     cursor.execute(sql)
 
 
@@ -658,37 +658,37 @@ class RateTracker(threading.Thread):
                 self._reset()
 
 
-class SlaveStatus(TypedDict):
+class ReplicaStatus(TypedDict):
     Relay_Log_File: str
-    Relay_Master_Log_File: str
-    Exec_Master_Log_Pos: int
+    Relay_Source_Log_File: str
+    Exec_Source_Log_Pos: int
     Retrieved_Gtid_Set: str
-    Slave_IO_Running: Literal["Yes", "No"]
-    Slave_SQL_Running: Literal["Yes", "No"]
-    Slave_SQL_Running_State: str
+    Replica_IO_Running: Literal["Yes", "No"]
+    Replica_SQL_Running: Literal["Yes", "No"]
+    Replica_SQL_Running_State: str
 
 
-def get_slave_status(cursor) -> Optional[SlaveStatus]:
-    """Retrieve the slave status
+def get_replica_status(cursor) -> Optional[ReplicaStatus]:
+    """Retrieve the replica status
 
     replica_status can be none if RESET REPLICA has been performed or if the replica never was running.
     """
-    cursor.execute("SHOW SLAVE STATUS")
+    cursor.execute("SHOW REPLICA STATUS")
     return cursor.fetchone()
 
 
-def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
-    if slave_status["Last_SQL_Error"]:
+def restart_unexpected_dead_sql_thread(cursor, replica_status, stats, log):
+    if replica_status["Last_SQL_Error"]:
         log.warning(
-            "SQL Thread died, running 'START SLAVE SQL_THREAD'. Last reported error at %s: %d: %s",
-            slave_status["Last_SQL_Error_Timestamp"],
-            slave_status["Last_SQL_Errno"],
-            slave_status["Last_SQL_Error"],
+            "SQL Thread died, running 'START REPLICA SQL_THREAD'. Last reported error at %s: %d: %s",
+            replica_status["Last_SQL_Error_Timestamp"],
+            replica_status["Last_SQL_Errno"],
+            replica_status["Last_SQL_Error"],
         )
     else:
-        log.warning("Expected SQL thread to be running but it isn't. Running 'START SLAVE SQL_THREAD'")
-    stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": slave_status["Last_SQL_Errno"]})
-    cursor.execute("START SLAVE SQL_THREAD")
+        log.warning("Expected SQL thread to be running but it isn't. Running 'START REPLICA SQL_THREAD'")
+    stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": replica_status["Last_SQL_Errno"]})
+    cursor.execute("START REPLICA SQL_THREAD")
 
 
 def parse_version(version: str) -> BinVersion:

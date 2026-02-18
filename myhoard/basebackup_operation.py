@@ -37,7 +37,7 @@ class BasebackupOperation:
     callback is executed on another thread so that the main thread can manage backup
     state information while the data is being persisted."""
 
-    current_file_re = re.compile(r" Compressing, encrypting and streaming (.*?)( to <STDOUT>)?( up to position \d+)?$")
+    current_file_re = re.compile(r" Compressing, encrypting and streaming\s?(.*?)( to <STDOUT>)?( up to position \d+)?$")
     binlog_info_re = re.compile(
         r"filename '(?P<fn>.+)', position '(?P<pos>\d+)'(, GTID of the last change '(?P<gtid>.+)')?$"
     )
