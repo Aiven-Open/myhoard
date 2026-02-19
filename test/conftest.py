@@ -9,8 +9,15 @@ from . import (
     random_basic_string,
 )
 from myhoard.controller import BackupSiteInfo, Controller
-from myhoard.util import atomic_create_file, change_master_to, DEFAULT_XTRABACKUP_SETTINGS, mysql_cursor, wait_for_port
+from myhoard.util import (
+    atomic_create_file,
+    change_replication_source_to,
+    DEFAULT_XTRABACKUP_SETTINGS,
+    mysql_cursor,
+    wait_for_port,
+)
 from myhoard.web_server import WebServer
+from packaging.version import Version
 from py.path import local as LocalPath
 from typing import Callable, Iterator, Optional
 
@@ -18,6 +25,7 @@ import contextlib
 import logging
 import os
 import pytest
+import re
 import shutil
 import signal
 import subprocess
@@ -38,6 +46,14 @@ handler.setLevel(_test_log_level)
 formatter = logging.Formatter("%(asctime)s:%(name)s:%(levelname)s:%(pathname)s:%(lineno)d:%(message)s")
 handler.setFormatter(formatter)
 root.addHandler(handler)
+
+
+def _get_mysqld_version(mysqld_bin: str) -> Version:
+    out = subprocess.run([mysqld_bin, "--version"], capture_output=True, text=True, check=True)
+    # e.g. "mysqld  Ver 8.4.0 for Linux on x86_64" or "Ver 8.0.35"
+    match = re.search(r"Ver\s+(\d+)\.(\d+)\.(\d+)", out.stdout)
+    assert match, f"Cannot extract mysqld version from {out.stdout!r}"
+    return Version(".".join([str(i) for i in [match.group(1), match.group(2), match.group(3)]]))
 
 
 @pytest.fixture(scope="session", name="session_tmpdir")
@@ -109,10 +125,15 @@ def mysql_initialize_and_start(
         config_path=config_path, name=name, server_id=server_id, test_base_dir=test_base_dir
     )
 
+    mysqld_version = _get_mysqld_version(mysqld_bin)
+    deprecated_settings_block = ""
+    if mysqld_version < Version("8.4.0"):
+        deprecated_settings_block = (
+            "binlog-transaction-dependency-tracking=WRITESET\ntransaction-write-set-extraction=XXHASH64\n"
+        )
     config = f"""
 [mysqld]
-binlog-transaction-dependency-tracking=WRITESET
-binlog-format=ROW
+{deprecated_settings_block}binlog-format=ROW
 datadir={config_options.datadir}
 enforce-gtid-consistency=ON
 gtid-mode=ON
@@ -127,13 +148,12 @@ relay-log={config_options.relay_log_file_prefix}
 relay-log-index={config_options.relay_log_index_file}
 server-id={server_id}
 skip-name-resolve=ON
-skip-slave-start=ON
-slave-parallel-type=LOGICAL_CLOCK
-slave-parallel-workers={config_options.parallel_workers}
-slave-preserve-commit-order=ON
+skip-replica-start=ON
+replica-parallel-type=LOGICAL_CLOCK
+replica-parallel-workers={config_options.parallel_workers}
+replica-preserve-commit-order=ON
 socket={config_options.datadir}/mysql.sock
 sql-mode=ANSI,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
-transaction-write-set-extraction=XXHASH64
 
 [validate_password]
 policy=LOW
@@ -171,7 +191,7 @@ FLUSH PRIVILEGES;
                 "--initialize",
                 "--disable-log-bin",
                 "--gtid-mode=OFF",
-                "--skip-slave-preserve-commit-order",
+                "--skip-replica-preserve-commit-order",
                 "--init-file",
                 init_file,
             ]
@@ -200,19 +220,19 @@ FLUSH PRIVILEGES;
         # Ensure connecting to the newly started server works and if this is standby also start replication
         with mysql_cursor(**connect_options) as cursor:
             if master:
-                change_master_to(
+                change_replication_source_to(
                     cursor=cursor,
                     options={
-                        "MASTER_AUTO_POSITION": 1,
-                        "MASTER_CONNECT_RETRY": 0.1,
-                        "MASTER_HOST": "127.0.0.1",
-                        "MASTER_PORT": master.port,
-                        "MASTER_PASSWORD": master.password,
-                        "MASTER_SSL": 0,
-                        "MASTER_USER": master.user,
+                        "SOURCE_AUTO_POSITION": 1,
+                        "SOURCE_CONNECT_RETRY": 0.1,
+                        "SOURCE_HOST": "127.0.0.1",
+                        "SOURCE_PORT": master.port,
+                        "SOURCE_PASSWORD": master.password,
+                        "SOURCE_SSL": 0,
+                        "SOURCE_USER": master.user,
                     },
                 )
-                cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
+                cursor.execute("START REPLICA IO_THREAD, SQL_THREAD")
             else:
                 cursor.execute("SELECT 1")
 
@@ -228,6 +248,7 @@ FLUSH PRIVILEGES;
         server_id=server_id,
         startup_command=cmd,
         user="root",
+        version=mysqld_version,
     )
 
 

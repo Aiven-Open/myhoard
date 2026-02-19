@@ -6,10 +6,10 @@ from .restore_coordinator import BinlogStream, RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
     are_gtids_in_executed_set,
-    change_master_to,
+    change_replication_source_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
-    get_slave_status,
+    get_replica_status,
     get_xtrabackup_version,
     GtidExecuted,
     GtidRangeDict,
@@ -478,7 +478,7 @@ class Controller(threading.Thread):
                 self.log.info("Requested switch to observe mode but currently mode is already that")
                 return
             elif self.mode in {self.Mode.active, self.Mode.promote}:
-                # Master (or almost master) cannot become a standby
+                # Primary (or almost primary) cannot become a standby
                 raise ValueError(f"Switch from {self.mode.value} to observe mode is not allowed")
             elif self.mode == self.Mode.restore:
                 self._fail_if_restore_is_not_complete()
@@ -669,31 +669,32 @@ class Controller(threading.Thread):
 
         expected_ranges: List[GtidRangeDict] = []
         with mysql_cursor(**self.mysql_client_params) as cursor:
-            # Stop IO and SQL slaves so that we can flush relay logs and retain the old log files. This allows
+            # Stop IO and SQL replicas so that we can flush relay logs and retain the old log files. This allows
             # us to replace the empty files with ones that have actual content and make the SQL thread apply
             # them. Same as with regular restoration.
-            cursor.execute("STOP SLAVE")
-            # Get current slave status so that we know which relay logs to reuse
-            slave_status = get_slave_status(cursor)
-            if not slave_status:
+            cursor.execute("STOP REPLICA")
+            # Get current replica status so that we know which relay logs to reuse
+            replica_status = get_replica_status(cursor)
+            if not replica_status:
                 first_name = None
             else:
-                first_name = slave_status["Relay_Log_File"]
+                first_name = replica_status["Relay_Log_File"]
             if not first_name:
                 first_name = "relay.000001"
             if not self.state["promote_details"].get("relay_index_updated"):
                 first_index = int(first_name.split(".")[-1])
                 if first_index == 1 and (
-                    not slave_status
+                    not replica_status
                     or (
-                        not slave_status["Relay_Master_Log_File"]
-                        and not slave_status["Exec_Master_Log_Pos"]
-                        and not slave_status["Retrieved_Gtid_Set"]
+                        not replica_status["Relay_Source_Log_File"]
+                        and not replica_status["Exec_Source_Log_Pos"]
+                        and not replica_status["Retrieved_Gtid_Set"]
                     )
                 ):
-                    # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
+                    # FLUSH RELAY LOGS does nothing if RESET REPLICA has been called since last call to
+                    # CHANGE REPLICATION SOURCE TO
                     self.log.info(
-                        "Slave status is empty, assuming RESET SLAVE has been executed and writing relay index manually"
+                        "Replica status is empty, assuming RESET REPLICA has been executed and writing relay index manually"
                     )
                     with open(self.mysql_relay_log_index_file, "wb") as index_file:
                         names = [self._relay_log_name(index=i + 1, full_path=False) for i in range(len(to_apply))]
@@ -723,16 +724,16 @@ class Controller(threading.Thread):
                     }
                 )
             # Make SQL thread replay relay logs starting from where we have replaced empty / old logs with
-            # new ones that have actual valid binlogs from previous master
+            # new ones that have actual valid binlogs from previous primary
             options = {
-                "MASTER_AUTO_POSITION": 0,
-                "MASTER_HOST": "dummy",
+                "SOURCE_AUTO_POSITION": 0,
+                "SOURCE_HOST": "dummy",
                 "PRIVILEGE_CHECKS_USER": None,
                 "RELAY_LOG_FILE": first_name,
                 "RELAY_LOG_POS": 4,
             }
-            change_master_to(cursor=cursor, options=options)
-            cursor.execute("START SLAVE SQL_THREAD")
+            change_replication_source_to(cursor=cursor, options=options)
+            cursor.execute("START REPLICA SQL_THREAD")
             expected_file = self._relay_log_name(index=first_index + len(to_apply), full_path=False)
             expected_ranges_str = make_gtid_range_string(expected_ranges)
             self.log.info(
@@ -823,16 +824,16 @@ class Controller(threading.Thread):
         expected_ranges = self.state["promote_details"].get("expected_ranges")
 
         with mysql_cursor(**self.mysql_client_params) as cursor:
-            slave_status = get_slave_status(cursor)
-            if not slave_status:
+            replica_status = get_replica_status(cursor)
+            if not replica_status:
                 self.log.info(
-                    "Slave status is empty, assuming RESET SLAVE has been executed and writing relay index manually"
+                    "Replica status is empty, assuming RESET REPLICA has been executed and writing relay index manually"
                 )
                 current_file = None
                 sql_thread_running = "No"
             else:
-                current_file = slave_status["Relay_Log_File"]
-                sql_thread_running = slave_status["Slave_SQL_Running"]
+                current_file = replica_status["Relay_Log_File"]
+                sql_thread_running = replica_status["Replica_SQL_Running"]
             reached_target = True
             if current_file != expected_file:
                 reached_target = False
@@ -845,11 +846,11 @@ class Controller(threading.Thread):
                     self.log.warning("Promotion target state not reached but forced promotion requested")
                 else:
                     if sql_thread_running != "Yes":
-                        restart_unexpected_dead_sql_thread(cursor, slave_status, self.stats, self.log)
+                        restart_unexpected_dead_sql_thread(cursor, replica_status, self.stats, self.log)
                     return
             else:
                 self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)
-            cursor.execute("STOP SLAVE")
+            cursor.execute("STOP REPLICA")
             promote_details: dict = {
                 **self.state["promote_details"],
                 "binlogs_applying": [],
@@ -1008,7 +1009,7 @@ class Controller(threading.Thread):
         )
 
     def _download_unapplied_remote_binlogs(self):
-        """Download any binlogs that master has uploaded to file storage but we haven't applied.
+        """Download any binlogs that primary has uploaded to file storage but we haven't applied.
         In normal situation there shouldn't be any and in abnormal situation there should only be
         one or two so don't bother with any multiprocess complexity."""
         # Make a copy in case the array gets modified
@@ -1055,10 +1056,10 @@ class Controller(threading.Thread):
     def _extend_binlog_stream_list(self):
         """If we're currently restoring a backup to most recent point in time, checks for new available
         backup streams and if there is one adds that to the list of streams from which to apply binlogs.
-        The reasoning for this logic is that if restoring binary logs takes a long time the current master
+        The reasoning for this logic is that if restoring binary logs takes a long time the current primary
         could fail while we're restoring data but before failing it could've created new backup stream and
         uploaded some files there but not in the backup we're restoring, causing data loss when this node
-        gets promoted after backup restoration completes and there's no available master."""
+        gets promoted after backup restoration completes and there's no available primary."""
         assert self.restore_coordinator is not None
         if not self.restore_coordinator.can_add_binlog_streams():
             return
@@ -1103,23 +1104,23 @@ class Controller(threading.Thread):
             cursor.execute("SELECT @@GLOBAL.read_only AS read_only")
             if not cursor.fetchone()["read_only"]:
                 raise Exception("System expected to be in read-only mode but isn't")
-            info = get_slave_status(cursor)
+            info = get_replica_status(cursor)
             if info is None:
-                # None happens if RESET SLAVE has been performed or if the slave never was running, e.g.
+                # None happens if RESET REPLICA has been performed or if the replica never was running, e.g.
                 # because there were no binary logs to restore.
-                self.log.warning("SHOW SLAVE STATUS returned no results.")
+                self.log.warning("SHOW REPLICA STATUS returned no results.")
                 return
-            if info["Slave_IO_Running"] == "Yes":
-                raise Exception("Slave IO thread expected to be stopped but is running")
-            if info["Slave_SQL_Running"] == "Yes":
+            if info["Replica_IO_Running"] == "Yes":
+                raise Exception("Replica IO thread expected to be stopped but is running")
+            if info["Replica_SQL_Running"] == "Yes":
                 if not re.match(
-                    "(Slave|Replica) has read all relay log; waiting for more updates", info["Slave_SQL_Running_State"]
+                    "(Slave|Replica) has read all relay log; waiting for more updates", info["Replica_SQL_Running_State"]
                 ):
                     raise Exception(
                         "Expected SQL thread to be stopped or finished processing updates, "
-                        f'actual Slave_SQL_Running_State: {info["Slave_SQL_Running_State"]}'
+                        f'actual Replica_SQL_Running_State: {info["Replica_SQL_Running_State"]}'
                     )
-                cursor.execute("STOP SLAVE SQL_THREAD")
+                cursor.execute("STOP REPLICA SQL_THREAD")
 
     def _fail_if_restore_is_not_complete(self):
         if not self.restore_coordinator:
@@ -1210,10 +1211,10 @@ class Controller(threading.Thread):
     def _handle_mode_promote(self):
         self._refresh_backups_list_and_streams()
 
-        # It is possible to have a netsplit where clients can talk to old master and old master
+        # It is possible to have a netsplit where clients can talk to old primary and old primary
         # can talk to file storage but it cannot talk to standby and other decision making nodes
         # so it gets replaced. In such a situation we want to manually apply any binlogs the old
-        # master has managed to upload to storage before making this node applicable for actual
+        # primary has managed to upload to storage before making this node applicable for actual
         # promotion.
 
         if self._prepare_streams_for_promotion() == len(self.backup_streams):
@@ -1245,8 +1246,8 @@ class Controller(threading.Thread):
         if self.state["server_uuid"] is None and self.restore_coordinator.server_uuid:
             self.state_manager.update_state(server_uuid=self.restore_coordinator.server_uuid)
         # Need to purge binlogs also during restoration because generating binlogs from relay logs should be enabled
-        # also during restoration. The binlogs created during restoration could be required e.g. if an old master has
-        # managed to upload binlogs that have not been replicated to a read replica; when the old master gets replaced
+        # also during restoration. The binlogs created during restoration could be required e.g. if an old primary has
+        # managed to upload binlogs that have not been replicated to a read replica; when the old primary gets replaced
         # read replica connects to the new server and must be able to download missing binlogs from there
         self._purge_old_binlogs(mysql_maybe_not_running=True)
         self._process_local_binlog_updates()
@@ -1559,7 +1560,7 @@ class Controller(threading.Thread):
         exclude_uuid = None
         if self.mode != self.Mode.active:
             # If this node is not in active mode disregard any GTIDs with our server UUID when checking whether
-            # something has been backed up; anything from us cannot be backed up because we're not the master.
+            # something has been backed up; anything from us cannot be backed up because we're not the primary.
             # Typically there shouldn't be any changes from us either but certain MySQL operations could cause
             # GTID executed to be updated even though no actual changes in database contents are made, which
             # would result in inability to ever purge binlogs because they have GTIDs that other nodes and backups
@@ -1667,9 +1668,9 @@ class Controller(threading.Thread):
             self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
-    def _stream_for_backup_initiated_by_old_master(self, stream: BackupStream) -> bool:
-        """If we are master, then any observe streams that we see are assumed to be
-        for backups initiated by an old master while the current node was getting promoted."""
+    def _stream_for_backup_initiated_by_old_primary(self, stream: BackupStream) -> bool:
+        """If we are primary, then any observe streams that we see are assumed to be
+        for backups initiated by an old primary while the current node was getting promoted."""
         return self.mode == self.Mode.active and stream.mode == BackupStream.Mode.observe
 
     def _handle_pending_preservation_requests(self) -> None:
@@ -1734,7 +1735,7 @@ class Controller(threading.Thread):
                             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
                     stream.join()
                 elif stream.mode != BackupStream.Mode.observe or (
-                    not stream.state["closed_info"] and not self._stream_for_backup_initiated_by_old_master(stream=stream)
+                    not stream.state["closed_info"] and not self._stream_for_backup_initiated_by_old_primary(stream=stream)
                 ):
                     new_streams[stream_id] = stream
             elif backup["resumable"] and not backup["closed_at"]:
@@ -2108,13 +2109,13 @@ class Controller(threading.Thread):
                 stream.mark_as_closed()
                 expected_closed.append(stream)
 
-        # If we are master, then any observe streams that we see are assumed to be for backups initiated
-        # by an old master while the current node was getting promoted, so we mark them as closed.
+        # If we are primary, then any observe streams that we see are assumed to be for backups initiated
+        # by an old primary while the current node was getting promoted, so we mark them as closed.
         if self.mode == self.Mode.active:
             observe_streams = [stream for stream in self.backup_streams if stream.mode == BackupStream.Mode.observe]
             for stream in observe_streams:
                 self.log.warning(
-                    "Stream %r is for a backup initiated by an old master, marking it as closed", stream.stream_id
+                    "Stream %r is for a backup initiated by an old primary, marking it as closed", stream.stream_id
                 )
                 stream.mark_as_closed()
                 expected_closed.append(stream)

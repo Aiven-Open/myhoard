@@ -50,20 +50,12 @@ jobs:
       # skipping matrix items that aren't meaningful
       matrix:
         include:
-          - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26-1.jammy"
-            python-version: "3.10"
-            ubuntu-version: "22.04"
-          - mysql-version: "8.0.32"
-            percona-version: "8.0.32-26-1.jammy"
-            python-version: "3.11"
-            ubuntu-version: "22.04"
           - mysql-version: "8.0.35"
             percona-version: "8.0.35-30-1.jammy"
-            python-version: "3.11"
+            python-version: "3.12"
             ubuntu-version: "22.04"
-          - mysql-version: "8.0.35"
-            percona-version: "8.0.35-30-1.jammy"
+          - mysql-version: "8.4.8"
+            percona-version: "8.4.0-5-1.jammy"
             python-version: "3.12"
             ubuntu-version: "22.04"
 

@@ -1,7 +1,16 @@
 #!/bin/bash -ex
 [ -n "$1" ] || { echo "must pass percona package version"; exit 1; }
 PERCONA_PACKAGE_VERSION="$1"
+
+if [[ "${PERCONA_PACKAGE_VERSION}" == 8.4* ]]; then
+    PXB_REL="pxb-84-lts"
+    PXB_PKG_NAME="percona-xtrabackup-84"
+else
+    PXB_REL="pxb-80"
+    PXB_PKG_NAME="percona-xtrabackup-80"
+fi
+
 export DEBIAN_FRONTEND="noninteractive"
-sudo percona-release setup pxb-80
-sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew percona-xtrabackup-80="${PERCONA_PACKAGE_VERSION}"
+sudo percona-release setup $PXB_REL
+sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew $PXB_PKG_NAME="${PERCONA_PACKAGE_VERSION}"
 mysqld --version

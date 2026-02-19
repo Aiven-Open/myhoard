@@ -50,7 +50,7 @@ def test_basic_restore(mysql_master, mysql_empty):
             for value in range(15):
                 cursor.execute(f"INSERT INTO test{db_index}.foo{db_index} (id) VALUES ({value})")
         cursor.execute("FLUSH LOGS")
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         old_master_status = cursor.fetchone()
 
     encryption_key = os.urandom(24)
@@ -108,7 +108,7 @@ def test_basic_restore(mysql_master, mysql_empty):
             cursor.execute(f"SELECT id FROM test{db_index}.foo{db_index}")
             results = cursor.fetchall()
             assert sorted(result["id"] for result in results) == sorted(range(15))
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         new_master_status = cursor.fetchone()
         assert old_master_status["Executed_Gtid_Set"] == new_master_status["Executed_Gtid_Set"]
 
@@ -151,7 +151,7 @@ def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
                 for value in range(10):
                     cursor.execute(f"INSERT INTO test{db_index}.foo{db_index} (id) VALUES ({value})")
             cursor.execute("FLUSH LOGS")
-            cursor.execute("SHOW MASTER STATUS")
+            cursor.execute(mysql_master.show_binary_logs_status_cmd)
             old_master_status = cursor.fetchone()
             assert old_master_status
 
@@ -222,7 +222,7 @@ def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
             cursor.execute(f"SELECT id FROM test{db_index}.foo{db_index}")
             results = cursor.fetchall()
             assert sorted(result["id"] for result in results) == sorted(range(10))
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         new_master_status = cursor.fetchone()
         assert new_master_status
         assert old_master_status["Executed_Gtid_Set"] == new_master_status["Executed_Gtid_Set"]

@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import BackupSiteInfo, Controller
 from myhoard.statsd import StatsClient
+from packaging.version import Version
 from typing import List, Optional, Type, TypeVar
 
 import asyncio
@@ -36,6 +37,7 @@ class MySQLConfig:
         server_id: Optional[int] = None,
         startup_command: Optional[List[str]] = None,
         user: Optional[str] = None,
+        version: Optional[Version] = None,
     ):
         self.base_dir = base_dir
         self.config = config
@@ -48,6 +50,14 @@ class MySQLConfig:
         self.server_id = server_id
         self.startup_command = startup_command
         self.user = user
+        self.version = version
+
+    @property
+    def show_binary_logs_status_cmd(self):
+        if self.version >= Version("8.2.0"):
+            return "SHOW BINARY LOG STATUS"
+        else:
+            return "SHOW MASTER STATUS"
 
 
 T = TypeVar("T", bound="Controller")
@@ -171,7 +181,7 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         print("Stopped mysqld with pid", proc.pid)
     command = mysql_config.startup_command
     if not with_binlog:
-        command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
+        command = command + ["--disable-log-bin", "--skip-replica-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
     mysql_config.proc = subprocess.Popen(command)  # pylint: disable=consider-using-with

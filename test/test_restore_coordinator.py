@@ -232,9 +232,9 @@ def _restore_coordinator_sequence(
         time.sleep(2)
         pitr_row_count = data_generator.committed_row_count
         with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-            cursor.execute("SHOW MASTER STATUS")
+            cursor.execute(mysql_master.show_binary_logs_status_cmd)
             pitr_master_status = cursor.fetchone()
-            print(time.time(), "Master status at PITR target time", pitr_master_status)
+            print(time.time(), "Primary status at PITR target time", pitr_master_status)
         pitr_target_time = int(time.time())
         time.sleep(2)
         data_generator.generate_data_event.set()
@@ -284,9 +284,9 @@ def _restore_coordinator_sequence(
     assert bs2.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog
 
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         original_master_status = cast(dict, cursor.fetchone())
-        print("Original master status", original_master_status)
+        print("Original primary status", original_master_status)
         cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
         original_count = cast(dict, cursor.fetchone())["count"]
         print("Number of rows in original master", original_count)
@@ -364,7 +364,7 @@ def _restore_coordinator_sequence(
     assert rc.state["remote_read_errors"] == 0
 
     with myhoard_util.mysql_cursor(**restored_connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         final_status = cast(dict, cursor.fetchone())
         print(time.time(), "Restored server's final status", final_status)
 
@@ -387,7 +387,7 @@ def _restore_coordinator_sequence(
         master_status = pitr_master_status or original_master_status
         assert (
             final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"]
-        ), "final status executed_gtid_set differs from master status"
+        ), "final status executed_gtid_set differs from primary status"
         assert final_status["File"] == "bin.000001", "final status file differes from expected"
 
 
@@ -406,10 +406,10 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
     private_key_pem, _ = generate_rsa_key_pair()
 
-    slave_status_response = {"Relay_Log_File": "relay.000001", "Slave_SQL_Running_State": running_state}
+    replica_status_response = {"Relay_Log_File": "relay.000001", "Replica_SQL_Running_State": running_state}
 
     mock_cursor = Mock()
-    mock_cursor.fetchone.return_value = slave_status_response
+    mock_cursor.fetchone.return_value = replica_status_response
 
     with patch.object(RestoreCoordinator, "_mysql_cursor") as mock_mysql_cursor:
         mock_mysql_cursor.return_value.__enter__.return_value = mock_cursor
@@ -439,7 +439,7 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
 
         rc.state["current_relay_log_target"] = 2
 
-        apply_finished, current_index = rc._check_sql_slave_status()  # pylint: disable=protected-access
+        apply_finished, current_index = rc._check_sql_replica_status()  # pylint: disable=protected-access
 
     assert apply_finished
     assert current_index == 2
