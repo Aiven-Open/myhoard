@@ -323,6 +323,38 @@ def fixture_standby2_controller(session_tmpdir, mysql_standby2, default_backup_s
         controller.stop()
 
 
+@pytest.fixture(scope="function", name="standby1_controller_cross_site")
+def fixture_standby1_controller_cross_site(session_tmpdir, mysql_standby1, default_backup_site, encryption_keys):
+    """Controller for standby1 with two sites: 'default' (same backup dir as master, for observe)
+    and 'other' (separate backup dir, set as upload_site). This simulates a new node that discovers
+    existing backups on 'default' but uploads new backups to 'other'."""
+    other_backup_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "backups_other_site"))
+    os.makedirs(other_backup_dir)
+    other_backup_site = {
+        "compression": {
+            "algorithm": "snappy",
+        },
+        "encryption_keys": encryption_keys,
+        "object_storage": {
+            "directory": other_backup_dir,
+            "storage_type": "local",
+        },
+        "recovery_only": False,
+    }
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_standby1,
+        session_tmpdir=session_tmpdir,
+        extra_backup_sites={"other": other_backup_site},
+        upload_site="other",
+    )
+    try:
+        yield controller, mysql_standby1
+    finally:
+        controller.stop()
+
+
 @pytest.fixture(scope="function", name="empty_controller")
 def fixture_empty_controller(
     session_tmpdir, mysql_empty: MySQLConfig, default_backup_site: BackupSiteInfo

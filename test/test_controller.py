@@ -19,7 +19,7 @@ from myhoard.util import (
 )
 from rohmu import get_transfer
 from typing import Any, Callable, cast, Dict, List, Optional, Set, TypedDict
-from unittest.mock import MagicMock, patch
+from unittest.mock import call, MagicMock, patch
 
 import contextlib
 import datetime
@@ -710,6 +710,142 @@ def test_3_node_service_failover_and_restore(
         assert controller.backup_streams[0].state["backup_errors"] == 0
         assert controller.backup_streams[0].state["remote_read_errors"] == 0
         assert controller.backup_streams[0].state["remote_write_errors"] == 0
+
+
+@pytest.mark.parametrize(
+    "standby_fixture_name, expect_remote_copy",
+    [
+        ("standby1_controller", True),
+        ("standby1_controller_cross_site", False),
+    ],
+    ids=["same_site", "cross_site"],
+)
+def test_remote_copy_behavior(
+    request,
+    master_controller,
+    standby_fixture_name,
+    expect_remote_copy,
+):
+    """Verify remote-copy behavior depending on whether backup streams share the same site.
+
+    When both streams target the same site, the second stream should use remote-copy
+    instead of uploading from local disk.
+
+    When streams target different sites, remote copies are forbidden and
+    the second stream must upload from local disk. This is because in real-life
+    sites would represents prefixes on cloud object storage buckets. When sites are
+    different, there is no way to make sure they are on the same cloud provider or
+    not.
+
+    Scenario:
+    - Master creates a backup on the 'default' site.
+    - Standby observes master's backup, then is promoted to active mode.
+    - A new backup is requested, creating a second stream.
+    - Both streams see the same local binlog indexes. When stream A uploads a binlog,
+      the reference is passed to stream B. Depending on whether they share the same
+      site, stream B either does a remote-copy or uploads from local disk.
+    """
+    mcontroller, master = master_controller
+    s1controller, standby1 = request.getfixturevalue(standby_fixture_name)
+
+    # Set unknown replication state so that binary logs won't be purged
+    mcontroller.state_manager.update_state(replication_state={"s1": {}})
+    mcontroller.binlog_purge_settings["min_binlog_age_before_purge"] = 1
+    mcontroller.binlog_purge_settings["purge_interval"] = 0.1
+
+    master_dg = DataGenerator(connect_info=master.connect_options, make_temp_tables=False)
+    try:
+        # Phase 1: Master creates initial backup on 'default' site
+        master_dg.start()
+        time.sleep(1)
+        assert master_dg.row_count > 0
+
+        mcontroller.switch_to_active_mode()
+        mcontroller.start()
+
+        def master_streaming_binlogs():
+            assert mcontroller.backup_streams
+            assert mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+            complete_backups = [b for b in mcontroller.state["backups"] if b["completed_at"]]
+            assert len(complete_backups) >= 1
+
+        while_asserts(master_streaming_binlogs, timeout=30)
+
+        # Phase 2: Standby observes, then promotes
+        # Stop slave threads (required for observe -> promote transition)
+        with mysql_cursor(**standby1.connect_options) as cursor:
+            cursor.execute("STOP REPLICA")
+
+        s1controller.switch_to_observe_mode()
+        s1controller.start()
+
+        # Wait for standby to discover the master's backup on 'default' site
+        def standby_discovered_backup():
+            assert s1controller.state["backups_fetched_at"] != 0
+            assert len(s1controller.state["backups"]) >= 1
+
+        while_asserts(standby_discovered_backup, timeout=15)
+
+        # Promote standby to active mode
+        s1controller.switch_to_active_mode()
+
+        # Wait for promotion to complete (controller mode becomes active)
+        def standby_is_active():
+            assert s1controller.mode == Controller.Mode.active
+
+        while_asserts(standby_is_active, timeout=15)
+
+        # Replace stats with MagicMock to track remote_copy vs upload calls
+        s1controller.stats = MagicMock()
+
+        # Request a new backup — creates a stream on the standby's upload site
+        s1controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+
+        # Turn off read_only so the standby can generate binlogs
+        with mysql_cursor(**standby1.connect_options) as cursor:
+            cursor.execute("SET GLOBAL read_only = 0")
+
+        # Generate data and flush binlogs so both streams have binlogs to upload
+        standby_dg = DataGenerator(connect_info=standby1.connect_options, make_temp_tables=False)
+        standby_dg.start()
+
+        try:
+            # Wait for the new backup to complete its basebackup phase and start uploading binlogs.
+            # During binlog_catchup of the new stream, both streams upload binlogs simultaneously,
+            # which is the window where remote-copy optimization or cross-site guard is exercised.
+            def standby_has_two_completed_backups():
+                # Generate some flushes to create binlogs for both streams to upload
+                with mysql_cursor(**standby1.connect_options) as cursor:
+                    foo_suffix = str(time.time()).replace(".", "_")
+                    cursor.execute(f"CREATE TABLE IF NOT EXISTS foo_{foo_suffix} (id INTEGER)")
+                    cursor.execute("COMMIT")
+                    cursor.execute("FLUSH BINARY LOGS")
+                complete_backups = [b for b in s1controller.state["backups"] if b["completed_at"]]
+                assert len(complete_backups) >= 2
+
+            while_asserts(standby_has_two_completed_backups, timeout=30)
+
+            # At this point the new backup has completed and both streams have uploaded binlogs.
+            if expect_remote_copy:
+                # Same site: verify that binlog uploads happened via remote copy
+                s1controller.stats.increase.assert_any_call("myhoard.binlog.remote_copy")
+            else:
+                # Cross site: verify uploads happened from local disk but NO remote copies
+                s1controller.stats.increase.assert_any_call("myhoard.binlog.upload")
+                remote_copy_calls = [
+                    c for c in s1controller.stats.increase.call_args_list if c == call("myhoard.binlog.remote_copy")
+                ]
+                assert (
+                    [] == remote_copy_calls
+                ), f"Expected no remote copies due to cross-site guard, but found {len(remote_copy_calls)} remote copy calls"
+        finally:
+            standby_dg.stop()
+    finally:
+        master_dg.stop()
+        mcontroller.stop()
+        s1controller.stop()
+
+    assert s1controller.state["errors"] == 0
 
 
 def test_empty_server_backup_and_restore(
