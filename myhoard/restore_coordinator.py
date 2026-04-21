@@ -478,7 +478,7 @@ class RestoreCoordinator(threading.Thread):
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
             stats=self.stats,
-            stream_handler=partial(self._basebackup_data_provider, stream_id=stream_id),
+            stream_handler=partial(self._basebackup_data_provider, stream_id=stream_id, backup_info=backup_info),
             target_dir=target_dir,
             temp_dir=temp_dir,
             free_memory_percentage=self.free_memory_percentage,
@@ -998,8 +998,11 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
         return None
 
-    def _basebackup_data_provider(self, target_stream, stream_id: str | None = None) -> None:
-        compressed_size = self.state["basebackup_info"].get("compressed_size")
+    def _basebackup_data_provider(
+        self, target_stream, stream_id: str | None = None, backup_info: Dict[str, Any] | None = None
+    ) -> None:
+        info = backup_info or self.state["basebackup_info"]
+        compressed_size = info.get("compressed_size")
         with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
             last_time = [time.monotonic()]
             last_value = [self.basebackup_bytes_downloaded]
@@ -1025,7 +1028,7 @@ class RestoreCoordinator(threading.Thread):
                         stats=self.stats,
                     )
 
-            num_splits = self.state["basebackup_info"].get("number_of_splits", 1)
+            num_splits = info.get("number_of_splits", 1)
             name = self._build_full_name("basebackup.xbstream", stream_id=stream_id)
             current_split = 0
             while num_splits > 0:
