@@ -1348,7 +1348,7 @@ class RestoreCoordinator(threading.Thread):
         local_name = self._relay_log_name(index=binlog["adjusted_remote_index"] + self.state["binlog_name_offset"])
         gtid_infos = []
         found_last_entry = False
-        for gtid_info in read_gtids_from_log(local_name, read_until_position=binlog_position):
+        for gtid_info in read_gtids_from_log(local_name):
             _timestamp, _server_id, uuid_str, gno, start_position = gtid_info
             last_gno = last_gnos.get(uuid_str)
             if last_gno == gno:
@@ -1363,6 +1363,9 @@ class RestoreCoordinator(threading.Thread):
                         gno,
                     )
                     self.update_state(binlog_position=start_position)
+                break
+            # Stop if we've passed the reported position without finding the matching GTID
+            if not found_last_entry and start_position >= binlog_position:
                 break
             gtid_infos.append(gtid_info)
         return list(build_gtid_ranges(gtid_infos))
