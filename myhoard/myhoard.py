@@ -54,6 +54,7 @@ class MyHoard:
     async def _reload_and_initialize_if_possible(self):
         if self.controller and not self.controller.is_safe_to_reload():
             self.log.info("Reload requested but controller state does not allow safe reload, postponing")
+            self._apply_safe_config_updates()
             await asyncio.sleep(self.reload_retry_interval)
             asyncio.ensure_future(self._reload_and_initialize_if_possible())
             return
@@ -86,6 +87,22 @@ class MyHoard:
         self.log.info("Exiting")
 
         return 0
+
+    def _apply_safe_config_updates(self):
+        """Apply config changes that are safe to update without a full reload.
+
+        This is called when a full reload is not possible (e.g. during basebackup)
+        to ensure settings like binlog purge/retention are applied promptly.
+        """
+        try:
+            with open(self.config_file, "r") as f:
+                new_config = json.load(f)
+            new_purge_settings = new_config.get("binlog_purge_settings")
+            if new_purge_settings and new_purge_settings != self.config.get("binlog_purge_settings"):
+                self.controller.update_binlog_purge_settings(new_purge_settings)
+                self.config["binlog_purge_settings"] = new_purge_settings
+        except (OSError, ValueError) as ex:
+            self.log.warning("Failed to apply safe config updates: %r", ex)
 
     def _load_configuration(self):
         with open(self.config_file, "r") as f:

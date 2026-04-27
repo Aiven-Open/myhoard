@@ -262,6 +262,10 @@ class Controller(threading.Thread):
                     return False
         return True
 
+    def update_binlog_purge_settings(self, binlog_purge_settings) -> None:
+        self.log.info("Updating binlog purge settings to %r", binlog_purge_settings)
+        self.binlog_purge_settings = binlog_purge_settings
+
     def mark_backup_requested(
         self,
         *,
