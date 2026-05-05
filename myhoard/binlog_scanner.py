@@ -9,6 +9,8 @@ import os
 import threading
 import time
 
+BINLOG_UPLOAD_BATCH_SIZE = 10
+
 
 class BinlogInfo(TypedDict):
     file_name: str
@@ -68,7 +70,7 @@ class BinlogScanner:
         last_processed_at = time.time()
 
         next_index: int = self.state["next_index"]
-        while True:
+        for _ in range(BINLOG_UPLOAD_BATCH_SIZE):
             # We only scan completed files so expect the index following our next
             # index to be present as well
             if not os.path.exists(self.build_full_name(next_index + 1)):
