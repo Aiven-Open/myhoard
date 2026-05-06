@@ -10,16 +10,16 @@ authors = [
 ]
 description = "MyHoard is a daemon for creating, managing and restoring MySQL backups."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers=[
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Database :: Database Engines/Servers",
     "Topic :: Software Development :: Libraries",
 ]
@@ -27,16 +27,13 @@ license = { text = "Apache License 2.0" }
 dynamic = ["version"]
 dependencies = [
     "aiohttp",
-    "botocore",
     "cryptography >= 0.8",
     "httplib2",
-    "paramiko",
     "PyMySQL >= 0.9.2",
     "PySocks",
-    # rohmu is incompatible with latest version snappy 0.7.1
-    "python-snappy == 0.6.1",
-    "rohmu >= 1.1.2",
-    "sentry-sdk==2.8.0",
+    "rohmu >= 2.8.2",
+    "sentry-sdk == 2.8.0",
+    "packaging",
 ]
 
 [project.optional-dependencies]
@@ -45,20 +42,19 @@ dev = [
     "coverage",
     "coveralls",
     "flake8",
-    "httplib2",
     "isort==5.12.0",
     "mock",
     "mypy",
     "pre-commit",
     "pylint-quotes",
     "pylint>=2.4.3",
-    "PySocks",
     "pytest",
     "pytest-cov",
     "pytest-mock",
     "pytest-timeout",
     "pytest-xdist",
     "responses",
+    "systemd-python",
     "time-machine",
     "types-PyMySQL",
     "types-requests",

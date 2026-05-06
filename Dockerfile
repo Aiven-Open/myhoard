@@ -23,7 +23,7 @@ RUN apt update && \
         liblz4-1 liblz4-dev libldap2-dev libsasl2-dev libsasl2-modules-gssapi-mit libkrb5-dev wget \
         libreadline-dev libudev-dev libev-dev libev4 libprocps-dev vim-common
 # Download boost and percona-xtrabackup
-RUN wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
+RUN wget https://archives.boost.io/release/1.77.0/source/boost_1_77_0.tar.gz && \
     tar -zxvf boost_1_77_0.tar.gz
 
 
@@ -32,7 +32,7 @@ RUN wget https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_
 ###############################################
 FROM builder-percona AS builder-percona-xtrabackup
 
-RUN wget https://downloads.percona.com/downloads/Percona-XtraBackup-LATEST/Percona-XtraBackup-${PERCONA_XTRA_VERSION}/source/tarball/percona-xtrabackup-${PERCONA_XTRA_VERSION}.tar.gz && \
+RUN wget https://downloads.percona.com/downloads/percona-distribution-mysql-ps/percona-distribution-mysql-ps-${MYSQL_VERSION}/source/tarball/percona-xtrabackup-${PERCONA_XTRA_VERSION}.tar.gz && \
     tar -zxvf percona-xtrabackup-${PERCONA_XTRA_VERSION}.tar.gz
 # Build percona-xtrabackup
 RUN cd percona-xtrabackup-${PERCONA_XTRA_VERSION} && \
@@ -48,7 +48,7 @@ RUN cd percona-xtrabackup-${PERCONA_XTRA_VERSION} && \
 ###############################################
 FROM builder-percona AS builder-percona-server
 
-RUN wget https://downloads.percona.com/downloads/Percona-Server-LATEST/Percona-Server-${PERCONA_SERVER_VERSION}/source/tarball/percona-server-${PERCONA_SERVER_VERSION}.tar.gz && \
+RUN wget https://downloads.percona.com/downloads/percona-distribution-mysql-ps/percona-distribution-mysql-ps-${MYSQL_VERSION}/source/tarball/percona-server-${PERCONA_SERVER_VERSION}.tar.gz && \
     tar -zxvf percona-server-${PERCONA_SERVER_VERSION}.tar.gz
 # Build percona-xtrabackup
 RUN cd percona-server-${PERCONA_SERVER_VERSION} && \
@@ -68,7 +68,7 @@ ARG MYSQL_VERSION=8.0.30
 ENV MYSQL_VERSION=${MYSQL_VERSION}
 
 RUN apt-get update && apt-get install -y \
-    sudo lsb-release wget tzdata libsnappy-dev libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
+    sudo lsb-release wget tzdata libpq5 libpq-dev software-properties-common build-essential rsync curl git libaio1 libmecab2 psmisc \
   && rm -rf /var/lib/apt/lists/*
 ADD scripts /src/scripts
 ADD Makefile /src/
@@ -83,9 +83,9 @@ COPY --from=builder-percona-server /usr/local/mysql/bin /usr/bin
 COPY --from=builder-percona-server /usr/local/mysql/lib /usr/lib
 
 ADD requirement* /src/
-RUN scripts/install-python-deps
 RUN sudo scripts/create-user
 
 ADD . /src/
+RUN scripts/install-python-deps
 RUN git config --global --add safe.directory /src
 RUN python -m pip install -e .

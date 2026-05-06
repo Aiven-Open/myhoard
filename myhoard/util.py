@@ -3,11 +3,13 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.hashes import SHA1
+from functools import cache
 from logging import Logger
 from math import log10
+from pathlib import Path
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
-from typing import Dict, Iterable, Iterator, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Any, Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -29,16 +31,27 @@ ERR_TIMEOUT = 2013
 # The follow lines used to split a version string which might
 # start with something like:
 # xtrabackup version 8.0.30-23.3.aiven
-XTRABACKUP_VERSION_REGEX = re.compile(r"^xtrabackup version ([\d\.\-]).+")
+XTRABACKUP_VERSION_REGEX = re.compile(r"xtrabackup version ([\d\.\-]+)")
 VERSION_SPLITTING_REGEX = re.compile(r"[\.-]")
 
 DEFAULT_XTRABACKUP_SETTINGS = {
     "copy_threads": 1,
     "compress_threads": 1,
     "encrypt_threads": 1,
+    "register_redo_log_consumer": False,
 }
 
+# Indexes of this array are used for mapping the days (0..6), order is important
+DOW_ORDERED = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+CHECKPOINT_FILENAME = "xtrabackup_checkpoints"
+
 GtidRangeTuple = tuple[int, int, str, int, int]
+BinVersion = tuple[int, ...]
+
+
+class BinInfo(NamedTuple):
+    path: Path
+    version: BinVersion
 
 
 class GtidRangeDict(TypedDict):
@@ -53,6 +66,19 @@ class GtidRangeDict(TypedDict):
 # Ideally the contents should be Tuple[int, int] rather than List[int],
 # but that clashes with json deserialization
 GtidExecuted = Dict[str, List[List[int]]]
+
+
+def parse_dow_schedule(dow_schedule: str) -> set[int]:
+    try:
+        res = set(DOW_ORDERED.index(dow.lower().strip()) for dow in dow_schedule.split(","))
+        if not res:
+            raise ValueError("Invalid DOW schedule")
+    except ValueError:
+        raise ValueError(
+            "`full_backup_week_schedule` must be a non-empty comma-separated list consisting of "
+            f"\"{', '.join(DOW_ORDERED)}\""
+        )
+    return res
 
 
 @contextlib.contextmanager
@@ -100,10 +126,14 @@ def atomic_create_file(
         raise
 
 
-def change_master_to(*, cursor, options):
-    """Constructs and executes CHANGE MASTER TO command based on given options"""
-    option_items = ", ".join(f"{k}={v!r}" for k, v in options.items())
-    sql = f"CHANGE MASTER TO {option_items}"
+def change_replication_source_to(*, cursor, options):
+    """Constructs and executes CHANGE REPLICATION SOURCE TO command based on given options"""
+
+    def null_if_value_is_none(v):
+        return f"{v!r}" if v is not None else "NULL"
+
+    option_items = ", ".join(f"{k}={null_if_value_is_none(v)}" for k, v in options.items())
+    sql = f"CHANGE REPLICATION SOURCE TO {option_items}"
     cursor.execute(sql)
 
 
@@ -513,7 +543,16 @@ def get_mysql_version(cursor: pymysql.cursors.DictCursor) -> Optional[str]:
         return None
 
 
-def track_rate(*, current, last_recorded, last_recorded_time, metric_name, min_increase=1_000_000, stats):
+def track_rate(
+    *,
+    current,
+    last_recorded,
+    last_recorded_time,
+    metric_name,
+    min_increase=1_000_000,
+    stats,
+    tags: dict[str, Any] | None = None,
+):
     """Calculates rate of change given current value and previously handled value and time. If there is
     a relevant change (as defined by min_increase) and some time has passed, the current rate of change
     is sent as integer gauge using given stats client and metric name. Returns the values to pass to the
@@ -525,7 +564,7 @@ def track_rate(*, current, last_recorded, last_recorded_time, metric_name, min_i
         diff = current - last_recorded
         per_second = int(diff / time_elapsed)
         if per_second > 0:
-            stats.gauge_int(metric_name, per_second)
+            stats.gauge_int(metric_name, per_second, tags=tags)
             return_value = current
             return_time = now
     return return_value, return_time
@@ -619,43 +658,102 @@ class RateTracker(threading.Thread):
                 self._reset()
 
 
-class SlaveStatus(TypedDict):
+class ReplicaStatus(TypedDict):
     Relay_Log_File: str
-    Relay_Master_Log_File: str
-    Exec_Master_Log_Pos: int
+    Relay_Source_Log_File: str
+    Exec_Source_Log_Pos: int
     Retrieved_Gtid_Set: str
-    Slave_IO_Running: Literal["Yes", "No"]
-    Slave_SQL_Running: Literal["Yes", "No"]
-    Slave_SQL_Running_State: str
+    Replica_IO_Running: Literal["Yes", "No"]
+    Replica_SQL_Running: Literal["Yes", "No"]
+    Replica_SQL_Running_State: str
 
 
-def get_slave_status(cursor) -> Optional[SlaveStatus]:
-    """Retrieve the slave status
+def get_replica_status(cursor) -> Optional[ReplicaStatus]:
+    """Retrieve the replica status
 
     replica_status can be none if RESET REPLICA has been performed or if the replica never was running.
     """
-    cursor.execute("SHOW SLAVE STATUS")
+    cursor.execute("SHOW REPLICA STATUS")
     return cursor.fetchone()
 
 
-def restart_unexpected_dead_sql_thread(cursor, slave_status, stats, log):
-    if slave_status["Last_SQL_Error"]:
+def restart_unexpected_dead_sql_thread(cursor, replica_status, stats, log):
+    if replica_status["Last_SQL_Error"]:
         log.warning(
-            "SQL Thread died, running 'START SLAVE SQL_THREAD'. Last reported error at %s: %d: %s",
-            slave_status["Last_SQL_Error_Timestamp"],
-            slave_status["Last_SQL_Errno"],
-            slave_status["Last_SQL_Error"],
+            "SQL Thread died, running 'START REPLICA SQL_THREAD'. Last reported error at %s: %d: %s",
+            replica_status["Last_SQL_Error_Timestamp"],
+            replica_status["Last_SQL_Errno"],
+            replica_status["Last_SQL_Error"],
         )
     else:
-        log.warning("Expected SQL thread to be running but it isn't. Running 'START SLAVE SQL_THREAD'")
-    stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": slave_status["Last_SQL_Errno"]})
-    cursor.execute("START SLAVE SQL_THREAD")
+        log.warning("Expected SQL thread to be running but it isn't. Running 'START REPLICA SQL_THREAD'")
+    stats.increase("myhoard.unexpected_sql_thread_starts", tags={"sql.errno": replica_status["Last_SQL_Errno"]})
+    cursor.execute("START REPLICA SQL_THREAD")
 
 
-def get_xtrabackup_version() -> Tuple[int, ...]:
-    result = subprocess.run(["xtrabackup", "--version"], capture_output=True, encoding="utf-8", check=True)
+def parse_version(version: str) -> BinVersion:
+    return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(version) if len(x) > 0)
+
+
+@cache
+def get_xtrabackup_version(cmd: str | Path = "xtrabackup") -> BinVersion:
+    result = subprocess.run([str(cmd), "--version"], capture_output=True, encoding="utf-8", check=True)
     version_line = result.stderr.strip().split("\n")[-1]
-    matches = XTRABACKUP_VERSION_REGEX.match(version_line)
+    matches = XTRABACKUP_VERSION_REGEX.search(version_line)
     if matches is None:
         raise Exception(f"Cannot extract xtrabackup version number from {result.stderr!r}")
-    return tuple(int(x) for x in VERSION_SPLITTING_REGEX.split(matches[1]) if len(x) > 0)
+    return parse_version(matches[1])
+
+
+def parse_xtrabackup_info(xtrabackup_info_text: str) -> dict[str, str]:
+    result = {}
+    for line in xtrabackup_info_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            key, value = line.split("=", 1)
+        except ValueError:
+            continue
+        result[key.strip()] = value.strip()
+    return result
+
+
+def file_name_for_basebackup_split(base_file_name: str, split_nr: int) -> str:
+    # only append the split nr to splits after the first split to not have to add special cases
+    if split_nr > 1:
+        return f"{base_file_name}.{split_nr:03d}"
+    else:
+        return base_file_name
+
+
+def find_extra_xtrabackup_executables() -> list[BinInfo]:
+    raw_paths = os.environ.get("PXB_EXTRA_BIN_PATHS")
+    if not raw_paths:
+        return []
+    result = []
+    for extra_raw_path in raw_paths.split(os.pathsep):
+        extra_path = Path(extra_raw_path)
+        if extra_path.is_dir():
+            extra_path = Path(extra_path) / "xtrabackup"
+            if extra_path.exists() and extra_path.is_file():
+                pxb_version = get_xtrabackup_version(extra_path)
+                result.append(BinInfo(version=pxb_version, path=extra_path))
+    return result
+
+
+def mask_fields(data: dict, path: list[str], mask_value: str = "***MASKED***") -> dict:
+    masked_data = data.copy()
+    if len(path) < 1:
+        return masked_data
+    current_data = masked_data
+    for key in path[:-1]:
+        if key in current_data and isinstance(current_data[key], dict):
+            current_data[key] = current_data[key].copy()
+            current_data = current_data[key]
+        else:
+            return masked_data
+    key = path[-1]
+    if key in current_data:
+        current_data[key] = mask_value
+    return masked_data

@@ -2,7 +2,13 @@
 from myhoard import version
 from myhoard.controller import Controller
 from myhoard.statsd import StatsClient
-from myhoard.util import DEFAULT_XTRABACKUP_SETTINGS, detect_running_process_id, wait_for_port
+from myhoard.util import (
+    DEFAULT_XTRABACKUP_SETTINGS,
+    detect_running_process_id,
+    find_extra_xtrabackup_executables,
+    parse_dow_schedule,
+    wait_for_port,
+)
 from myhoard.web_server import WebServer
 
 import argparse
@@ -15,9 +21,10 @@ import subprocess
 import sys
 
 try:
-    from systemd import daemon  # pylint: disable=no-name-in-module
+    from systemd import daemon, journal  # pylint: disable=no-name-in-module
 except ImportError:
     daemon = None
+    journal = None
 
 
 class MyHoard:
@@ -47,6 +54,7 @@ class MyHoard:
     async def _reload_and_initialize_if_possible(self):
         if self.controller and not self.controller.is_safe_to_reload():
             self.log.info("Reload requested but controller state does not allow safe reload, postponing")
+            self._apply_safe_config_updates()
             await asyncio.sleep(self.reload_retry_interval)
             asyncio.ensure_future(self._reload_and_initialize_if_possible())
             return
@@ -80,6 +88,22 @@ class MyHoard:
 
         return 0
 
+    def _apply_safe_config_updates(self):
+        """Apply config changes that are safe to update without a full reload.
+
+        This is called when a full reload is not possible (e.g. during basebackup)
+        to ensure settings like binlog purge/retention are applied promptly.
+        """
+        try:
+            with open(self.config_file, "r") as f:
+                new_config = json.load(f)
+            new_purge_settings = new_config.get("binlog_purge_settings")
+            if new_purge_settings and new_purge_settings != self.config.get("binlog_purge_settings"):
+                self.controller.update_binlog_purge_settings(new_purge_settings)
+                self.config["binlog_purge_settings"] = new_purge_settings
+        except (OSError, ValueError) as ex:
+            self.log.warning("Failed to apply safe config updates: %r", ex)
+
     def _load_configuration(self):
         with open(self.config_file, "r") as f:
             self.config = json.load(f)
@@ -98,8 +122,19 @@ class MyHoard:
         if (ival > 1440 and ival // 1440 * 1440 != ival) or (ival < 1440 and 1440 // ival * ival != 1440):
             raise Exception("Backup interval must be 1440, multiple of 1440, or integer divisor of 1440")
 
+        incremental = backup_settings.get("incremental", {})
+        if incremental and incremental.get("enabled", False):
+            dow_schedule = incremental.get("full_backup_week_schedule")
+            if not dow_schedule:
+                raise ValueError("Incremental backups require `full_backup_week_schedule`")
+            parse_dow_schedule(dow_schedule)
+
         if self.config["http_address"] not in {"127.0.0.1", "::1", "localhost"}:
             self.log.warning("Binding to non-localhost address %r is highly discouraged", self.config["http_address"])
+
+        extra_pxb_bins = find_extra_xtrabackup_executables()
+        if extra_pxb_bins:
+            self.log.info("Found extra xtrabackup binaries: %r", extra_pxb_bins)
 
         self.log.info("Configuration loaded")
 
@@ -211,6 +246,7 @@ class MyHoard:
             stats=statsd,
             temp_dir=self.config["temporary_directory"],
             xtrabackup_settings=self.config.get("xtrabackup", DEFAULT_XTRABACKUP_SETTINGS),
+            auto_mark_backups_broken=self.config.get("restore_auto_mark_backups_broken", False),
         )
         self.controller.start()
         self.web_server = WebServer(
@@ -247,7 +283,22 @@ def main(args=None):
         print("config file path must be given with --config or via env MYHOARD_CONFIG", file=sys.stderr)
         return 1
 
-    logging.basicConfig(level=arg.log_level, format="%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s")
+    log_format = "%(asctime)s\t%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s"
+    handlers = []
+    if journal and not sys.stderr.isatty():
+        handler = journal.JournalHandler(SYSLOG_IDENTIFIER="myhoard")
+        # Log format without timestamp as journald adds it
+        log_format = "%(threadName)s\t%(name)s\t%(levelname)s\t%(message)s"
+        handler.setFormatter(logging.Formatter(log_format))
+        handlers.append(handler)
+
+    kwargs = {"level": arg.log_level}
+    if handlers:
+        kwargs["handlers"] = handlers
+    else:
+        kwargs["format"] = log_format
+
+    logging.basicConfig(**kwargs)
 
     hoard = MyHoard(arg.config)
     return hoard.run()

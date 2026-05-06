@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_statsd_client, MySQLConfig, restart_mysql
-from distutils.version import LooseVersion  # pylint:disable=deprecated-module
 from myhoard.basebackup_operation import BasebackupOperation
+from packaging.version import Version
 from typing import IO
 from unittest import SkipTest
 from unittest.mock import mock_open, patch
@@ -24,17 +24,23 @@ def test_basic_backup(mysql_master, extra_uuid):
         cursor.execute("COMMIT")
         # Insert second source_uuid into gtid_executed to test that this is parsed correctly
         if extra_uuid:
-            cursor.execute(
-                "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
-                f"VALUES ('{extra_uuid}', 1, 1)"
-            )
+            if mysql_master.version >= Version("8.1.0"):
+                cursor.execute(
+                    "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end, gtid_tag) "
+                    f"VALUES ('{extra_uuid}', 1, 1, 'myhoard')"
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
+                    f"VALUES ('{extra_uuid}', 1, 1)"
+                )
             cursor.execute("COMMIT")
 
     if extra_uuid:
         restart_mysql(mysql_master)
 
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         master_status = cursor.fetchone()
 
     # Executed_Gtid_Set has linefeeds in it but XtraBackup (8.0) strips those away, do the same here
@@ -85,7 +91,7 @@ def test_basic_backup(mysql_master, extra_uuid):
 
     # Taking basebackup might flush binary logs
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         master_status = cursor.fetchone()
 
     assert op.binlog_info
@@ -94,6 +100,30 @@ def test_basic_backup(mysql_master, extra_uuid):
 
     # Even almost empty backup is at least 1.5 megs due to standard files that are always included
     assert bytes_read[0] > 1.5 * 1024 * 1024
+
+    # Now add incremental backup
+    assert op.checkpoints_file_content is not None
+    inc_op = BasebackupOperation(
+        encryption_algorithm="AES256",
+        encryption_key=encryption_key,
+        mysql_client_params=mysql_master.connect_options,
+        mysql_config_file_name=mysql_master.config_name,
+        mysql_data_directory=mysql_master.config_options.datadir,
+        progress_callback=progress_callback,
+        stats=build_statsd_client(),
+        stream_handler=stream_handler,
+        temp_dir=mysql_master.base_dir,
+        incremental_since_checkpoint=op.checkpoints_file_content,
+    )
+    inc_op.create_backup()
+    assert inc_op.checkpoints_file_content is not None
+
+    full_backup_checkpoint = myhoard_util.parse_xtrabackup_info(op.checkpoints_file_content)
+    inc_backup_checkpoint = myhoard_util.parse_xtrabackup_info(inc_op.checkpoints_file_content)
+    assert full_backup_checkpoint["backup_type"] == "full-backuped"
+    assert inc_backup_checkpoint["backup_type"] == "incremental"
+    assert full_backup_checkpoint["from_lsn"] == "0"
+    assert full_backup_checkpoint["to_lsn"] == inc_backup_checkpoint["from_lsn"]
 
 
 def test_stream_handler_error_is_propagated(mysql_master):
@@ -139,7 +169,7 @@ def test_fails_on_invalid_params(mysql_master):
 def test_backup_with_non_optimized_tables(mysql_master: MySQLConfig) -> None:
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         version = myhoard_util.get_mysql_version(cursor)
-        if LooseVersion(version) < LooseVersion("8.0.29"):
+        if Version(version) < Version("8.0.29"):
             raise SkipTest("DB version doesn't need OPTIMIZE TABLE")
 
         def create_test_db(*, db_name: str, table_name: str, add_pk: bool) -> None:
@@ -220,18 +250,18 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
     )
     # lsn_dir is not specified
     with pytest.raises(AssertionError):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info is None
 
     op.lsn_dir = "/tmp/lsn-dir"
     with patch("builtins.open", side_effect=FileNotFoundError):
         with pytest.raises(FileNotFoundError):
-            op._process_binlog_info()  # pylint: disable=protected-access
+            op._process_xtrabackup_info()  # pylint: disable=protected-access
         assert op.binlog_info is None
 
     line = "abrakadabra"
     with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info is None
 
     line = (
@@ -239,7 +269,7 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
         "'00006582-5ce4-11ea-9748-22f28f5a4c51:1-55419,00ae3f16-75ce-11ea-9b71-7266f0f43b98:1-4104'"
     )
     with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info == {
         "file_name": "binlog.000220",
         "file_position": 236,
@@ -248,7 +278,7 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
 
     line = "binlog_pos = filename 'binlog.000221', position '238'"
     with patch("builtins.open", mock_open(read_data=BACKUP_INFO_FILE_TEMPLATE.format(binlog_line=line))):
-        op._process_binlog_info()  # pylint: disable=protected-access
+        op._process_xtrabackup_info()  # pylint: disable=protected-access
     assert op.binlog_info == {
         "file_name": "binlog.000221",
         "file_position": 238,

@@ -1,20 +1,24 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from .backup_stream import BackupStream, RemoteBinlogInfo
+from .backup_stream import BackupStream, IncrementalBackupInfo, RemoteBinlogInfo
 from .binlog_scanner import BinlogScanner
 from .errors import BadRequest, UnknownBackupSite
 from .restore_coordinator import BinlogStream, RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
     are_gtids_in_executed_set,
-    change_master_to,
+    change_replication_source_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
-    get_slave_status,
+    get_replica_status,
+    get_xtrabackup_version,
     GtidExecuted,
     GtidRangeDict,
     make_gtid_range_string,
+    mask_fields,
     mysql_cursor,
+    parse_dow_schedule,
     parse_fs_metadata,
+    parse_version,
     RateTracker,
     relay_log_name,
     restart_unexpected_dead_sql_thread,
@@ -48,6 +52,9 @@ ERR_BACKUP_IN_PROGRESS = 4085
 
 class BaseBackup(TypedDict):
     end_ts: float
+    checkpoints_file_content: str | None
+    incremental: bool
+    tool_version: str | None
 
 
 class Backup(TypedDict):
@@ -65,12 +72,14 @@ class Backup(TypedDict):
 class BackupRequest(TypedDict):
     backup_reason: BackupStream.BackupReason
     normalized_backup_time: str
+    incremental_requested: bool
 
 
 class BackupSiteInfo(TypedDict):
     recovery_only: bool
     object_storage: Dict[str, str]
     encryption_keys: Dict[str, str]
+    split_size: Optional[int]
 
 
 class RestoreOptions(TypedDict):
@@ -83,12 +92,12 @@ class RestoreOptions(TypedDict):
     target_time_approximate_ok: bool
 
 
-def sort_completed_backups(backups: List[Backup]) -> List[Backup]:
+def sort_completed_backups(backups: List[Backup], reverse: bool = False) -> List[Backup]:
     def key(backup):
         assert backup["completed_at"] is not None
         return backup["completed_at"]
 
-    return sorted((backup for backup in backups if backup["completed_at"]), key=key)
+    return sorted((backup for backup in backups if backup["completed_at"]), key=key, reverse=reverse)
 
 
 class Controller(threading.Thread):
@@ -158,9 +167,11 @@ class Controller(threading.Thread):
         temp_dir,
         restore_free_memory_percentage=None,
         xtrabackup_settings: Dict[str, int],
+        auto_mark_backups_broken: bool = False,
     ):
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
+        self.auto_mark_backups_broken = auto_mark_backups_broken
         self.backup_refresh_interval_base = self.BACKUP_REFRESH_INTERVAL_BASE
         self.backup_settings = backup_settings
         self.backup_sites = backup_sites
@@ -251,11 +262,23 @@ class Controller(threading.Thread):
                     return False
         return True
 
+    def update_binlog_purge_settings(self, binlog_purge_settings) -> None:
+        self.log.info("Updating binlog purge settings to %r", binlog_purge_settings)
+        self.binlog_purge_settings = binlog_purge_settings
+
     def mark_backup_requested(
-        self, *, backup_reason: BackupStream.BackupReason, normalized_backup_time: Optional[str] = None
+        self,
+        *,
+        backup_reason: BackupStream.BackupReason,
+        normalized_backup_time: str | None = None,
+        incremental_requested: bool = False,
     ) -> None:
         backup_time: str = normalized_backup_time or self._current_normalized_backup_timestamp()
-        new_request: BackupRequest = {"backup_reason": backup_reason, "normalized_backup_time": backup_time}
+        new_request: BackupRequest = {
+            "backup_reason": backup_reason,
+            "normalized_backup_time": backup_time,
+            "incremental_requested": incremental_requested,
+        }
         with self.lock:
             if self.state["backup_request"]:
                 old_request: BackupRequest = self.state["backup_request"]
@@ -459,7 +482,7 @@ class Controller(threading.Thread):
                 self.log.info("Requested switch to observe mode but currently mode is already that")
                 return
             elif self.mode in {self.Mode.active, self.Mode.promote}:
-                # Master (or almost master) cannot become a standby
+                # Primary (or almost primary) cannot become a standby
                 raise ValueError(f"Switch from {self.mode.value} to observe mode is not allowed")
             elif self.mode == self.Mode.restore:
                 self._fail_if_restore_is_not_complete()
@@ -586,10 +609,14 @@ class Controller(threading.Thread):
                 closed_info = {}
                 completed_info = {}
                 preserved_info = {}
+                last_split_seen = 0
                 for info in file_storage.list_iter(site_and_stream_id):
                     file_name = info["name"].rsplit("/", 1)[-1]
                     if file_name == "basebackup.xbstream":
                         basebackup_compressed_size = info["size"]
+                    elif file_name.startswith("basebackup.xbstream."):
+                        split_nr = int(file_name.rsplit(".", 1)[-1])
+                        last_split_seen = max(split_nr, last_split_seen)
                     elif file_name == "basebackup.json":
                         # The basebackup info json contents never change after creation so we can use cached
                         # value if available to avoid re-fetching the same content over and over again
@@ -608,8 +635,18 @@ class Controller(threading.Thread):
                         preserved_info = parse_fs_metadata(info["metadata"])
 
                 if basebackup_info and basebackup_compressed_size:
+                    # we're storing the info in the basebackup.json, only use the on-storage size as a fallback
+                    # in case we have a split upload
+                    basebackup_compressed_size = basebackup_info.get("compressed_size", basebackup_compressed_size)
                     basebackup_info = dict(basebackup_info, compressed_size=basebackup_compressed_size)
-                resumable = basebackup_info and basebackup_compressed_size
+                all_splits_accounted_for = False
+                if basebackup_info:
+                    number_of_splits = basebackup_info.get("number_of_splits", 1)
+                    if number_of_splits > 1:
+                        all_splits_accounted_for = number_of_splits == last_split_seen
+                    else:
+                        all_splits_accounted_for = True
+                resumable = basebackup_info and basebackup_compressed_size and all_splits_accounted_for
                 completed = resumable and completed_info
                 closed = completed and closed_info
 
@@ -636,31 +673,32 @@ class Controller(threading.Thread):
 
         expected_ranges: List[GtidRangeDict] = []
         with mysql_cursor(**self.mysql_client_params) as cursor:
-            # Stop IO and SQL slaves so that we can flush relay logs and retain the old log files. This allows
+            # Stop IO and SQL replicas so that we can flush relay logs and retain the old log files. This allows
             # us to replace the empty files with ones that have actual content and make the SQL thread apply
             # them. Same as with regular restoration.
-            cursor.execute("STOP SLAVE")
-            # Get current slave status so that we know which relay logs to reuse
-            slave_status = get_slave_status(cursor)
-            if not slave_status:
+            cursor.execute("STOP REPLICA")
+            # Get current replica status so that we know which relay logs to reuse
+            replica_status = get_replica_status(cursor)
+            if not replica_status:
                 first_name = None
             else:
-                first_name = slave_status["Relay_Log_File"]
+                first_name = replica_status["Relay_Log_File"]
             if not first_name:
                 first_name = "relay.000001"
             if not self.state["promote_details"].get("relay_index_updated"):
                 first_index = int(first_name.split(".")[-1])
                 if first_index == 1 and (
-                    not slave_status
+                    not replica_status
                     or (
-                        not slave_status["Relay_Master_Log_File"]
-                        and not slave_status["Exec_Master_Log_Pos"]
-                        and not slave_status["Retrieved_Gtid_Set"]
+                        not replica_status["Relay_Source_Log_File"]
+                        and not replica_status["Exec_Source_Log_Pos"]
+                        and not replica_status["Retrieved_Gtid_Set"]
                     )
                 ):
-                    # FLUSH RELAY LOGS does nothing if RESET SLAVE has been called since last call to CHANGE MASTER TO
+                    # FLUSH RELAY LOGS does nothing if RESET REPLICA has been called since last call to
+                    # CHANGE REPLICATION SOURCE TO
                     self.log.info(
-                        "Slave status is empty, assuming RESET SLAVE has been executed and writing relay index manually"
+                        "Replica status is empty, assuming RESET REPLICA has been executed and writing relay index manually"
                     )
                     with open(self.mysql_relay_log_index_file, "wb") as index_file:
                         names = [self._relay_log_name(index=i + 1, full_path=False) for i in range(len(to_apply))]
@@ -690,15 +728,16 @@ class Controller(threading.Thread):
                     }
                 )
             # Make SQL thread replay relay logs starting from where we have replaced empty / old logs with
-            # new ones that have actual valid binlogs from previous master
+            # new ones that have actual valid binlogs from previous primary
             options = {
-                "MASTER_AUTO_POSITION": 0,
-                "MASTER_HOST": "dummy",
+                "SOURCE_AUTO_POSITION": 0,
+                "SOURCE_HOST": "dummy",
+                "PRIVILEGE_CHECKS_USER": None,
                 "RELAY_LOG_FILE": first_name,
                 "RELAY_LOG_POS": 4,
             }
-            change_master_to(cursor=cursor, options=options)
-            cursor.execute("START SLAVE SQL_THREAD")
+            change_replication_source_to(cursor=cursor, options=options)
+            cursor.execute("START REPLICA SQL_THREAD")
             expected_file = self._relay_log_name(index=first_index + len(to_apply), full_path=False)
             expected_ranges_str = make_gtid_range_string(expected_ranges)
             self.log.info(
@@ -760,6 +799,7 @@ class Controller(threading.Thread):
             stream_id=stream_id,
             temp_dir=self.temp_dir,
             xtrabackup_settings=self.xtrabackup_settings,
+            split_size=backup_site.get("split_size", 0),
         )
 
     def _delete_backup_stream_state(self, stream_id):
@@ -788,16 +828,16 @@ class Controller(threading.Thread):
         expected_ranges = self.state["promote_details"].get("expected_ranges")
 
         with mysql_cursor(**self.mysql_client_params) as cursor:
-            slave_status = get_slave_status(cursor)
-            if not slave_status:
+            replica_status = get_replica_status(cursor)
+            if not replica_status:
                 self.log.info(
-                    "Slave status is empty, assuming RESET SLAVE has been executed and writing relay index manually"
+                    "Replica status is empty, assuming RESET REPLICA has been executed and writing relay index manually"
                 )
                 current_file = None
                 sql_thread_running = "No"
             else:
-                current_file = slave_status["Relay_Log_File"]
-                sql_thread_running = slave_status["Slave_SQL_Running"]
+                current_file = replica_status["Relay_Log_File"]
+                sql_thread_running = replica_status["Replica_SQL_Running"]
             reached_target = True
             if current_file != expected_file:
                 reached_target = False
@@ -810,11 +850,11 @@ class Controller(threading.Thread):
                     self.log.warning("Promotion target state not reached but forced promotion requested")
                 else:
                     if sql_thread_running != "Yes":
-                        restart_unexpected_dead_sql_thread(cursor, slave_status, self.stats, self.log)
+                        restart_unexpected_dead_sql_thread(cursor, replica_status, self.stats, self.log)
                     return
             else:
                 self.log.info("Expected relay log (%r) and GTIDs reached (%r)", expected_file, expected_ranges)
-            cursor.execute("STOP SLAVE")
+            cursor.execute("STOP REPLICA")
             promote_details: dict = {
                 **self.state["promote_details"],
                 "binlogs_applying": [],
@@ -835,9 +875,13 @@ class Controller(threading.Thread):
         with self.lock:
             if self.state["backup_request"]:
                 request: BackupRequest = self.state["backup_request"]
+                incremental_backup_info = None
+                if request["incremental_requested"]:  # pylint: disable=unsubscriptable-object
+                    incremental_backup_info = self.get_incremental_backup_info()
                 self._start_new_backup(
                     backup_reason=request["backup_reason"],  # pylint: disable=unsubscriptable-object
                     normalized_backup_time=request["normalized_backup_time"],  # pylint: disable=unsubscriptable-object
+                    incremental_backup_info=incremental_backup_info,
                 )
 
     def _create_restore_coordinator_if_missing(self):
@@ -848,6 +892,7 @@ class Controller(threading.Thread):
         backup_site = self._lookup_backup_site(options["site"])
         storage_config = backup_site["object_storage"]
         self.log.info("Creating new restore coordinator")
+        # TODO site change triggers full backup
         self.restore_coordinator = RestoreCoordinator(
             binlog_streams=options["binlog_streams"],
             file_storage_config=storage_config,
@@ -869,6 +914,7 @@ class Controller(threading.Thread):
             target_time=options["target_time"],
             target_time_approximate_ok=options["target_time_approximate_ok"],
             temp_dir=self.temp_dir,
+            auto_mark_backups_broken=self.auto_mark_backups_broken,
         )
         if not self.restore_coordinator.is_complete():
             self.log.info("Starting restore coordinator")
@@ -967,7 +1013,7 @@ class Controller(threading.Thread):
         )
 
     def _download_unapplied_remote_binlogs(self):
-        """Download any binlogs that master has uploaded to file storage but we haven't applied.
+        """Download any binlogs that primary has uploaded to file storage but we haven't applied.
         In normal situation there shouldn't be any and in abnormal situation there should only be
         one or two so don't bother with any multiprocess complexity."""
         # Make a copy in case the array gets modified
@@ -1014,10 +1060,10 @@ class Controller(threading.Thread):
     def _extend_binlog_stream_list(self):
         """If we're currently restoring a backup to most recent point in time, checks for new available
         backup streams and if there is one adds that to the list of streams from which to apply binlogs.
-        The reasoning for this logic is that if restoring binary logs takes a long time the current master
+        The reasoning for this logic is that if restoring binary logs takes a long time the current primary
         could fail while we're restoring data but before failing it could've created new backup stream and
         uploaded some files there but not in the backup we're restoring, causing data loss when this node
-        gets promoted after backup restoration completes and there's no available master."""
+        gets promoted after backup restoration completes and there's no available primary."""
         assert self.restore_coordinator is not None
         if not self.restore_coordinator.can_add_binlog_streams():
             return
@@ -1062,20 +1108,23 @@ class Controller(threading.Thread):
             cursor.execute("SELECT @@GLOBAL.read_only AS read_only")
             if not cursor.fetchone()["read_only"]:
                 raise Exception("System expected to be in read-only mode but isn't")
-            info = get_slave_status(cursor)
+            info = get_replica_status(cursor)
             if info is None:
-                # None happens if RESET SLAVE has been performed or if the slave never was running, e.g.
+                # None happens if RESET REPLICA has been performed or if the replica never was running, e.g.
                 # because there were no binary logs to restore.
-                self.log.warning("SHOW SLAVE STATUS returned no results.")
+                self.log.warning("SHOW REPLICA STATUS returned no results.")
                 return
-            if info["Slave_IO_Running"] == "Yes":
-                raise Exception("Slave IO thread expected to be stopped but is running")
-            if info["Slave_SQL_Running"] == "Yes":
+            if info["Replica_IO_Running"] == "Yes":
+                raise Exception("Replica IO thread expected to be stopped but is running")
+            if info["Replica_SQL_Running"] == "Yes":
                 if not re.match(
-                    "(Slave|Replica) has read all relay log; waiting for more updates", info["Slave_SQL_Running_State"]
+                    "(Slave|Replica) has read all relay log; waiting for more updates", info["Replica_SQL_Running_State"]
                 ):
-                    raise Exception("Expected SQL thread to be stopped or finished processing updates")
-                cursor.execute("STOP SLAVE SQL_THREAD")
+                    raise Exception(
+                        "Expected SQL thread to be stopped or finished processing updates, "
+                        f'actual Replica_SQL_Running_State: {info["Replica_SQL_Running_State"]}'
+                    )
+                cursor.execute("STOP REPLICA SQL_THREAD")
 
     def _fail_if_restore_is_not_complete(self):
         if not self.restore_coordinator:
@@ -1114,7 +1163,7 @@ class Controller(threading.Thread):
     def _get_site_for_stream_id(self, stream_id: str):
         backup = self.get_backup_by_stream_id(stream_id)
         if not backup:
-            KeyError(f"Stream {stream_id} not found in backups")
+            raise KeyError(f"Stream {stream_id} not found in backups")
         return backup["site"]
 
     def get_backup_by_stream_id(self, stream_id: str):
@@ -1166,10 +1215,10 @@ class Controller(threading.Thread):
     def _handle_mode_promote(self):
         self._refresh_backups_list_and_streams()
 
-        # It is possible to have a netsplit where clients can talk to old master and old master
+        # It is possible to have a netsplit where clients can talk to old primary and old primary
         # can talk to file storage but it cannot talk to standby and other decision making nodes
         # so it gets replaced. In such a situation we want to manually apply any binlogs the old
-        # master has managed to upload to storage before making this node applicable for actual
+        # primary has managed to upload to storage before making this node applicable for actual
         # promotion.
 
         if self._prepare_streams_for_promotion() == len(self.backup_streams):
@@ -1201,14 +1250,15 @@ class Controller(threading.Thread):
         if self.state["server_uuid"] is None and self.restore_coordinator.server_uuid:
             self.state_manager.update_state(server_uuid=self.restore_coordinator.server_uuid)
         # Need to purge binlogs also during restoration because generating binlogs from relay logs should be enabled
-        # also during restoration. The binlogs created during restoration could be required e.g. if an old master has
-        # managed to upload binlogs that have not been replicated to a read replica; when the old master gets replaced
+        # also during restoration. The binlogs created during restoration could be required e.g. if an old primary has
+        # managed to upload binlogs that have not been replicated to a read replica; when the old primary gets replaced
         # read replica connects to the new server and must be able to download missing binlogs from there
         self._purge_old_binlogs(mysql_maybe_not_running=True)
         self._process_local_binlog_updates()
         self._extend_binlog_stream_list()
         if self.restore_coordinator.phase is RestoreCoordinator.Phase.failed_basebackup:
-            self._mark_failed_restore_backup_as_broken()
+            if self.restore_coordinator.should_mark_backup_as_broken():
+                self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
         if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():
             self.state_manager.update_state(
@@ -1230,6 +1280,71 @@ class Controller(threading.Thread):
             )
 
         self._build_backup_stream(broken_backup).mark_as_broken()
+
+    def _should_schedule_incremental_backup(self) -> bool:
+        incremental_settings = self.backup_settings.get("incremental", {})
+        if not incremental_settings.get("enabled", False):
+            self.log.info("Incremental backup is disabled in configuration")
+            return False
+
+        dow_idx = datetime.datetime.now(datetime.timezone.utc).weekday()
+        dow_schedule = incremental_settings.get("full_backup_week_schedule")
+        if dow_idx not in parse_dow_schedule(dow_schedule):
+            self.log.info("Incremental backup should be scheduled (day: %r)", dow_idx)
+            return True
+
+        self.log.info("Full backup should be scheduled (day: %r)", dow_idx)
+        return False
+
+    def get_incremental_backup_info(self) -> IncrementalBackupInfo | None:
+        """
+        Incremental backup is possible when all the backups starting from the recent full backup have checkpoints stored
+        """
+        self.log.warning("Determining if incremental backup is possible")
+
+        backups = sort_completed_backups(self.state["backups"], reverse=True)
+        if not backups:
+            self.log.warning("Incremental is not possible - no previous backups found")
+            return None
+
+        required_streams: List[str] = []
+        latest_backup = backups[0]
+        last_backup_tool_version = latest_backup["basebackup_info"].get("tool_version")
+
+        if not last_backup_tool_version:
+            self.log.warning("Incremental backup is not possible - PBX version of the previous backup is not provided")
+            return None
+        if parse_version(last_backup_tool_version) != get_xtrabackup_version():
+            self.log.warning(
+                "Incremental backup is not possible - PBX version of the previous backup does not match"
+                " the current version (%r != %r)",
+                last_backup_tool_version,
+                get_xtrabackup_version(),
+            )
+            return None
+
+        for backup in backups:
+            if backup.get("broken_at"):
+                self.log.warning("Incremental backup is not possible - found broken backup %r", backup["stream_id"])
+                return None
+            if not backup["basebackup_info"].get("checkpoints_file_content"):
+                self.log.warning(
+                    "Incremental backup is not possible - backup %r does not have a checkpoint", backup["stream_id"]
+                )
+                return None
+
+            required_streams.append(backup["stream_id"])
+
+            if not backup["basebackup_info"].get("incremental"):
+                self.log.info("Incremental backup requirements are met.")
+                return IncrementalBackupInfo(
+                    last_checkpoint=latest_backup["basebackup_info"]["checkpoints_file_content"],
+                    required_streams=list(reversed(required_streams)),
+                )
+
+        self.log.warning("Incremental is not possible - could not find full backup")
+
+        return None
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         normalized_backup_time = self._current_normalized_backup_timestamp()
@@ -1256,13 +1371,20 @@ class Controller(threading.Thread):
             )
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
+            incremental_requested = self._should_schedule_incremental_backup()
+            if incremental_requested:
+                self.log.info("Incremental backup is scheduled, it might fallback later to full if not possible to execute")
+
             self.log.info(
-                "New normalized time %r differs from previous %r, adding new backup request",
+                "New normalized time %r differs from previous %r, adding new backup request (incremental_requested: %r)",
                 normalized_backup_time,
                 last_normalized_backup_time,
+                incremental_requested,
             )
             self.mark_backup_requested(
-                backup_reason=BackupStream.BackupReason.scheduled, normalized_backup_time=normalized_backup_time
+                backup_reason=BackupStream.BackupReason.scheduled,
+                normalized_backup_time=normalized_backup_time,
+                incremental_requested=incremental_requested,
             )
 
     def _prepare_streams_for_promotion(self):
@@ -1293,67 +1415,143 @@ class Controller(threading.Thread):
             for stream in self.backup_streams:
                 stream.remove_binlogs(binlogs)
 
-    def _purge_old_backups(self):
-        purgeable = [backup for backup in self.state["backups"] if backup["completed_at"] and not backup["recovery_site"]]
-        broken_backups_count = sum(backup["broken_at"] is not None for backup in purgeable)
-        # do not consider broken backups for the count, they will still be purged
-        # but we should only purge when the count of non-broken backups has exceeded the limit.
-        non_broken_backups_count = len(purgeable) - broken_backups_count
+    @staticmethod
+    def count_non_broken_backups(backups: list) -> int:
+        # Every broken full or incremental backup makes the following incremental backups broken
+        sorted_backups = sort_completed_backups(backups)
+        count = len(backups)
+        idx = 0
+        while idx < len(backups):
+            if sorted_backups[idx]["broken_at"] is not None:
+                count -= 1
+                while idx < len(backups) - 1 and sorted_backups[idx + 1]["basebackup_info"].get("incremental"):
+                    count -= 1
+                    idx += 1
+            idx += 1
+        return count
 
-        if non_broken_backups_count <= self.backup_settings["backup_count_max"] < len(purgeable):
-            self.log.info(
-                "Backup count %s is above max allowed, but %s are broken, not dropping",
-                len(purgeable),
-                broken_backups_count,
-            )
-            return
+    @enum.unique
+    class NoPurgeReason(str, enum.Enum):
+        no_completed_backups = "no_completed_backups"
+        within_max_amount = "within_max_amount"
+        min_amount_required = "min_amount_required"
+        non_closed_backup = "non_closed_backup"
+        preserved_backup = "preserved_backup"
+        required_backup_within_retention = "required_backup_within_retention"
+        requirements_not_met = "requirements_not_met"
+        active_backup = "active_backup"
 
-        if non_broken_backups_count <= self.backup_settings["backup_count_min"]:
-            return
+    def _get_backup_to_purge(self) -> Backup | NoPurgeReason:
+        completed_backups = sort_completed_backups(
+            [backup for backup in self.state["backups"] if not backup["recovery_site"]]
+        )
+        if not completed_backups:
+            return Controller.NoPurgeReason.no_completed_backups
 
         # For simplicity only ever drop one backup here. This function
         # is called repeatedly so if there are for any reason more backups
         # to drop they will be dropped soon enough
-        purgeable = sort_completed_backups(purgeable)
-        backup = purgeable[0]
+        backup = completed_backups[0]
 
-        if not backup["closed_at"]:
-            return
+        def is_backup_incremental(b: Backup) -> bool:
+            return b["basebackup_info"].get("incremental", False)
 
-        # do not purge backup if its preserved
+        # If the first backup is incremental, it's useless without a preceding full backup, so drop it
+        if is_backup_incremental(backup):
+            return backup
+
+        # Do not consider broken backups for the count, they will still be purged,
+        # but we should only purge when the count of non-broken backups has exceeded the limit.
+        non_broken_backups_count = Controller.count_non_broken_backups(completed_backups)
+        if non_broken_backups_count <= self.backup_settings["backup_count_max"] < len(completed_backups):
+            broken_backups_count = len(completed_backups) - non_broken_backups_count
+            self.log.info(
+                "Backup count %s is above max allowed, but excluding broken amount %s, still not more than max,"
+                " not dropping",
+                len(completed_backups),
+                broken_backups_count,
+            )
+            return Controller.NoPurgeReason.within_max_amount
+
+        # Create a list of incremental and dependant backups, they are interconnected and needed for later checks
+        incremental_backups = []
+        for b in completed_backups[1:]:
+            if not is_backup_incremental(b):
+                break
+            incremental_backups.append(b)
+
+        dependant_backups = [backup] + incremental_backups
+        # We should always keep min amount of backups, check if that works if we drop this and potentially following
+        # incremental backups
+        if (
+            non_broken_backups_count - Controller.count_non_broken_backups(dependant_backups)
+            < self.backup_settings["backup_count_min"]
+        ):
+            return Controller.NoPurgeReason.min_amount_required
+
+        # Keep the backup if any of the interdependent backups is not closed
+        if any(not b["closed_at"] for b in dependant_backups):
+            return Controller.NoPurgeReason.non_closed_backup
+
+        # Keep the backup if any of the interdependent backups is preserved
         preserve_until = backup["preserve_until"]
-        if preserve_until and datetime.datetime.now(datetime.timezone.utc) < datetime.datetime.fromisoformat(preserve_until):
-            return
+        for b in dependant_backups:
+            values = [i for i in [preserve_until, b["preserve_until"]] if i is not None]
+            preserve_until = max(values) if values else None
 
-        if time.time() > backup["closed_at"] + self.backup_settings["backup_age_days_max"] * 24 * 60 * 60:
-            self.log.info("Backup %r is older than max backup age, dropping it", backup["stream_id"])
+        if preserve_until and datetime.datetime.now(datetime.timezone.utc) < datetime.datetime.fromisoformat(preserve_until):
+            self.log.info("Not purging backup %r one of the dependant backups or itself is preserved", backup["stream_id"])
+            return Controller.NoPurgeReason.preserved_backup
+
+        time_now = time.time()
+        backup_age_max_seconds = self.backup_settings["backup_age_days_max"] * 24 * 60 * 60
+
+        if time_now > backup["closed_at"] + backup_age_max_seconds:
+            # Don't purge this full backup if there are incremental backups within retention requiring this one
+            if any(time_now <= b["closed_at"] + backup_age_max_seconds for b in incremental_backups):
+                self.log.info(
+                    "Not purging old backup %r, because following incremental backup depends on it", backup["stream_id"]
+                )
+                return Controller.NoPurgeReason.required_backup_within_retention
+
+            self.log.info("Backup %r is older than max backup age", backup["stream_id"])
         elif non_broken_backups_count > self.backup_settings["backup_count_max"]:
             self.log.info(
-                "Non-broken backup count %s is above max allowed, dropping %r", non_broken_backups_count, backup["stream_id"]
+                "Non-broken backup count %s is above max allowed",
+                non_broken_backups_count,
             )
+            return backup
         else:
-            return
+            return Controller.NoPurgeReason.requirements_not_met
 
         # This shouldn't happen but better not drop backup that is active
-        if any(stream.stream_id == backup["stream_id"] for stream in self.backup_streams):
-            self.log.warning("Backup %r to drop is one of active streams, not dropping", backup["stream_id"])
-            return
+        if not {b["stream_id"] for b in dependant_backups}.isdisjoint({stream.stream_id for stream in self.backup_streams}):
+            self.log.warning(
+                "Backup %r (or dependant one) to drop is one of active streams, not dropping", backup["stream_id"]
+            )
+            return Controller.NoPurgeReason.active_backup
 
-        with self.lock:
-            self.state_manager.update_state(stream_to_be_purged=backup["stream_id"])
+        return backup
 
-        self._build_backup_stream(backup).remove()
-        # lock the controller, this way other requests do not access backups till backup is purged
-        with self.lock:
-            self.state_manager.update_state(stream_to_be_purged=None)
-            current_backups = [
-                current_backup
-                for current_backup in self.state["backups"]
-                if current_backup["stream_id"] != backup["stream_id"]
-            ]
-            self.state_manager.update_state(backups=current_backups)
-            owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
-            self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
+    def _purge_old_backups(self) -> None:
+        while not isinstance(backup := self._get_backup_to_purge(), Controller.NoPurgeReason):
+            self.log.info("Purging old backup %r", backup["stream_id"])
+
+            with self.lock:
+                self.state_manager.update_state(stream_to_be_purged=backup["stream_id"])
+
+            self._build_backup_stream(backup).remove()
+            # lock the controller, this way other requests do not access backups till backup is purged
+            with self.lock:
+                self.state_manager.update_state(stream_to_be_purged=None)
+                current_backups = [
+                    current_backup
+                    for current_backup in self.state["backups"]
+                    if current_backup["stream_id"] != backup["stream_id"]
+                ]
+                self.state_manager.update_state(backups=current_backups)
+                owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
+                self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
 
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
@@ -1366,7 +1564,7 @@ class Controller(threading.Thread):
         exclude_uuid = None
         if self.mode != self.Mode.active:
             # If this node is not in active mode disregard any GTIDs with our server UUID when checking whether
-            # something has been backed up; anything from us cannot be backed up because we're not the master.
+            # something has been backed up; anything from us cannot be backed up because we're not the primary.
             # Typically there shouldn't be any changes from us either but certain MySQL operations could cause
             # GTID executed to be updated even though no actual changes in database contents are made, which
             # would result in inability to ever purge binlogs because they have GTIDs that other nodes and backups
@@ -1474,9 +1672,9 @@ class Controller(threading.Thread):
             self.state_manager.update_state(backups=backups, backups_fetched_at=time.time())
         return backups
 
-    def _stream_for_backup_initiated_by_old_master(self, stream: BackupStream) -> bool:
-        """If we are master, then any observe streams that we see are assumed to be
-        for backups initiated by an old master while the current node was getting promoted."""
+    def _stream_for_backup_initiated_by_old_primary(self, stream: BackupStream) -> bool:
+        """If we are primary, then any observe streams that we see are assumed to be
+        for backups initiated by an old primary while the current node was getting promoted."""
         return self.mode == self.Mode.active and stream.mode == BackupStream.Mode.observe
 
     def _handle_pending_preservation_requests(self) -> None:
@@ -1541,12 +1739,13 @@ class Controller(threading.Thread):
                             self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
                     stream.join()
                 elif stream.mode != BackupStream.Mode.observe or (
-                    not stream.state["closed_info"] and not self._stream_for_backup_initiated_by_old_master(stream=stream)
+                    not stream.state["closed_info"] and not self._stream_for_backup_initiated_by_old_primary(stream=stream)
                 ):
                     new_streams[stream_id] = stream
             elif backup["resumable"] and not backup["closed_at"]:
                 self.log.info("Starting resumable non-closed stream %r", stream_id)
                 new_stream = self._build_backup_stream(backup)
+                self.stats.increase("myhoard.backup_started", tags={"resumed": "true"})
                 new_stream.start()
                 new_streams[stream_id] = new_stream
             elif not backup["resumable"] and stream_id in self.state["owned_stream_ids"]:
@@ -1707,7 +1906,13 @@ class Controller(threading.Thread):
 
         return True
 
-    def _start_new_backup(self, *, backup_reason: BackupStream.BackupReason, normalized_backup_time: str) -> None:
+    def _start_new_backup(
+        self,
+        *,
+        backup_reason: BackupStream.BackupReason,
+        normalized_backup_time: str,
+        incremental_backup_info: IncrementalBackupInfo | None = None,
+    ) -> None:
         stream_id = BackupStream.new_stream_id()
         site_id, backup_site = self._get_upload_backup_site()
         stream = BackupStream(
@@ -1733,12 +1938,15 @@ class Controller(threading.Thread):
             stream_id=stream_id,
             temp_dir=self.temp_dir,
             xtrabackup_settings=self.xtrabackup_settings,
+            split_size=backup_site.get("split_size", 0),
+            incremental_backup_info=incremental_backup_info,
         )
         self.backup_streams.append(stream)
         self.state_manager.update_state(
             backup_request=None,
             owned_stream_ids=self.state["owned_stream_ids"] + [stream_id],
         )
+        self.stats.increase("myhoard.backup_started", tags={"resumed": "false"})
         stream.start()
 
     def _state_file_from_stream_id(self, stream_id):
@@ -1767,7 +1975,10 @@ class Controller(threading.Thread):
 
         assert self.restore_coordinator is not None
         if earlier_backup:
-            self.log.info("Earlier backup %r is available, restoring basebackup from that", earlier_backup)
+            self.log.info(
+                "Earlier backup %r is available, restoring basebackup from that",
+                mask_fields(earlier_backup, ["basebackup_info", "encryption_key"]),
+            )
             options = self.state["restore_options"]
             self.restore_coordinator.stop()
             self.state_manager.update_state(
@@ -1902,13 +2113,13 @@ class Controller(threading.Thread):
                 stream.mark_as_closed()
                 expected_closed.append(stream)
 
-        # If we are master, then any observe streams that we see are assumed to be for backups initiated
-        # by an old master while the current node was getting promoted, so we mark them as closed.
+        # If we are primary, then any observe streams that we see are assumed to be for backups initiated
+        # by an old primary while the current node was getting promoted, so we mark them as closed.
         if self.mode == self.Mode.active:
             observe_streams = [stream for stream in self.backup_streams if stream.mode == BackupStream.Mode.observe]
             for stream in observe_streams:
                 self.log.warning(
-                    "Stream %r is for a backup initiated by an old master, marking it as closed", stream.stream_id
+                    "Stream %r is for a backup initiated by an old primary, marking it as closed", stream.stream_id
                 )
                 stream.mark_as_closed()
                 expected_closed.append(stream)

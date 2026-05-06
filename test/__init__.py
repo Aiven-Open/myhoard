@@ -5,7 +5,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import BackupSiteInfo, Controller
 from myhoard.statsd import StatsClient
-from typing import List, Optional, Type, TypeVar
+from packaging.version import Version
+from typing import Dict, List, Optional, Type, TypeVar
 
 import asyncio
 import contextlib
@@ -36,6 +37,7 @@ class MySQLConfig:
         server_id: Optional[int] = None,
         startup_command: Optional[List[str]] = None,
         user: Optional[str] = None,
+        version: Optional[Version] = None,
     ):
         self.base_dir = base_dir
         self.config = config
@@ -48,6 +50,14 @@ class MySQLConfig:
         self.server_id = server_id
         self.startup_command = startup_command
         self.user = user
+        self.version = version
+
+    @property
+    def show_binary_logs_status_cmd(self):
+        if self.version >= Version("8.2.0"):
+            return "SHOW BINARY LOG STATUS"
+        else:
+            return "SHOW MASTER STATUS"
 
 
 T = TypeVar("T", bound="Controller")
@@ -61,6 +71,8 @@ def build_controller(
     session_tmpdir,
     state_dir: Optional[str] = None,
     temp_dir: Optional[str] = None,
+    upload_site: Optional[str] = None,
+    extra_backup_sites: Optional[Dict[str, BackupSiteInfo]] = None,
 ) -> T:
     Controller.ITERATION_SLEEP = 0.1
     Controller.BACKUP_REFRESH_INTERVAL_BASE = 0.1
@@ -73,17 +85,25 @@ def build_controller(
     temp_dir = temp_dir or os.path.abspath(os.path.join(session_tmpdir().strpath, "temp"))
     os.makedirs(temp_dir, exist_ok=True)
 
+    backup_sites = {"default": default_backup_site}
+    if extra_backup_sites:
+        backup_sites.update(extra_backup_sites)
+
+    backup_settings: Dict = {
+        "backup_age_days_max": 14,
+        "backup_count_max": 100,
+        "backup_count_min": 14,
+        "backup_hour": 3,
+        "backup_interval_minutes": 1440,
+        "backup_minute": 0,
+        "forced_binlog_rotation_interval": 300,
+    }
+    if upload_site:
+        backup_settings["upload_site"] = upload_site
+
     controller = cls(
-        backup_settings={
-            "backup_age_days_max": 14,
-            "backup_count_max": 100,
-            "backup_count_min": 14,
-            "backup_hour": 3,
-            "backup_interval_minutes": 1440,
-            "backup_minute": 0,
-            "forced_binlog_rotation_interval": 300,
-        },
-        backup_sites={"default": default_backup_site},
+        backup_settings=backup_settings,
+        backup_sites=backup_sites,
         binlog_purge_settings={
             "enabled": True,
             "min_binlog_age_before_purge": 30,
@@ -103,6 +123,7 @@ def build_controller(
         stats=build_statsd_client(),
         temp_dir=temp_dir,
         xtrabackup_settings=myhoard_util.DEFAULT_XTRABACKUP_SETTINGS,
+        auto_mark_backups_broken=True,
     )
     return controller
 
@@ -170,12 +191,12 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         print("Stopped mysqld with pid", proc.pid)
     command = mysql_config.startup_command
     if not with_binlog:
-        command = command + ["--disable-log-bin", "--skip-slave-preserve-commit-order"]
+        command = command + ["--disable-log-bin", "--skip-replica-preserve-commit-order"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
     mysql_config.proc = subprocess.Popen(command)  # pylint: disable=consider-using-with
     print("Started mysqld with pid", mysql_config.proc.pid)
-    wait_for_port(mysql_config.port, wait_time=30)
+    wait_for_port(mysql_config.port, wait_time=60)
 
 
 def port_is_listening(hostname, port, ipv6):

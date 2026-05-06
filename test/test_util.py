@@ -12,6 +12,7 @@ import os
 import pymysql
 import pytest
 import random
+import shutil
 import subprocess
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -355,8 +356,8 @@ class TestDetectRunningProcessId:
 
 def test_restart_unexpected_dead_sql_thread() -> None:
     # The thread died
-    slave_status = {
-        "Slave_SQL_Running": "No",
+    replica_status = {
+        "Replica_SQL_Running": "No",
         "Last_SQL_Error_Timestamp": "2210102 09:42:42",
         "Last_SQL_Errno": "1023",
         "Last_SQL_Error": "Ran out of memory",
@@ -364,13 +365,13 @@ def test_restart_unexpected_dead_sql_thread() -> None:
     mock_stats = Mock()
     mock_logger = Mock()
     mock_cursor = Mock()
-    myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, slave_status, mock_stats, mock_logger)
+    myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, replica_status, mock_stats, mock_logger)
     assert mock_stats.increase.call_args.args == ("myhoard.unexpected_sql_thread_starts",)
-    assert mock_cursor.execute.call_args.args == ("START SLAVE SQL_THREAD",)
+    assert mock_cursor.execute.call_args.args == ("START REPLICA SQL_THREAD",)
 
     # It's not running, but MySQL doesn't report a reason it's died
-    slave_status = {
-        "Slave_SQL_Running": "No",
+    replica_status = {
+        "Replica_SQL_Running": "No",
         "Last_SQL_Error_Timestamp": "2210102 09:42:42",
         "Last_SQL_Errno": "0",
         "Last_SQL_Error": "",
@@ -378,11 +379,129 @@ def test_restart_unexpected_dead_sql_thread() -> None:
     mock_stats = Mock()
     mock_logger = Mock()
     mock_cursor = Mock()
-    myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, slave_status, mock_stats, mock_logger)
+    myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, replica_status, mock_stats, mock_logger)
     assert mock_stats.increase.call_args.args == ("myhoard.unexpected_sql_thread_starts",)
-    assert mock_cursor.execute.call_args.args == ("START SLAVE SQL_THREAD",)
+    assert mock_cursor.execute.call_args.args == ("START REPLICA SQL_THREAD",)
 
 
-def test_trabackup_version() -> None:
+def test_xtrabackup_version() -> None:
     version = myhoard_util.get_xtrabackup_version()
+    assert len(version) >= 3
     assert version < (99, 99, 99), "version is higher than expected"
+
+
+def test_parse_version() -> None:
+    version = myhoard_util.parse_version("8.0.35-3")
+    assert version == (8, 0, 35, 3)
+
+
+def test_parse_xtrabackup_info() -> None:
+    raw_xtrabackup_info = """
+    name =
+    tool_version = 8.0.30-23
+    server_version = 8.0.30
+    unparsable line
+    """
+    xtrabackup_info = myhoard_util.parse_xtrabackup_info(raw_xtrabackup_info)
+    assert xtrabackup_info == {
+        "name": "",
+        "tool_version": "8.0.30-23",
+        "server_version": "8.0.30",
+    }
+
+
+def test_find_extra_xtrabackup_executables() -> None:
+    bin_infos = myhoard_util.find_extra_xtrabackup_executables()
+    assert len(bin_infos) == 0
+    xtrabackup_path = shutil.which("xtrabackup")
+    assert xtrabackup_path is not None
+    xtrabackup_dir = os.path.dirname(xtrabackup_path)
+    with patch.dict(os.environ, {"PXB_EXTRA_BIN_PATHS": xtrabackup_dir}):
+        bin_infos = myhoard_util.find_extra_xtrabackup_executables()
+        assert len(bin_infos) == 1
+        assert bin_infos[0].path.name == "xtrabackup"
+        assert bin_infos[0].version >= (8, 0, 30)
+
+
+@pytest.mark.parametrize(
+    "dow_schedule,result",
+    [
+        ("abracadabra", ValueError),
+        ("", ValueError),
+        ("mon,wed", {0, 2}),
+        ("sun", {6}),
+    ],
+)
+def test_parse_dow_schedule(dow_schedule: str, result: set[int] | type) -> None:
+    if not isinstance(result, set):
+        with pytest.raises(result):
+            myhoard_util.parse_dow_schedule(dow_schedule)
+    else:
+        assert myhoard_util.parse_dow_schedule(dow_schedule) == result
+
+
+@pytest.mark.parametrize(
+    "data,path,output",
+    [
+        (
+            {
+                "basebackup_info": {
+                    "binlog_index": 3894,
+                    "encryption_key": "<PLAIN TEXT>",
+                }
+            },
+            ["basebackup_info", "encryption_key"],
+            {
+                "basebackup_info": {
+                    "binlog_index": 3894,
+                    "encryption_key": "***MASKED***",
+                }
+            },
+        ),
+        (
+            {
+                "basebackup_info": {
+                    "level2": {
+                        "binlog_index": 3894,
+                        "encryption_key": "<PLAIN TEXT>",
+                    }
+                }
+            },
+            ["basebackup_info", "level2", "encryption_key"],
+            {
+                "basebackup_info": {
+                    "level2": {
+                        "binlog_index": 3894,
+                        "encryption_key": "***MASKED***",
+                    }
+                }
+            },
+        ),
+        (
+            {
+                "basebackup_info": {
+                    "level2": {
+                        "binlog_index": 3894,
+                        "encryption_key": "<PLAIN TEXT>",
+                    }
+                }
+            },
+            ["basebackup_info", "encryption_key"],
+            {
+                "basebackup_info": {
+                    "level2": {
+                        "binlog_index": 3894,
+                        "encryption_key": "<PLAIN TEXT>",
+                    }
+                }
+            },
+        ),
+        (
+            {"encryption_key": "<PLAIN TEXT>"},
+            ["encryption_key"],
+            {"encryption_key": "***MASKED***"},
+        ),
+    ],
+)
+def test_mask_fields(data: dict, path: list[str], output: dict) -> None:
+    assert myhoard_util.mask_fields(data, path) == output

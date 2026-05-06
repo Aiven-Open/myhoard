@@ -4,6 +4,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.state_manager import StateManager
+from myhoard.util import get_xtrabackup_version
 from rohmu.object_storage.local import LocalTransfer
 from typing import Any, cast, Generic, List, Mapping, TypeVar
 from unittest.mock import Mock, patch
@@ -19,6 +20,18 @@ pytestmark = [pytest.mark.unittest, pytest.mark.all]
 def test_restore_coordinator(session_tmpdir, mysql_master, mysql_empty):
     _restore_coordinator_sequence(
         session_tmpdir, mysql_master, mysql_empty, pitr=False, rebuild_tables=False, fail_and_resume=False
+    )
+
+
+def test_restore_coordinator_with_split_basebackup(session_tmpdir, mysql_master, mysql_empty):
+    _restore_coordinator_sequence(
+        session_tmpdir,
+        mysql_master,
+        mysql_empty,
+        pitr=False,
+        rebuild_tables=False,
+        fail_and_resume=False,
+        split_size=10_000,
     )
 
 
@@ -41,7 +54,14 @@ def test_restore_coordinator_resume_rebuild_tables(session_tmpdir, mysql_master,
 
 
 def _restore_coordinator_sequence(
-    session_tmpdir, mysql_master, mysql_empty, *, pitr: bool, rebuild_tables: bool, fail_and_resume: bool
+    session_tmpdir,
+    mysql_master,
+    mysql_empty,
+    *,
+    pitr: bool,
+    rebuild_tables: bool,
+    fail_and_resume: bool,
+    split_size: int = 0,
 ):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         cursor.execute("CREATE DATABASE db1")
@@ -80,6 +100,7 @@ def _restore_coordinator_sequence(
         state_file=state_file_name1,
         stats=build_statsd_client(),
         temp_dir=mysql_master.base_dir,
+        split_size=split_size,
     )
     # Use two backup streams to test recovery mode where basebackup is restored from earlier
     # backup and binlogs are applied from several different backups
@@ -98,6 +119,7 @@ def _restore_coordinator_sequence(
         state_file=state_file_name2,
         stats=build_statsd_client(),
         temp_dir=mysql_master.base_dir,
+        split_size=split_size,
     )
 
     data_generator = DataGenerator(
@@ -210,9 +232,9 @@ def _restore_coordinator_sequence(
         time.sleep(2)
         pitr_row_count = data_generator.committed_row_count
         with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-            cursor.execute("SHOW MASTER STATUS")
+            cursor.execute(mysql_master.show_binary_logs_status_cmd)
             pitr_master_status = cursor.fetchone()
-            print(time.time(), "Master status at PITR target time", pitr_master_status)
+            print(time.time(), "Primary status at PITR target time", pitr_master_status)
         pitr_target_time = int(time.time())
         time.sleep(2)
         data_generator.generate_data_event.set()
@@ -262,9 +284,9 @@ def _restore_coordinator_sequence(
     assert bs2.state["active_details"]["phase"] == BackupStream.ActivePhase.binlog
 
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         original_master_status = cast(dict, cursor.fetchone())
-        print("Original master status", original_master_status)
+        print("Original primary status", original_master_status)
         cursor.execute("SELECT COUNT(*) AS count FROM db1.t1")
         original_count = cast(dict, cursor.fetchone())["count"]
         print("Number of rows in original master", original_count)
@@ -300,7 +322,7 @@ def _restore_coordinator_sequence(
         rsa_private_key_pem=private_key_pem,
         site="default",
         state_file=state_file_name,
-        state_manager_class=FailingStateManager if fail_and_resume else StateManager,
+        state_manager_class=FailingStateManager if fail_and_resume else StateManager,  # type: ignore[arg-type]
         stats=build_statsd_client(),
         stream_id=bs1.state["stream_id"],
         target_time=pitr_target_time,
@@ -322,6 +344,11 @@ def _restore_coordinator_sequence(
     finally:
         rc.stop()
 
+    assert rc.state["backup_xtrabackup_version"] is not None
+    assert len(rc.state["backup_xtrabackup_version"]) >= 3
+    assert get_xtrabackup_version() == rc.state["backup_xtrabackup_version"]
+    assert rc.should_mark_backup_as_broken() is False
+
     if fail_and_resume:
         assert isinstance(rc.state_manager, FailingStateManager)
         assert rc.state["restore_errors"] == 1
@@ -337,7 +364,7 @@ def _restore_coordinator_sequence(
     assert rc.state["remote_read_errors"] == 0
 
     with myhoard_util.mysql_cursor(**restored_connect_options) as cursor:
-        cursor.execute("SHOW MASTER STATUS")
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
         final_status = cast(dict, cursor.fetchone())
         print(time.time(), "Restored server's final status", final_status)
 
@@ -360,7 +387,7 @@ def _restore_coordinator_sequence(
         master_status = pitr_master_status or original_master_status
         assert (
             final_status["Executed_Gtid_Set"] == master_status["Executed_Gtid_Set"]
-        ), "final status executed_gtid_set differs from master status"
+        ), "final status executed_gtid_set differs from primary status"
         assert final_status["File"] == "bin.000001", "final status file differes from expected"
 
 
@@ -379,10 +406,10 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
     private_key_pem, _ = generate_rsa_key_pair()
 
-    slave_status_response = {"Relay_Log_File": "relay.000001", "Slave_SQL_Running_State": running_state}
+    replica_status_response = {"Relay_Log_File": "relay.000001", "Replica_SQL_Running_State": running_state}
 
     mock_cursor = Mock()
-    mock_cursor.fetchone.return_value = slave_status_response
+    mock_cursor.fetchone.return_value = replica_status_response
 
     with patch.object(RestoreCoordinator, "_mysql_cursor") as mock_mysql_cursor:
         mock_mysql_cursor.return_value.__enter__.return_value = mock_cursor
@@ -412,10 +439,105 @@ def test_empty_last_relay(running_state, session_tmpdir, mysql_master, mysql_emp
 
         rc.state["current_relay_log_target"] = 2
 
-        apply_finished, current_index = rc._check_sql_slave_status()  # pylint: disable=protected-access
+        apply_finished, current_index = rc._check_sql_replica_status()  # pylint: disable=protected-access
 
     assert apply_finished
     assert current_index == 2
+
+
+def test_should_mark_backup_as_broken(session_tmpdir):
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params="-",
+        mysql_config_file_name="-",
+        mysql_data_directory="/dev/null",
+        mysql_relay_log_index_file="/dev/null",
+        mysql_relay_log_prefix="/dev/null",
+        pending_binlogs_state_file="/dev/null",
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="/dev/null",
+        site="default",
+        state_file=os.path.join(session_tmpdir().strpath, "the_state_file.json"),
+        stats=build_statsd_client(),
+        stream_id="-",
+        target_time=None,
+        temp_dir="/dev/null",
+        auto_mark_backups_broken=True,
+    )
+    assert not rc.should_mark_backup_as_broken()
+    rc.update_state(phase=rc.Phase.failed_basebackup, backup_xtrabackup_version=None)
+    assert rc.should_mark_backup_as_broken()
+    rc.update_state(backup_xtrabackup_version=(1, 2, 3))
+    assert not rc.should_mark_backup_as_broken()
+    rc.update_state(backup_xtrabackup_version=get_xtrabackup_version())
+    assert rc.should_mark_backup_as_broken()
+
+
+def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):
+    # pylint: disable=W0212,W0108
+    restarts = []
+
+    state_file = os.path.join(session_tmpdir().strpath, "the_state_file.json")
+
+    def _register_restart(**kwargs):
+        restarts.append({**kwargs})
+
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory="",
+        mysql_relay_log_index_file="",
+        mysql_relay_log_prefix="",
+        pending_binlogs_state_file=os.path.join(session_tmpdir().strpath, "the_pending_binlog_state"),
+        rebuild_tables=True,
+        restart_mysqld_callback=lambda **kwargs: _register_restart(**kwargs),
+        rsa_private_key_pem="",
+        site="default",
+        state_file=state_file,
+        stats=build_statsd_client(),
+        stream_id="",
+        target_time="",
+        temp_dir="foo",
+    )
+
+    def _raise_on_cursor():
+        raise InjectedError()
+
+    # we're only interested what happens before querying the cursor, so just raise in that case
+    rc._mysql_cursor = lambda **kwargs: _raise_on_cursor()
+
+    assert len(restarts) == 0
+
+    # first time should restart it
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=False)
+    assert len(restarts) == 1
+
+    # restart with same parameter should not
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=False)
+    assert len(restarts) == 1
+
+    # restart with different parameters should restart it
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=True)
+    assert len(restarts) == 2
+
+    # restart with same parameter should not
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=True)
+    assert len(restarts) == 2
+
+    # restart with previous parameters should restart it again
+    with pytest.raises(InjectedError):
+        rc._ensure_mysql_server_is_started(with_gtids=True, with_binlog=False)
+    assert len(restarts) == 3
 
 
 class InjectedError(Exception):
@@ -439,3 +561,43 @@ class FailingStateManager(Generic[T], StateManager[T]):
         if not self.has_failed and kwargs.get("last_rebuilt_table") == "`db1`.`t1`":
             self.has_failed = True
             raise InjectedError()
+
+
+@pytest.mark.parametrize(
+    "basebackup_info,required_backups,expected_bytes_total",
+    [
+        [{}, [], 0],
+        [{"compressed_size": None}, [("1", {"compressed_size": None})], 0],
+        [{"compressed_size": 100}, [("1", {"compressed_size": None})], 100],
+        [{"compressed_size": 200}, [], 200],
+        [{"compressed_size": 0}, [("1", {"compressed_size": 300})], 300],
+        [{"compressed_size": 10}, [("1", {"compressed_size": 20}), ("2", {"compressed_size": 30})], 60],
+    ],
+)
+def test_basebackup_bytes_total(
+    session_tmpdir,
+    basebackup_info: dict[str, Any],
+    required_backups: list[tuple[str, dict[str, Any]]],
+    expected_bytes_total: int,
+) -> None:
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params="-",
+        mysql_config_file_name="-",
+        mysql_data_directory="/dev/null",
+        mysql_relay_log_index_file="/dev/null",
+        mysql_relay_log_prefix="/dev/null",
+        pending_binlogs_state_file="/dev/null",
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="/dev/null",
+        site="default",
+        state_file=os.path.join(session_tmpdir().strpath, "the_state_file.json"),
+        stats=build_statsd_client(),
+        stream_id="-",
+        temp_dir=session_tmpdir().strpath,
+    )
+    rc.update_state(basebackup_info=basebackup_info, required_backups=required_backups)
+    assert rc.basebackup_bytes_total == expected_bytes_total

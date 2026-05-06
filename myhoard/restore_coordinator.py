@@ -9,26 +9,31 @@ from .statsd import StatsClient
 from .table import Table
 from .util import (
     add_gtid_ranges_to_executed_set,
+    BinVersion,
     build_gtid_ranges,
-    change_master_to,
+    change_replication_source_to,
     DEFAULT_MYSQL_TIMEOUT,
     ERR_TIMEOUT,
-    get_slave_status,
+    file_name_for_basebackup_split,
+    get_replica_status,
+    get_xtrabackup_version,
     GtidExecuted,
     GtidRangeDict,
     make_gtid_range_string,
     mysql_cursor,
     parse_fs_metadata,
     parse_gtid_range_string,
+    parse_version,
     read_gtids_from_log,
     relay_log_name,
+    ReplicaStatus,
     restart_unexpected_dead_sql_thread,
     rsa_decrypt_bytes,
-    SlaveStatus,
     sort_and_filter_binlogs,
     track_rate,
 )
 from contextlib import suppress
+from functools import partial
 from pymysql import OperationalError
 from rohmu import errors as rohmu_errors
 from rohmu.transfer_pool import TransferPool
@@ -42,13 +47,14 @@ import multiprocessing
 import os
 import pymysql
 import queue
+import tempfile
 import threading
 import time
 
-# "Could not initialize master info structure; more error messages can be found in the MySQL error log"
+# "Could not initialize source info structure; more error messages can be found in the MySQL error log"
 # Happens when using multithreaded SQL apply and provided relay logs do not contain sufficient data to
 # initialize the threads.
-ER_MASTER_INFO = 1201
+ER_SOURCE_INFO = 1201
 
 
 class PendingBinlogInfo(TypedDict):
@@ -145,9 +151,12 @@ class RestoreCoordinator(threading.Thread):
         promotions: List
         remote_read_errors: int
         restore_errors: int
+        required_backups: List[Dict]
+        required_backups_restored: int
         server_uuid: Optional[str]
         target_time_reached: bool
         write_relay_log_manually: bool
+        backup_xtrabackup_version: BinVersion | None
 
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
@@ -175,8 +184,10 @@ class RestoreCoordinator(threading.Thread):
         target_time=None,
         target_time_approximate_ok=None,
         temp_dir: str,
+        auto_mark_backups_broken: bool = False,
     ):
         super().__init__()
+        self.auto_mark_backups_broken = auto_mark_backups_broken
         self.basebackup_bytes_downloaded = 0
         self.basebackup_restore_operation: Optional[BasebackupRestoreOperation] = None
         self.binlog_poll_interval = self.BINLOG_POLL_INTERVAL
@@ -255,10 +266,13 @@ class RestoreCoordinator(threading.Thread):
             "prefetched_binlogs": {},
             "promotions": [],
             "remote_read_errors": 0,
+            "required_backups": [],
+            "required_backups_restored": 0,
             "restore_errors": 0,
             "server_uuid": None,
             "target_time_reached": False,
             "write_relay_log_manually": False,
+            "backup_xtrabackup_version": None,
         }
         self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
@@ -278,7 +292,9 @@ class RestoreCoordinator(threading.Thread):
 
     @property
     def basebackup_bytes_total(self) -> int:
-        return self.state["basebackup_info"].get("compressed_size") or 0
+        bytes_total = self.state["basebackup_info"].get("compressed_size") or 0
+        bytes_total += sum([info.get("compressed_size") or 0 for _, info in self.state.get("required_backups", [])])
+        return bytes_total
 
     @property
     def binlogs_being_restored(self) -> int:
@@ -313,6 +329,25 @@ class RestoreCoordinator(threading.Thread):
     @property
     def phase(self) -> "RestoreCoordinator.Phase":
         return self.state["phase"]
+
+    def should_mark_backup_as_broken(self) -> bool:
+        """Determines if the backup should be marked as broken.
+
+        If a backup fails to restore, but the Percona PXB version used to create the backup
+        differs from the current version, we do not mark the backup as "broken"
+        The issue may be related to Percona PXB version compatibility.
+        """
+
+        if not self.auto_mark_backups_broken:
+            return False
+
+        if self.phase is not self.Phase.failed_basebackup:
+            return False
+
+        if self.state["backup_xtrabackup_version"] is None:
+            return True
+        xtrabackup_version = get_xtrabackup_version()
+        return xtrabackup_version[:3] == self.state["backup_xtrabackup_version"][:3]  # pylint: disable=E1136
 
     def run(self) -> None:
         self.log.info("Restore coordinator running")
@@ -390,8 +425,35 @@ class RestoreCoordinator(threading.Thread):
         basebackup_info = self._load_file_data("basebackup.json")
         if not basebackup_info:
             return
+
+        required_backups = []
+        if basebackup_info.get("incremental"):
+            # We need to load all backups infos until the latest full one
+            for idx, stream_id in enumerate(basebackup_info["required_streams"]):
+                info = self._load_file_data("basebackup.json", stream_id=stream_id)
+                if not info:
+                    self.log.error("Required backup %r is not complete, cannot restore", stream_id)
+                    return
+                # Light validation that we actually have full backup and potentially following incremental ones
+                if info.get("incremental", False) != (idx > 0):
+                    self.log.error(
+                        "Unexpected order of backup types, full backup should be followed by incremental ones (if any)"
+                    )
+                    self.state_manager.increment_counter(name="restore_errors")
+                    self.update_state(phase=self.Phase.failed)
+                    return
+
+                completed_info = self._load_file_data("completed.json", stream_id=stream_id)
+                if not completed_info:
+                    self.log.error("Required backup %r is not complete, cannot restore", stream_id)
+                    self.state_manager.increment_counter(name="restore_errors")
+                    return
+
+                required_backups.append((stream_id, info))
+
         self.update_state(
             basebackup_info=basebackup_info,
+            required_backups=required_backups,
             phase=self.Phase.initiating_binlog_downloads,
         )
 
@@ -399,49 +461,131 @@ class RestoreCoordinator(threading.Thread):
         self._fetch_more_binlog_infos()
         self.update_state(phase=self.Phase.restoring_basebackup)
 
-    def restore_basebackup(self) -> None:
-        start_time = time.monotonic()
-        encryption_key = rsa_decrypt_bytes(
-            self.rsa_private_key_pem, bytes.fromhex(self.state["basebackup_info"]["encryption_key"])
-        )
+    def _run_basebackup_restore_operation(
+        self,
+        backup_info: Dict[str, Any],
+        target_dir: str,
+        temp_dir: str,
+        stream_id: str,
+        prepare_only: bool = False,
+        apply_log_only: bool = False,
+        incremental: bool = False,
+    ) -> None:
+        encryption_key = rsa_decrypt_bytes(self.rsa_private_key_pem, bytes.fromhex(backup_info["encryption_key"]))
         self.basebackup_restore_operation = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
             stats=self.stats,
-            stream_handler=self._basebackup_data_provider,
-            temp_dir=self.temp_dir,
+            stream_handler=partial(self._basebackup_data_provider, stream_id=stream_id, backup_info=backup_info),
+            target_dir=target_dir,
+            temp_dir=temp_dir,
             free_memory_percentage=self.free_memory_percentage,
+            backup_tool_version=backup_info.get("tool_version"),
         )
         try:
-            try:
-                self.basebackup_restore_operation.restore_backup()
-            except DiskFullError:
-                self.stats.increase("myhoard.disk_full_errors")
-                self.update_state(phase=self.Phase.failed)
-                raise
-            duration = time.monotonic() - start_time
-            self.log.info("Basebackup restored in %.2f seconds", duration)
-            next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
-            self.update_state(
-                phase=next_phase,
-                basebackup_restore_duration=duration,
-                last_rebuilt_table=None,
+            self.basebackup_restore_operation.prepare_backup(
+                apply_log_only=apply_log_only,
+                incremental=incremental,
+                checkpoints_file_content=backup_info.get("checkpoints_file_content"),
             )
-        except Exception as ex:  # pylint: disable=broad-except
-            self.log.exception("Failed to restore basebackup: %r", ex)
-            self.state_manager.increment_counter(name="basebackup_restore_errors")
-            self.state_manager.increment_counter(name="restore_errors")
-            self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
-            if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
-                self.log.error(
-                    "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS
+            if not prepare_only:
+                self.basebackup_restore_operation.restore_backup()
+        except DiskFullError:
+            self.stats.increase("myhoard.disk_full_errors")
+            self.update_state(phase=self.Phase.failed)
+            raise
+
+    def restore_basebackup(self) -> None:
+        if os.path.exists(self.mysql_data_directory):
+            raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists")
+
+        start_time = time.monotonic()
+        restore_basebackup_info = self.state["basebackup_info"]
+        required_backups = self.state.get("required_backups", [])
+
+        last_tool_version: str | None = None
+        self.basebackup_bytes_downloaded = 0
+
+        with tempfile.TemporaryDirectory(dir=self.temp_dir, prefix="myhoard_target_") as temp_target_dir:
+            try:
+                if required_backups:
+                    self.log.info(
+                        "Restoring previous basebackups required by currently restored backup: %r",
+                        [b[0] for b in required_backups],
+                    )
+                    for idx, required_backup in enumerate(required_backups, 1):
+                        stream_id, required_basebackup_info = required_backup
+                        current_start_time = time.monotonic()
+                        self.log.info(
+                            "Preparing required backup (incremental: %r): %r (%r/%r), tool version: %r",
+                            required_basebackup_info["incremental"],
+                            stream_id,
+                            idx,
+                            len(required_backups),
+                            required_basebackup_info.get("tool_version"),
+                        )
+                        last_tool_version = required_basebackup_info.get("tool_version")
+                        self._run_basebackup_restore_operation(
+                            required_basebackup_info,
+                            target_dir=temp_target_dir,
+                            temp_dir=self.temp_dir,
+                            stream_id=stream_id,
+                            prepare_only=True,
+                            apply_log_only=True,
+                            incremental=(idx != 1),  # Only the first one should be full
+                        )
+                        self.update_state(required_backups_restored=idx)
+                        current_duration = time.monotonic() - current_start_time
+                        self.log.info(
+                            "Basebackup %r/%r prepared in %.2f seconds", idx, len(required_backups), current_duration
+                        )
+
+                self.log.info("Preparing and restoring backup: %r", self.stream_id)
+
+                last_tool_version = restore_basebackup_info.get("tool_version")
+                self._run_basebackup_restore_operation(
+                    restore_basebackup_info,
+                    stream_id=self.stream_id,
+                    target_dir=temp_target_dir,
+                    prepare_only=False,
+                    apply_log_only=False,
+                    temp_dir=self.temp_dir,
+                    incremental=restore_basebackup_info.get("incremental", False),
                 )
-                self.update_state(phase=self.Phase.failed_basebackup)
-                self.stats.increase("myhoard.basebackup_broken")
-        finally:
-            self.basebackup_restore_operation = None
+
+                duration = time.monotonic() - start_time
+
+                self.log.info("Basebackup fully restored in %.2f seconds", duration)
+                self.stats.gauge_float(
+                    "myhoard.basebackup_restore.total_time", duration, tags={"incremental": len(required_backups) > 0}
+                )
+
+                next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
+                self.update_state(
+                    phase=next_phase,
+                    basebackup_restore_duration=duration,
+                    last_rebuilt_table=None,
+                )
+
+            except Exception as ex:  # pylint: disable=broad-except
+                self.log.exception("Failed to restore basebackup: %r", ex)
+                self.state_manager.increment_counter(name="basebackup_restore_errors")
+                self.state_manager.increment_counter(name="restore_errors")
+                self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
+                if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
+                    self.log.error(
+                        "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS
+                    )
+                    self.update_state(phase=self.Phase.failed_basebackup)
+                    self.stats.increase("myhoard.basebackup_broken")
+            finally:
+                if self.basebackup_restore_operation:
+                    self.update_state(
+                        backup_xtrabackup_version=parse_version(last_tool_version) if last_tool_version else None
+                    )
+                    self.basebackup_restore_operation = None
 
     def rebuild_tables(self) -> None:
         excluded_tables = {
@@ -543,6 +687,7 @@ class RestoreCoordinator(threading.Thread):
 
         initial_round = binlogs[0]["adjusted_remote_index"] == 1
         final_round = binlogs[-1]["adjusted_remote_index"] == self.pending_binlogs[-1]["adjusted_remote_index"]
+
         if initial_round and not mysql_started:
             self._rename_prefetched_binlogs(binlogs)
             with open(self.mysql_relay_log_index_file, "wb") as index_file:
@@ -577,7 +722,7 @@ class RestoreCoordinator(threading.Thread):
                 all_gtids_applied = True
 
         if initial_round and not mysql_started:
-            self._purge_old_slave_data()
+            self._purge_old_replica_data()
 
         self._ensure_mysql_server_is_started(**mysql_params)
 
@@ -589,36 +734,37 @@ class RestoreCoordinator(threading.Thread):
                 # Start from where basebackup ended for first binlog and for later iterations after file magic bytes
                 initial_position = self.state["binlog_position"] or self.state["basebackup_info"]["binlog_position"] or 4
                 relay_log_pos = initial_position if initial_round else 4
-                self.log.info("Changing master position to %s in file %s", relay_log_pos, names[0])
+                self.log.info("Changing replication source position to %s in file %s", relay_log_pos, names[0])
                 try:
-                    change_master_to(
+                    change_replication_source_to(
                         cursor=cursor,
                         options={
-                            "MASTER_AUTO_POSITION": 0,
-                            "MASTER_HOST": "dummy",
+                            "SOURCE_AUTO_POSITION": 0,
+                            "SOURCE_HOST": "dummy",
                             "RELAY_LOG_FILE": names[0],
                             "RELAY_LOG_POS": relay_log_pos,
+                            "PRIVILEGE_CHECKS_USER": None,
                         },
                     )
                 except (pymysql.err.InternalError, pymysql.err.OperationalError) as ex:
-                    if ex.args[0] != ER_MASTER_INFO:
+                    if ex.args[0] != ER_SOURCE_INFO:
                         raise ex
                     # In some situations the MySQL SQL threads go into a bad state and always fail when doing
-                    # CHANGE MASTER TO. It's not clear what's the exact case when that happens but seems to be
+                    # CHANGE REPLICATION SOURCE TO. It's not clear what's the exact case when that happens but seems to be
                     # related to applying relay log that contains some transactions that have already been
-                    # previously applied. Making more relay logs available does not help. Only RESET SLAVE
+                    # previously applied. Making more relay logs available does not help. Only RESET REPLICA
                     # seems to fix it.
-                    # Unfortunately RESET SLAVE is not always safe. Namely if there are any temporary tables those
+                    # Unfortunately RESET REPLICA is not always safe. Namely if there are any temporary tables those
                     # get dropped and restoration will not be successful so we cannot use this approach when any
                     # temp tables exist. In such cases there's no easy solution. Starting from scratch with in
                     # single threaded mode would work.
                     self.log.warning("Failed to initialize new restore position: %r", ex)
-                    self.stats.increase("myhoard.restore.change_master_to_failed")
+                    self.stats.increase("myhoard.restore.change_replication_source_to_failed")
                     cursor.execute("SELECT COUNT(*) AS count FROM INFORMATION_SCHEMA.INNODB_TEMP_TABLE_INFO")
                     temp_tables = cursor.fetchone()["count"]
                     if temp_tables:
                         # TODO: Should automatically redo the entire restoration from scratch with single thread
-                        self.log.error("%s temporary tables exist, cannot safely perform RESET SLAVE", temp_tables)
+                        self.log.error("%s temporary tables exist, cannot safely perform RESET REPLICA", temp_tables)
                         self.stats.increase("myhoard.restore.cannot_reset")
                         raise ex
                     # Next attempt might work better if we have more binary logs available so try fetching some
@@ -626,17 +772,17 @@ class RestoreCoordinator(threading.Thread):
                     # Reset the binlogs picked for apply value so that new binlogs are added to the list as soon
                     # as those have been downloaded
                     self.update_state(binlogs_picked_for_apply=0)
-                    # Undo rename for files in current batch (RESET SLAVE would delete all the files)
+                    # Undo rename for files in current batch (RESET REPLICA would delete all the files)
                     self._rename_prefetched_binlogs_back(binlogs)
-                    cursor.execute("RESET SLAVE")
+                    cursor.execute("RESET REPLICA")
                     # Store new index adjustment; first binlog in current list should be number one.
-                    # Also FLUSH RELAY LOGS has no effect right after RESET SLAVE so instruct later code
+                    # Also FLUSH RELAY LOGS has no effect right after RESET REPLICA so instruct later code
                     # to manually regenerate new relay index file.
                     self.update_state(
                         binlog_name_offset=1 - binlogs[0]["adjusted_remote_index"], write_relay_log_manually=True
                     )
                     return
-                sql = "START SLAVE SQL_THREAD"
+                sql = "START REPLICA SQL_THREAD"
                 if until_after_gtids:
                     sql += f" UNTIL SQL_AFTER_GTIDS = '{until_after_gtids}'"
                 cursor.execute(sql)
@@ -646,12 +792,12 @@ class RestoreCoordinator(threading.Thread):
             del prefetched_binlogs[binlog["remote_key"]]
         pending_binlogs = self.pending_binlogs[len(binlogs) :]
         # Mark target_time_reached as True if we started applying the last binlog whose info we had previously
-        # fetched to avoid more binlogs being retrieved in case we're syncing against active master
+        # fetched to avoid more binlogs being retrieved in case we're syncing against active source
         target_time_reached = self.state["target_time_reached"]
         if not pending_binlogs:
             # TODO: Some time based threshold might be better. Like if more than 10 minutes elapsed while processing
             # the last batch then try fetching still more entries, otherwise consider sync to be complete.
-            # If the last batch takes a long time to apply it could be the master that will be connected to has
+            # If the last batch takes a long time to apply it could be the source that will be connected to has
             # already purged the binary logs that are needed by this server.
             target_time_reached = True
 
@@ -708,7 +854,7 @@ class RestoreCoordinator(threading.Thread):
 
         self._fetch_more_binlog_infos()
 
-        apply_finished, current_index = self._check_sql_slave_status()
+        apply_finished, current_index = self._check_sql_replica_status()
         applying_binlogs = self.state["applying_binlogs"]
         applied_binlog_count = 0
         gtid_executed = self.state["gtid_executed"] or self.state["basebackup_info"]["gtid_executed"]
@@ -750,14 +896,14 @@ class RestoreCoordinator(threading.Thread):
     def finalize_restoration(self) -> None:
         # If there were no binary logs to restore MySQL server has not been started yet and trying
         # to connect to it would fail. If it hasn't been started (no mysql_params specified) it also
-        # doesn't have slave configured or running so we can just skip the calls below.
+        # doesn't have replica configured or running so we can just skip the calls below.
         if self.state["mysql_params"]:
             with self._mysql_cursor() as cursor:
-                cursor.execute("STOP SLAVE")
-                # Do RESET SLAVE to ensure next CHANGE MASTER TO will work normally and also to get rid
+                cursor.execute("STOP REPLICA")
+                # Do RESET REPLICA to ensure next CHANGE REPLICATION SOURCE TO will work normally and also to get rid
                 # of any possible leftover relay logs (if we did PITR there could be relay log with some
                 # transactions that haven't been applied)
-                cursor.execute("RESET SLAVE")
+                cursor.execute("RESET REPLICA")
         self._ensure_mysql_server_is_started(with_binlog=True, with_gtids=True)
         self.update_state(phase=self.Phase.completed)
         self.log.info("Backup restoration completed")
@@ -831,13 +977,13 @@ class RestoreCoordinator(threading.Thread):
         stream_id = binlog_stream["stream_id"]
         return f"{site}/{stream_id}/{name}"
 
-    def _build_full_name(self, name: str) -> str:
-        return f"{self.site}/{self.stream_id}/{name}"
+    def _build_full_name(self, name: str, stream_id: str | None = None) -> str:
+        return f"{self.site}/{stream_id or self.stream_id}/{name}"
 
-    def _load_file_data(self, name, missing_ok=False):
+    def _load_file_data(self, name, missing_ok=False, stream_id: str | None = None):
         try:
             with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
-                info_str, _ = file_storage.get_contents_to_string(self._build_full_name(name))
+                info_str, _ = file_storage.get_contents_to_string(self._build_full_name(name, stream_id))
             return json.loads(info_str)
         except rohmu_errors.FileNotFoundFromStorageError as ex:
             if not missing_ok:
@@ -852,18 +998,24 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.remote_read_errors")
         return None
 
-    def _basebackup_data_provider(self, target_stream) -> None:
-        name = self._build_full_name("basebackup.xbstream")
-        compressed_size = self.state["basebackup_info"].get("compressed_size")
+    def _basebackup_data_provider(
+        self, target_stream, stream_id: str | None = None, backup_info: Dict[str, Any] | None = None
+    ) -> None:
+        info = backup_info or self.state["basebackup_info"]
+        compressed_size = info.get("compressed_size")
         with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
             last_time = [time.monotonic()]
-            last_value = [0]
-            self.basebackup_bytes_downloaded = 0
+            last_value = [self.basebackup_bytes_downloaded]
+            total_at_last_split_download = [self.basebackup_bytes_downloaded]
+            current_file_size = [0]
 
             def download_progress(progress, max_progress):
                 if progress and max_progress and compressed_size:
                     # progress may be the actual number of bytes or it may be percentages
-                    self.basebackup_bytes_downloaded = int(compressed_size * progress / max_progress)
+                    self.basebackup_bytes_downloaded = total_at_last_split_download[0] + int(
+                        current_file_size[0] * progress / max_progress
+                    )
+
                     # Track both absolute number and explicitly calculated rate. The rate can be useful as
                     # a separate measurement because downloads are not ongoing all the time and calculating
                     # rate based on raw byte counter requires knowing when the operation started and ended
@@ -876,7 +1028,22 @@ class RestoreCoordinator(threading.Thread):
                         stats=self.stats,
                     )
 
-            file_storage.get_contents_to_fileobj(name, target_stream, progress_callback=download_progress)
+            num_splits = info.get("number_of_splits", 1)
+            name = self._build_full_name("basebackup.xbstream", stream_id=stream_id)
+            current_split = 0
+            while num_splits > 0:
+                num_splits -= 1
+                current_split += 1
+
+                file_name_to_use = file_name_for_basebackup_split(name, current_split)
+
+                # get the size of the current split-file so we can calculate the progress
+                current_file_size[0] = file_storage.get_file_size(file_name_to_use)
+
+                self.log.info("Downloading basebackup file: %s (%d bytes)", file_name_to_use, current_file_size[0])
+                file_storage.get_contents_to_fileobj(file_name_to_use, target_stream, progress_callback=download_progress)
+
+                total_at_last_split_download[0] = self.basebackup_bytes_downloaded
 
     def _get_iteration_sleep(self) -> float:
         if self.phase in self.POLL_PHASES:
@@ -1013,7 +1180,7 @@ class RestoreCoordinator(threading.Thread):
             with self.file_storage_pool.with_transfer(self.file_storage_config) as file_storage:
                 for info in file_storage.list_iter(self._build_binlog_full_name("promotions")):
                     # There could theoretically be multiple promotions with the same
-                    # index value if new master got promoted but then failed before
+                    # index value if new primary got promoted but then failed before
                     # managing to upload any binlogs. To cope with that only keep one
                     # promotion info per server id (the one with most recent timestamp)
                     info = parse_fs_metadata(info["metadata"])
@@ -1244,8 +1411,8 @@ class RestoreCoordinator(threading.Thread):
 
     def _generate_updated_relay_log_index(self, binlogs: List[PendingBinlogInfo], names: List[str], cursor) -> None:
         # Should already be stopped but just to make sure
-        cursor.execute("STOP SLAVE")
-        replica_status = get_slave_status(cursor)
+        cursor.execute("STOP REPLICA")
+        replica_status = get_replica_status(cursor)
         # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
         initial_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
 
@@ -1268,8 +1435,8 @@ class RestoreCoordinator(threading.Thread):
                     # File must end with linefeed or else last line will not be processed correctly
                     index_file.write(("\n".join(names) + "\n").encode("utf-8"))
             self.update_state(last_flushed_index=last_flushed_index, write_relay_log_manually=False)
-            cursor.execute("SHOW SLAVE STATUS")
-            replica_status = get_slave_status(cursor)
+            cursor.execute("SHOW REPLICA STATUS")
+            replica_status = get_replica_status(cursor)
             # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
             final_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None
             self.log.info(
@@ -1295,10 +1462,10 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index
         self.update_state(last_renamed_index=last_renamed_index)
 
-    def _purge_old_slave_data(self) -> None:
-        # Remove potentially conflicting slave data from backup (unfortunately it's not possible to exclude these tables
+    def _purge_old_replica_data(self) -> None:
+        # Remove potentially conflicting replica data from backup (unfortunately it's not possible to exclude these tables
         # from the backup using xtrabackup at the moment). In some cases, e.g. when rotate event appears in the relay
-        # log (coming from master binlog) and mysql has some information about non-existing replication in these tables,
+        # log (coming from primary binlog) and mysql has some information about non-existing replication in these tables,
         # it tries to read previous relays logs in order to find last rotate event, but those relay logs do not exist
         # anymore.
         self._ensure_mysql_server_is_started(with_binlog=False, with_gtids=False)
@@ -1322,15 +1489,15 @@ class RestoreCoordinator(threading.Thread):
                 last_renamed_index = remote_index - 1
         self.update_state(last_flushed_index=last_renamed_index, last_renamed_index=last_renamed_index)
 
-    def _start_sql_thread_if_not_running(self, slave_status: SlaveStatus) -> None:
+    def _start_sql_thread_if_not_running(self, replica_status: ReplicaStatus) -> None:
         # Sometimes mysqld can be OOM-killed during the backup restoration.
         # In that case we should check if SQL thread is running and try restarting it if it is not.
-        if slave_status["Slave_SQL_Running"] == "Yes":
+        if replica_status["Replica_SQL_Running"] == "Yes":
             return
 
         # Try to start SQL thread with an incremental delay
         if self.sql_thread_restart_count > 0:
-            factor = 1.5**self.sql_thread_restart_count
+            factor = 1.5 ** min(self.sql_thread_restart_count, 100)
             iteration_delay = min(self.SQL_THREAD_RESTART_INIT_INTERVAL * factor, self.SQL_THREAD_RESTART_MAX_INTERVAL)
             if self.sql_thread_restart_time is not None:
                 time_passed = time.monotonic() - self.sql_thread_restart_time
@@ -1340,20 +1507,20 @@ class RestoreCoordinator(threading.Thread):
         self.sql_thread_restart_time = time.monotonic()
         self.sql_thread_restart_count += 1
         with self._mysql_cursor() as cursor:
-            restart_unexpected_dead_sql_thread(cursor, slave_status, self.stats, self.log)
+            restart_unexpected_dead_sql_thread(cursor, replica_status, self.stats, self.log)
 
-    def _check_sql_slave_status(self) -> tuple[bool, int]:
+    def _check_sql_replica_status(self) -> tuple[bool, int]:
         expected_range = self.state["current_executed_gtid_target"]
         expected_index = self.state["current_relay_log_target"]
 
         with self._mysql_cursor() as cursor:
-            slave_status = get_slave_status(cursor)
-            if not slave_status:
+            replica_status = get_replica_status(cursor)
+            if not replica_status:
                 raise Exception(
-                    "No status available from SHOW SLAVE STATUS, perhaps MySQL was restarted while applying binlog."
+                    "No status available from SHOW REPLICA STATUS, perhaps MySQL was restarted while applying binlog."
                 )
-            current_file = slave_status["Relay_Log_File"]
-            sql_running_state = slave_status["Slave_SQL_Running_State"]
+            current_file = replica_status["Relay_Log_File"]
+            sql_running_state = replica_status["Replica_SQL_Running_State"]
             current_index = int(current_file.rsplit(".", 1)[-1])
             if expected_index is not None and current_index < expected_index:
                 self.log.debug("Expected relay log name not reached (%r < %r)", current_index, expected_index)
@@ -1384,7 +1551,7 @@ class RestoreCoordinator(threading.Thread):
                         )
                         return True, expected_index
                 else:
-                    self._start_sql_thread_if_not_running(slave_status)
+                    self._start_sql_thread_if_not_running(replica_status)
                     return False, current_index
 
             # The batch we're applying might not have contained any GTIDs
@@ -1415,35 +1582,36 @@ class RestoreCoordinator(threading.Thread):
                     if expected_index is not None and current_index < expected_index:
                         current_index = expected_index
                 else:
-                    self._start_sql_thread_if_not_running(slave_status)
+                    self._start_sql_thread_if_not_running(replica_status)
 
             if found:
-                cursor.execute("STOP SLAVE")
-                # Current file could've been updated since we checked it the first time before slave was stopped.
+                cursor.execute("STOP REPLICA")
+                # Current file could've been updated since we checked it the first time before replica was stopped.
                 # Get the latest value here so that we're sure to start from correct index
-                replica_status = get_slave_status(cursor)
+                replica_status = get_replica_status(cursor)
                 if not replica_status:
                     raise Exception(
-                        "No status available from SHOW SLAVE STATUS, perhaps MySQL was restarted while applying binlog."
+                        "No status available from SHOW REPLICA STATUS, perhaps MySQL was restarted while applying binlog."
                     )
                 current_file = replica_status["Relay_Log_File"]
                 last_index = int(current_file.rsplit(".", 1)[-1])
                 if last_index > current_index:
-                    self.log.info("Relay index incremented from %s to %s after STOP SLAVE", current_index, last_index)
+                    self.log.info("Relay index incremented from %s to %s after STOP REPLICA", current_index, last_index)
                     current_index = last_index
             return found, current_index
 
     def _ensure_mysql_server_is_started(self, *, with_binlog: bool, with_gtids: bool) -> None:
-        if self.state["mysql_params"] == {"with_binlog": with_binlog, "with_gtids": with_gtids}:
-            return
-
-        self.restart_mysqld_callback(with_binlog=with_binlog, with_gtids=with_gtids)
+        params_match = self.state["mysql_params"] == {"with_binlog": with_binlog, "with_gtids": with_gtids}
         server_uuid = self.state["server_uuid"]
+
+        if not params_match:
+            self.restart_mysqld_callback(with_binlog=with_binlog, with_gtids=with_gtids)
+            self.update_state(mysql_params={"with_binlog": with_binlog, "with_gtids": with_gtids})
         if not server_uuid:
             with self._mysql_cursor() as cursor:
                 cursor.execute("SELECT @@GLOBAL.server_uuid AS server_uuid")
                 server_uuid = cursor.fetchone()["server_uuid"]
-        self.update_state(mysql_params={"with_binlog": with_binlog, "with_gtids": with_gtids}, server_uuid=server_uuid)
+            self.update_state(server_uuid=server_uuid)
 
     def _patch_gtid_executed(self, binlog: PendingBinlogInfo) -> None:
         if self.state["gtids_patched"]:

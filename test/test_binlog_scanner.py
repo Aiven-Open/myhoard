@@ -34,19 +34,19 @@ def test_read_gtids_from_log(session_tmpdir, mysql_master):
         cursor.execute("INSERT INTO foo (id) VALUES (1)")
         cursor.execute("COMMIT")
         cursor.execute("FLUSH BINARY LOGS")
-        cursor.execute("SHOW MASTER STATUS")
-        master_info = cursor.fetchone()
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
+        primary_info = cursor.fetchone()
 
     scanner.scan_new(None)
     scanner.scan_removed(None)
     with open(state_file_name, "r") as f:
         assert json.load(f) == scanner.state
     assert len(scanner.binlogs) == 1
-    print(master_info)
+    print(primary_info)
     binlog1 = scanner.binlogs[0]
     assert binlog1["file_name"] == "bin.000001"
     assert len(binlog1["gtid_ranges"]) == 1
-    server_uuid, ranges = master_info["Executed_Gtid_Set"].split(":")
+    server_uuid, ranges = primary_info["Executed_Gtid_Set"].split(":")
     range_start, range_end = ranges.split("-")
     range1 = binlog1["gtid_ranges"][0]
     assert range1["server_uuid"] == server_uuid
@@ -59,8 +59,8 @@ def test_read_gtids_from_log(session_tmpdir, mysql_master):
         cursor.execute("COMMIT")
         cursor.execute("FLUSH BINARY LOGS")
         cursor.execute("PURGE BINARY LOGS TO 'bin.000002'")
-        cursor.execute("SHOW MASTER STATUS")
-        master_info = cursor.fetchone()
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
+        primary_info = cursor.fetchone()
 
     scanner.scan_new(None)
     scanner.scan_removed(None)
@@ -72,7 +72,7 @@ def test_read_gtids_from_log(session_tmpdir, mysql_master):
     assert binlog2["file_name"] == "bin.000002"
     assert len(binlog2["gtid_ranges"]) == 1
     assert binlog2["gtid_ranges"][0]["start"] == range1["end"] + 1
-    expected_end = int(master_info["Executed_Gtid_Set"].split("-")[-1])
+    expected_end = int(primary_info["Executed_Gtid_Set"].split("-")[-1])
     assert binlog2["gtid_ranges"][0]["end"] == expected_end
 
     scanner.scan_new(None)

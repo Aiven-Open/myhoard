@@ -42,12 +42,15 @@ class WebServer:
             body = await self._get_request_json(request)
             log_index = None
             backup_type = body.get("backup_type")
+            incremental = body.get("incremental", False)
             wait_for_upload = body.get("wait_for_upload")
             with self.controller.lock:
                 if backup_type == self.BackupType.basebackup:
                     if wait_for_upload:
                         raise BadRequest("wait_for_upload currently not supported for basebackup")
-                    self.controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+                    self.controller.mark_backup_requested(
+                        backup_reason=BackupStream.BackupReason.requested, incremental_requested=incremental
+                    )
                 elif backup_type == self.BackupType.binlog:
                     log_index = self.controller.rotate_and_back_up_binlog()
                 else:
@@ -71,12 +74,19 @@ class WebServer:
 
     async def backup_list(self, _request):
         with self._handle_request(name="backup_list"):
+            order = _request.rel_url.query.get("order")
             response = {
                 "backups": None,
             }
             with self.controller.lock:
                 if self.controller.state["backups_fetched_at"]:
-                    response["backups"] = self.controller.state["backups"]
+                    if order is None:
+                        response["backups"] = self.controller.state["backups"]
+                    else:
+                        response["backups"] = sorted(
+                            self.controller.state["backups"], key=lambda b: b["stream_id"], reverse=order.lower() != "asc"
+                        )
+
                 return json_response(response)
 
     async def backup_preserve(self, request):

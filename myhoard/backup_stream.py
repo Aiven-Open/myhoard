@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .append_only_state_manager import AppendOnlyStateManager
 from .basebackup_operation import BasebackupOperation
+from .binary_io_slice import BinaryIOSlice
 from .binlog_scanner import BinlogInfo
 from .errors import BlockMismatchError, XtraBackupError
 from .state_manager import StateManager
@@ -10,6 +11,7 @@ from .util import (
     DEFAULT_MYSQL_TIMEOUT,
     DEFAULT_XTRABACKUP_SETTINGS,
     ERR_TIMEOUT,
+    file_name_for_basebackup_split,
     first_contains_gtids_not_in_second,
     GtidExecuted,
     make_fs_metadata,
@@ -29,6 +31,7 @@ from httplib2 import ServerNotFoundError
 from rohmu import errors as rohmu_errors
 from rohmu.compressor import CompressionStream
 from rohmu.encryptor import EncryptorStream
+from rohmu.errors import FileNotFoundFromStorageError
 from rohmu.object_storage.s3 import S3Transfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
@@ -41,6 +44,7 @@ import json
 import logging
 import os
 import pymysql
+import sys
 import threading
 import time
 import uuid
@@ -74,6 +78,11 @@ class BaseBackupFailureReason(str, enum.Enum):
     network_error = "network_error"
     block_mismatch_error = "block_mismatch_error"
     xtrabackup_error = "xtrabackup_error"
+
+
+class IncrementalBackupInfo(TypedDict):
+    last_checkpoint: str | None
+    required_streams: List[str] | None
 
 
 class BackupStream(threading.Thread):
@@ -129,6 +138,7 @@ class BackupStream(threading.Thread):
         backup_reason: Optional["BackupStream.BackupReason"]
         created_at: float
         immediate_scan_required: bool
+        incremental: bool
         initial_latest_complete_binlog_index: Optional[int]
         last_binlog_upload_time: int
         last_processed_local_index: Optional[int]
@@ -149,6 +159,8 @@ class BackupStream(threading.Thread):
         stream_id: str
         updated_at: float
         valid_local_binlog_found: bool
+        number_of_splits: Optional[int]
+        split_size: Optional[int]
 
     def __init__(
         self,
@@ -175,10 +187,17 @@ class BackupStream(threading.Thread):
         stream_id: Optional[str] = None,
         temp_dir: str,
         xtrabackup_settings: Optional[Dict[str, int]] = None,
+        split_size: Optional[int] = 0,
+        incremental_backup_info: IncrementalBackupInfo | None = None,
     ) -> None:
         super().__init__()
         stream_id = stream_id or self.new_stream_id()
         self.basebackup_bytes_uploaded = 0
+        self.split_size = (
+            file_storage_setup_fn().calculate_max_unknown_file_size()
+            if split_size == 0
+            else min(split_size, file_storage_setup_fn().calculate_max_unknown_file_size())
+        )
         self.basebackup_operation: Optional[BasebackupOperation] = None
         self.basebackup_progress: Optional[Dict[str, Any]] = None
         self.compression = compression
@@ -188,6 +207,7 @@ class BackupStream(threading.Thread):
         self.file_storage_setup_fn = file_storage_setup_fn
         self.file_storage: Optional["BaseTransfer"] = None
         self.file_uploaded_callback = file_uploaded_callback
+        self.incremental_backup_info = incremental_backup_info
         self.is_running = True
         self.iteration_sleep = BackupStream.ITERATION_SLEEP
         self.last_basebackup_attempt: Optional[float] = None
@@ -229,6 +249,7 @@ class BackupStream(threading.Thread):
             "backup_reason": backup_reason,
             "created_at": time.time(),
             "immediate_scan_required": False,
+            "incremental": incremental_backup_info is not None,
             "initial_latest_complete_binlog_index": latest_complete_binlog_index,
             "last_binlog_upload_time": 0,
             "last_processed_local_index": None,
@@ -249,6 +270,8 @@ class BackupStream(threading.Thread):
             "stream_id": stream_id,
             "updated_at": time.time(),
             "valid_local_binlog_found": False,
+            "number_of_splits": None,
+            "split_size": None,
         }
         self.state_manager = StateManager(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
@@ -330,16 +353,17 @@ class BackupStream(threading.Thread):
 
     @property
     def binlog_upload_delay(self) -> int:
-        """Returns the number of seconds since the oldest pending binlog was written."""
+        """Returns the number of seconds since the oldest pending binlog was written.
+        Only stats the first existing pending binlog since the list is ordered by index."""
         now = time.time()
-        oldest_mtime = now
         for binlog in self.state["pending_binlogs"]:
             try:
-                oldest_mtime = min(oldest_mtime, os.stat(binlog["full_name"]).st_mtime)
+                oldest_mtime = os.stat(binlog["full_name"]).st_mtime
+                return int(now - oldest_mtime)
             except FileNotFoundError:
-                pass  # binlog was just purged, so ignore it.
-
-        return int(now - oldest_mtime)
+                # binlog was just purged, so skip it.
+                continue
+        return 0
 
     @property
     def created_at(self) -> float:
@@ -591,7 +615,9 @@ class BackupStream(threading.Thread):
                     if self.state["closed_info"] and self.active_phase != self.ActivePhase.none:
                         self._handle_pending_mark_as_closed()
                     if self.active_phase == self.ActivePhase.basebackup:
-                        self.stats.gauge_int("myhoard.backup_stream.basebackup_requested", 1)
+                        self.stats.gauge_int(
+                            "myhoard.backup_stream.basebackup_requested", 1, tags={"incremental": self.is_incremental}
+                        )
                         self._take_basebackup()
                     if self.is_streaming_binlogs():
                         self._upload_binlogs()
@@ -614,7 +640,7 @@ class BackupStream(threading.Thread):
                 self.log.exception("Unexpected exception in mode %s", self.mode)
                 self.stats.unexpected_exception(ex=ex, where="BackupStream.run")
                 self.state_manager.increment_counter(name="backup_errors")
-                self.stats.increase("myhoard.backup_stream.errors")
+                self.stats.increase("myhoard.backup_stream.errors", tags={"incremental": self.is_incremental})
                 # Limit counter max value or else we'll get to exponent that cannot be handled anymore
                 sleep_time = min(1.5 ** min(consecutive_errors, 20), 30.0)
                 consecutive_errors += 1
@@ -650,35 +676,78 @@ class BackupStream(threading.Thread):
     def _basebackup_stream_handler(self, stream):
         file_storage = self.file_storage_setup_fn()
 
-        metadata = make_fs_metadata(
-            {
-                "backup_started_at": time.time(),
-                "uploaded_from": self.server_id,
-            }
-        )
+        metadata_template = {
+            "backup_started_at": time.time(),
+            "uploaded_from": self.server_id,
+        }
+        metadata = make_fs_metadata(metadata_template)
 
         last_time = [time.monotonic()]
         last_value = [0]
         self.basebackup_bytes_uploaded = 0
 
         def upload_progress(bytes_sent):
-            self.basebackup_bytes_uploaded = bytes_sent
             # Track both absolute number and explicitly calculated rate. The rate can be useful as
             # a separate measurement because uploads are not ongoing all the time and calculating
             # rate based on raw byte counter requires knowing when the operation started and ended
-            self.stats.gauge_int("myhoard.backup_stream.basebackup_bytes_uploaded", self.basebackup_bytes_uploaded)
+            self.stats.gauge_int(
+                "myhoard.backup_stream.basebackup_bytes_uploaded",
+                self.basebackup_bytes_uploaded + bytes_sent,
+                tags={"incremental": self.is_incremental},
+            )
             last_value[0], last_time[0] = track_rate(
                 current=bytes_sent,
                 last_recorded=last_value[0],
                 last_recorded_time=last_time[0],
                 metric_name="myhoard.backup_stream.basebackup_upload_rate",
                 stats=self.stats,
+                tags={"incremental": self.is_incremental},
             )
 
-        file_storage.store_file_object(
-            self._build_full_name("basebackup.xbstream"), stream, metadata=metadata, upload_progress_fn=upload_progress
+        split_nr = 0
+        uploaded_size = 0
+        basebackup_file_path = self._build_full_name("basebackup.xbstream")
+        while (split_nr == 0) or uploaded_size == self.split_size:
+            split_nr += 1
+
+            storage_file_name = file_name_for_basebackup_split(basebackup_file_path, split_nr)
+
+            if self.split_size and 0 < self.split_size < sys.maxsize:
+                stream_to_use = BinaryIOSlice(self.split_size, stream)
+            else:
+                stream_to_use = stream
+
+            self.log.info("Uploading basebackup to %s", storage_file_name)
+            file_storage.store_file_object(
+                storage_file_name, stream_to_use, metadata=metadata, upload_progress_fn=upload_progress
+            )
+
+            # Unfortunately, at least for GCP, the upload_progress_fn doesn't get called for the last chunk,
+            # so we need to get the file-size from object-storage. Which is probably also more robust to API
+            # changes in rohmu.
+            uploaded_size = file_storage.get_file_size(storage_file_name)
+            self.basebackup_bytes_uploaded += uploaded_size
+
+            self.stats.gauge_int(
+                "myhoard.backup_stream.basebackup_bytes_uploaded",
+                self.basebackup_bytes_uploaded,
+                tags={"incremental": self.is_incremental},
+            )
+
+            # don't loop forever if we can't upload anything
+            if not self.split_size or self.split_size < 1:
+                break
+
+        metadata = make_fs_metadata(
+            {
+                **metadata_template,
+                "number_of_splits": split_nr,
+                "split_size": self.split_size,
+                "basebackup_compressed_size": self.basebackup_bytes_uploaded,
+            }
         )
         self.state_manager.update_state(basebackup_file_metadata=metadata)
+        self.log.info("Done uploading basebackup files, split into %d files", split_nr)
 
     def _build_full_name(self, name: str) -> str:
         return f"{self.site}/{self.stream_id}/{name}"
@@ -700,6 +769,9 @@ class BackupStream(threading.Thread):
                 remote_gtid_executed=basebackup_info["gtid_executed"],
             )
             return True
+        except FileNotFoundFromStorageError:
+            self.log.info("Could not find basebackup.json, backup probably not yet finished")
+            return False
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to get basebackup info")
             self.stats.unexpected_exception(ex=ex, where="BackupStream._cache_basebackup_info")
@@ -934,6 +1006,10 @@ class BackupStream(threading.Thread):
     def _should_list_with_metadata(self, *, next_index: int) -> bool:
         return next_index % BINLOG_BUCKET_SIZE == 0 or next_index == 1 or not isinstance(self.file_storage, S3Transfer)
 
+    @property
+    def is_incremental(self) -> bool:
+        return self.incremental_backup_info is not None
+
     def _take_basebackup(self) -> None:
         assert self.file_storage is not None
         if self.last_basebackup_attempt is not None:
@@ -962,11 +1038,15 @@ class BackupStream(threading.Thread):
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
+            optimize_tables_before_backup=self.optimize_tables_before_backup,
             progress_callback=self._basebackup_progress_callback,
+            register_redo_log_consumer=self.xtrabackup_settings["register_redo_log_consumer"],
             stats=self.stats,
             stream_handler=self._basebackup_stream_handler,
             temp_dir=self.temp_dir,
-            optimize_tables_before_backup=self.optimize_tables_before_backup,
+            incremental_since_checkpoint=(
+                self.incremental_backup_info.get("last_checkpoint") if self.incremental_backup_info else None
+            ),
         )
         try:
             self.basebackup_operation.create_backup()
@@ -996,8 +1076,6 @@ class BackupStream(threading.Thread):
             # earlier time is disallowed) to ensure the gtid_executed patching happens
             end_time = time.time() + 1
 
-            compressed_size = self.file_storage.get_file_size(self._build_full_name("basebackup.xbstream"))
-
             # Write promotion info so that determining correct binlog sequence does not
             # require special logic for figuring out correct server id at the beginning
             self._write_promotion_info(promoted_at=end_time, start_index=1)
@@ -1013,23 +1091,38 @@ class BackupStream(threading.Thread):
                 self.log.info("Last basebackup GTID %r, truncating GTID executed %r accordingly", last_gtid, gtid_executed)
                 truncate_gtid_executed(gtid_executed, last_gtid)
 
+            if "basebackup_file_metadata" in self.state:
+                basebackup_file_metadata = parse_fs_metadata(self.state["basebackup_file_metadata"])
+                compressed_size = basebackup_file_metadata.get("basebackup_compressed_size")
+            else:
+                basebackup_file_metadata = {}
+                compressed_size = None
+
             info = {
                 "binlog_index": int(binlog_info["file_name"].split(".")[-1]) if binlog_info else None,
                 "binlog_name": binlog_info["file_name"] if binlog_info else None,
                 "binlog_position": binlog_info["file_position"] if binlog_info else None,
                 "backup_reason": self.state["backup_reason"],
+                "checkpoints_file_content": self.basebackup_operation.checkpoints_file_content,
                 "compressed_size": compressed_size,
                 "encryption_key": rsa_encrypt_bytes(self.rsa_public_key_pem, encryption_key).hex(),
                 "end_size": self.basebackup_operation.data_directory_size_end,
                 "end_ts": end_time,
                 "gtid": last_gtid,
                 "gtid_executed": gtid_executed,
+                "incremental": self.basebackup_operation.incremental_since_checkpoint is not None,
+                "required_streams": (
+                    self.incremental_backup_info.get("required_streams") if self.incremental_backup_info else None
+                ),
                 "initiated_at": self.created_at,
                 "lsn_info": self.basebackup_operation.lsn_info,
                 "normalized_backup_time": self.state["normalized_backup_time"],
                 "number_of_files": self.basebackup_operation.number_of_files,
+                "split_size": self.split_size,
+                "number_of_splits": basebackup_file_metadata.get("number_of_splits", 1),
                 "start_size": self.basebackup_operation.data_directory_size_start,
                 "start_ts": start_time,
+                "tool_version": self.basebackup_operation.tool_version,
                 "uploaded_from": self.server_id,
             }
             self.file_storage.store_file_from_memory(
@@ -1047,11 +1140,19 @@ class BackupStream(threading.Thread):
             )
             uncompressed_size = self.basebackup_operation.data_directory_size_end
             if uncompressed_size:
-                self.stats.gauge_int("myhoard.basebackup.bytes_uncompressed", uncompressed_size)
+                self.stats.gauge_int(
+                    "myhoard.basebackup.bytes_uncompressed", uncompressed_size, tags={"incremental": self.is_incremental}
+                )
             if compressed_size:
-                self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size)
+                self.stats.gauge_int(
+                    "myhoard.basebackup.bytes_compressed", compressed_size, tags={"incremental": self.is_incremental}
+                )
             if uncompressed_size and compressed_size:
-                self.stats.gauge_float("myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size)
+                self.stats.gauge_float(
+                    "myhoard.basebackup.compression_ratio",
+                    uncompressed_size / compressed_size,
+                    tags={"incremental": self.is_incremental},
+                )
         except (
             gaierror,
             GeneralProxyError,
@@ -1064,13 +1165,17 @@ class BackupStream(threading.Thread):
             self.state_manager.increment_counter(name="basebackup_errors")
             self.stats.increase(
                 "myhoard.basebackup.errors",
-                tags={"ex": ex.__class__.__name__, "reason": BaseBackupFailureReason.network_error},
+                tags={
+                    "ex": ex.__class__.__name__,
+                    "reason": BaseBackupFailureReason.network_error,
+                    "incremental": self.is_incremental,
+                },
             )
             self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
 
-            tags = {"ex": ex.__class__.__name__}
+            tags = {"ex": ex.__class__.__name__, "incremental": self.is_incremental}
             # explicitly tag block mismatch errors, this way we can relate high redo log activity to xtrabackup errors
             if isinstance(ex, BlockMismatchError):
                 tags["reason"] = BaseBackupFailureReason.block_mismatch_error
@@ -1198,7 +1303,10 @@ class BackupStream(threading.Thread):
             else:
                 log_action = "uploaded local"
                 existing_remote_key = self.state["local_index_to_remote_key"].get(self.current_upload_index)
-                if existing_remote_key:
+                # Only remote copy when source and destination are on the same site (same key prefix).
+                # If site changes, copy can fail due to cross cloud configuration for example; upload from local instead.
+                # The format of the key is "{site}/{stream_id}/{name}"
+                if existing_remote_key and existing_remote_key.split("/")[0] == remote_binlog["remote_key"].split("/")[0]:
                     log_action = "remote copied"
                     self.file_storage.copy_file(
                         source_key=existing_remote_key, destination_key=remote_binlog["remote_key"], metadata=metadata
@@ -1212,9 +1320,9 @@ class BackupStream(threading.Thread):
                             index_name,
                             encrypt_stream,
                             metadata=metadata,
-                            upload_progress_fn=self.binlog_progress_tracker.increment
-                            if self.binlog_progress_tracker
-                            else None,
+                            upload_progress_fn=(
+                                self.binlog_progress_tracker.increment if self.binlog_progress_tracker else None
+                            ),
                         )
                         self.stats.increase("myhoard.binlog.upload")
                     if self.file_uploaded_callback:

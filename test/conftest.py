@@ -9,8 +9,15 @@ from . import (
     random_basic_string,
 )
 from myhoard.controller import BackupSiteInfo, Controller
-from myhoard.util import atomic_create_file, change_master_to, DEFAULT_XTRABACKUP_SETTINGS, mysql_cursor, wait_for_port
+from myhoard.util import (
+    atomic_create_file,
+    change_replication_source_to,
+    DEFAULT_XTRABACKUP_SETTINGS,
+    mysql_cursor,
+    wait_for_port,
+)
 from myhoard.web_server import WebServer
+from packaging.version import Version
 from py.path import local as LocalPath
 from typing import Callable, Iterator, Optional
 
@@ -18,6 +25,7 @@ import contextlib
 import logging
 import os
 import pytest
+import re
 import shutil
 import signal
 import subprocess
@@ -38,6 +46,14 @@ handler.setLevel(_test_log_level)
 formatter = logging.Formatter("%(asctime)s:%(name)s:%(levelname)s:%(pathname)s:%(lineno)d:%(message)s")
 handler.setFormatter(formatter)
 root.addHandler(handler)
+
+
+def _get_mysqld_version(mysqld_bin: str) -> Version:
+    out = subprocess.run([mysqld_bin, "--version"], capture_output=True, text=True, check=True)
+    # e.g. "mysqld  Ver 8.4.0 for Linux on x86_64" or "Ver 8.0.35"
+    match = re.search(r"Ver\s+(\d+)\.(\d+)\.(\d+)", out.stdout)
+    assert match, f"Cannot extract mysqld version from {out.stdout!r}"
+    return Version(".".join([str(i) for i in [match.group(1), match.group(2), match.group(3)]]))
 
 
 @pytest.fixture(scope="session", name="session_tmpdir")
@@ -98,9 +114,10 @@ def mysql_initialize_and_start(
     if mysql_basedir is None and os.path.exists("/opt/mysql"):
         mysql_basedir = "/opt/mysql"
 
-    mysqld_bin = "/usr/sbin/mysqld"
-    if not os.path.exists(mysqld_bin):
-        mysqld_bin = "/usr/bin/mysqld"
+    mysqld_bin = shutil.which("mysqld")
+    assert mysqld_bin, f"mysqld binary not found in PATH: {os.environ['PATH']}"
+    xtrabackup_bin = shutil.which("xtrabackup")
+    assert xtrabackup_bin, f"xtrabackup binary not found in PATH: {os.environ['PATH']}"
 
     test_base_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, name))
     config_path = os.path.join(test_base_dir, "etc")
@@ -108,10 +125,15 @@ def mysql_initialize_and_start(
         config_path=config_path, name=name, server_id=server_id, test_base_dir=test_base_dir
     )
 
+    mysqld_version = _get_mysqld_version(mysqld_bin)
+    deprecated_settings_block = ""
+    if mysqld_version < Version("8.4.0"):
+        deprecated_settings_block = (
+            "binlog-transaction-dependency-tracking=WRITESET\ntransaction-write-set-extraction=XXHASH64\n"
+        )
     config = f"""
 [mysqld]
-binlog-transaction-dependency-tracking=WRITESET
-binlog-format=ROW
+{deprecated_settings_block}binlog-format=ROW
 datadir={config_options.datadir}
 enforce-gtid-consistency=ON
 gtid-mode=ON
@@ -126,13 +148,12 @@ relay-log={config_options.relay_log_file_prefix}
 relay-log-index={config_options.relay_log_index_file}
 server-id={server_id}
 skip-name-resolve=ON
-skip-slave-start=ON
-slave-parallel-type=LOGICAL_CLOCK
-slave-parallel-workers={config_options.parallel_workers}
-slave-preserve-commit-order=ON
+skip-replica-start=ON
+replica-parallel-type=LOGICAL_CLOCK
+replica-parallel-workers={config_options.parallel_workers}
+replica-preserve-commit-order=ON
 socket={config_options.datadir}/mysql.sock
 sql-mode=ANSI,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
-transaction-write-set-extraction=XXHASH64
 
 [validate_password]
 policy=LOW
@@ -170,7 +191,7 @@ FLUSH PRIVILEGES;
                 "--initialize",
                 "--disable-log-bin",
                 "--gtid-mode=OFF",
-                "--skip-slave-preserve-commit-order",
+                "--skip-replica-preserve-commit-order",
                 "--init-file",
                 init_file,
             ]
@@ -199,19 +220,19 @@ FLUSH PRIVILEGES;
         # Ensure connecting to the newly started server works and if this is standby also start replication
         with mysql_cursor(**connect_options) as cursor:
             if master:
-                change_master_to(
+                change_replication_source_to(
                     cursor=cursor,
                     options={
-                        "MASTER_AUTO_POSITION": 1,
-                        "MASTER_CONNECT_RETRY": 0.1,
-                        "MASTER_HOST": "127.0.0.1",
-                        "MASTER_PORT": master.port,
-                        "MASTER_PASSWORD": master.password,
-                        "MASTER_SSL": 0,
-                        "MASTER_USER": master.user,
+                        "SOURCE_AUTO_POSITION": 1,
+                        "SOURCE_CONNECT_RETRY": 0.1,
+                        "SOURCE_HOST": "127.0.0.1",
+                        "SOURCE_PORT": master.port,
+                        "SOURCE_PASSWORD": master.password,
+                        "SOURCE_SSL": 0,
+                        "SOURCE_USER": master.user,
                     },
                 )
-                cursor.execute("START SLAVE IO_THREAD, SQL_THREAD")
+                cursor.execute("START REPLICA IO_THREAD, SQL_THREAD")
             else:
                 cursor.execute("SELECT 1")
 
@@ -227,6 +248,7 @@ FLUSH PRIVILEGES;
         server_id=server_id,
         startup_command=cmd,
         user="root",
+        version=mysqld_version,
     )
 
 
@@ -301,6 +323,38 @@ def fixture_standby2_controller(session_tmpdir, mysql_standby2, default_backup_s
         controller.stop()
 
 
+@pytest.fixture(scope="function", name="standby1_controller_cross_site")
+def fixture_standby1_controller_cross_site(session_tmpdir, mysql_standby1, default_backup_site, encryption_keys):
+    """Controller for standby1 with two sites: 'default' (same backup dir as master, for observe)
+    and 'other' (separate backup dir, set as upload_site). This simulates a new node that discovers
+    existing backups on 'default' but uploads new backups to 'other'."""
+    other_backup_dir = os.path.abspath(os.path.join(session_tmpdir().strpath, "backups_other_site"))
+    os.makedirs(other_backup_dir)
+    other_backup_site = {
+        "compression": {
+            "algorithm": "snappy",
+        },
+        "encryption_keys": encryption_keys,
+        "object_storage": {
+            "directory": other_backup_dir,
+            "storage_type": "local",
+        },
+        "recovery_only": False,
+    }
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_standby1,
+        session_tmpdir=session_tmpdir,
+        extra_backup_sites={"other": other_backup_site},
+        upload_site="other",
+    )
+    try:
+        yield controller, mysql_standby1
+    finally:
+        controller.stop()
+
+
 @pytest.fixture(scope="function", name="empty_controller")
 def fixture_empty_controller(
     session_tmpdir, mysql_empty: MySQLConfig, default_backup_site: BackupSiteInfo
@@ -333,6 +387,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "backup_minute": 0,
             "forced_binlog_rotation_interval": 300,
             "upload_site": "default",
+            "incremental": {"enabled": False, "full_backup_week_schedule": "sun,wed"},
         },
         "backup_sites": {
             "default": default_backup_site,
@@ -359,6 +414,7 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "relay_log_index_file": mysql_master.config_options.relay_log_index_file,
             "relay_log_prefix": mysql_master.config_options.relay_log_file_prefix,
         },
+        "restore_auto_mark_backups_broken": True,
         "restore_free_memory_percentage": 50,
         "restore_max_binlog_bytes": 4294967296,
         "sentry_dsn": None,
