@@ -32,7 +32,7 @@ dependencies = [
     "PyMySQL >= 0.9.2",
     "PySocks",
     "rohmu >= 2.8.2",
-    "sentry-sdk == 2.8.0",
+    "sentry-sdk >= 2.8.0",
     "packaging",
 ]
 
