@@ -1,9 +1,11 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import get_random_port, wait_for_port, while_asserts
+from myhoard.myhoard import MyHoard
 from unittest.mock import MagicMock, patch
 
 import contextlib
 import json
+import logging
 import os
 import pytest
 import requests
@@ -228,3 +230,66 @@ def test_main_logging_respects_log_level_argument(
 
         call_kwargs = mock_basic_config.call_args[1]
         assert call_kwargs["level"] == log_level
+
+
+class TestApplySafeConfigUpdates:
+    def test_updates_binlog_purge_settings_when_changed(self, tmp_path):
+        original_settings = {
+            "enabled": True,
+            "min_binlog_age_before_purge": 600,
+            "purge_interval": 60,
+            "purge_when_observe_no_streams": True,
+        }
+        new_settings = {
+            "enabled": True,
+            "min_binlog_age_before_purge": 3600,
+            "purge_interval": 60,
+            "purge_when_observe_no_streams": True,
+        }
+
+        config_file = tmp_path / "myhoard.json"
+        config_file.write_text(json.dumps({"binlog_purge_settings": new_settings}))
+
+        hoard = MyHoard.__new__(MyHoard)
+        hoard.log = logging.getLogger("test")
+        hoard.config_file = str(config_file)
+        hoard.config = {"binlog_purge_settings": original_settings}
+        hoard.controller = MagicMock()
+
+        hoard._apply_safe_config_updates()  # pylint: disable=protected-access
+
+        hoard.controller.update_binlog_purge_settings.assert_called_once_with(new_settings)
+        assert hoard.config["binlog_purge_settings"] == new_settings
+
+    def test_skips_update_when_settings_unchanged(self, tmp_path):
+        settings = {
+            "enabled": True,
+            "min_binlog_age_before_purge": 600,
+            "purge_interval": 60,
+            "purge_when_observe_no_streams": True,
+        }
+
+        config_file = tmp_path / "myhoard.json"
+        config_file.write_text(json.dumps({"binlog_purge_settings": settings}))
+
+        hoard = MyHoard.__new__(MyHoard)
+        hoard.log = logging.getLogger("test")
+        hoard.config_file = str(config_file)
+        hoard.config = {"binlog_purge_settings": settings}
+        hoard.controller = MagicMock()
+
+        hoard._apply_safe_config_updates()  # pylint: disable=protected-access
+
+        hoard.controller.update_binlog_purge_settings.assert_not_called()
+
+    def test_handles_missing_config_file_gracefully(self, tmp_path):
+        hoard = MyHoard.__new__(MyHoard)
+        hoard.log = logging.getLogger("test")
+        hoard.config_file = str(tmp_path / "nonexistent.json")
+        hoard.config = {"binlog_purge_settings": {}}
+        hoard.controller = MagicMock()
+
+        # Should not raise
+        hoard._apply_safe_config_updates()  # pylint: disable=protected-access
+
+        hoard.controller.update_binlog_purge_settings.assert_not_called()
