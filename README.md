@@ -582,6 +582,26 @@ Response on success looks like this:
 }
 ```
 
+## PUT /backup/pause
+
+Pause scheduled backup until date. Binlogs are still uploaded
+
+```
+{
+  "until": "{isodatetime}",
+}
+```
+
+**until**
+
+The date after which backups are resumed (should be in iso-format)
+
+```
+{
+  "success": true
+}
+```
+
 
 ## PUT /backup/{stream_id}/preserve
 

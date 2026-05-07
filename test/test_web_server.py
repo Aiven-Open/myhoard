@@ -257,3 +257,11 @@ def test_validate_replication_state():
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}})
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}, "zob": {}})
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}, "zob": {uuid2: []}})
+
+
+async def test_pause_backups(master_controller, web_client):
+    until = datetime.datetime(2099, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    controller = master_controller[0]
+    response = await put_and_verify_json_body(web_client, "/backup/pause", {"until": until.isoformat()})
+    assert controller.state["pause_backups_until"] == until.isoformat()
+    assert response["success"]

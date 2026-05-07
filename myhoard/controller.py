@@ -145,6 +145,7 @@ class Controller(threading.Thread):
         stream_to_be_purged: Optional[str]
         server_uuid: Optional[str]
         uploaded_binlogs: list
+        pause_backups_until: str | None
 
     def __init__(
         self,
@@ -235,6 +236,7 @@ class Controller(threading.Thread):
             "stream_to_be_purged": None,
             "server_uuid": None,
             "uploaded_binlogs": [],
+            "pause_backups_until": None,
         }
         self.state_dir = state_dir
         state_file = os.path.join(state_dir, "myhoard_controller_state.json")
@@ -307,6 +309,10 @@ class Controller(threading.Thread):
             current_requests = dict(self.state["pending_preservation_requests"])
             current_requests[stream_id] = preserve_until.isoformat() if preserve_until else None
             self.state_manager.update_state(pending_preservation_requests=current_requests)
+
+    def pause_backups(self, until: datetime.datetime) -> None:
+        self.log.warning("Pausing backups until %s", until)
+        self.state_manager.update_state(pause_backups_until=until.isoformat())
 
     @property
     def mode(self) -> Mode:
@@ -1350,6 +1356,13 @@ class Controller(threading.Thread):
         return None
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
+        pause_backups_until: str | None = self.state["pause_backups_until"]
+        if pause_backups_until is not None and datetime.datetime.fromisoformat(pause_backups_until) > datetime.datetime.now(
+            datetime.timezone.utc
+        ):
+            self.log.warning("Skipping backup interval check, backups paused until %s", pause_backups_until)
+            return
+
         normalized_backup_time = self._current_normalized_backup_timestamp()
         last_normalized_backup_time = self._previous_normalized_backup_timestamp()
 
