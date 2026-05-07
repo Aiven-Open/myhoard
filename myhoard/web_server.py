@@ -89,6 +89,22 @@ class WebServer:
 
                 return json_response(response)
 
+    async def backup_pause(self, request):
+        with self._handle_request(name="backup_pause"):
+            body = await self._get_request_json(request)
+
+            try:
+                pause_until = datetime.fromisoformat(body.get("until"))
+            except ValueError:
+                raise BadRequest("`until` must be a valid iso-format datetime string.")
+
+            if pause_until is None or pause_until < datetime.now(timezone.utc):
+                raise BadRequest("pause_until is not a valid date")
+
+            self.controller.pause_backups(until=pause_until)
+
+            return json_response({"success": True})
+
     async def backup_preserve(self, request):
         with self._handle_request(name="backup_preserve"):
             stream_id = request.match_info["stream_id"]
@@ -269,6 +285,7 @@ class WebServer:
             [
                 web.get("/backup", self.backup_list),
                 web.post("/backup", self.backup_create),
+                web.put("/backup/pause", self.backup_pause),
                 web.put("/backup/{stream_id}/preserve", self.backup_preserve),
                 web.put("/replication_state", self.replication_state_set),
                 web.get("/status", self.status_show),
