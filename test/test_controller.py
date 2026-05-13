@@ -2649,3 +2649,62 @@ def test_get_backup_to_purge(
         assert controller._get_backup_to_purge() == controller.state["backups"][0]
     else:
         assert controller._get_backup_to_purge() == expected_no_purge_reason
+
+
+class TestIsSafeToReload:
+    """Lightweight unit tests for Controller.is_safe_to_reload.
+
+    Constructs a Controller via __new__ with only the attributes the method
+    touches (restore_coordinator, backup_streams, lock, log). This keeps the
+    test focused on the reload rule itself — the integration flows elsewhere
+    in this file cover it incidentally at best.
+    """
+
+    def _make_controller(self, *, phase=None, basebackup_stream=False):
+        import logging
+        import threading
+
+        controller = Controller.__new__(Controller)
+        controller.lock = threading.RLock()
+        controller.log = logging.getLogger("controller-reload-test")
+        controller.restore_coordinator = None
+        controller.backup_streams = []
+        if phase is not None:
+            coord = MagicMock()
+            coord.phase = phase
+            controller.restore_coordinator = coord
+        if basebackup_stream:
+            stream = MagicMock()
+            stream.active_phase = BackupStream.ActivePhase.basebackup
+            controller.backup_streams = [stream]
+        return controller
+
+    def test_safe_when_idle(self):
+        assert self._make_controller().is_safe_to_reload()
+
+    def test_unsafe_while_restoring_basebackup(self):
+        controller = self._make_controller(phase=RestoreCoordinator.Phase.restoring_basebackup)
+        assert not controller.is_safe_to_reload()
+
+    def test_unsafe_while_preparing_backup(self):
+        # SIGHUP during xtrabackup --prepare would tear down the controller and
+        # rewind to restoring_basebackup — re-running xbstream extract +
+        # --prepare + --move-back from scratch. On multi-TB restores that's
+        # hours of wasted work, so this must stay in the unsafe set.
+        controller = self._make_controller(phase=RestoreCoordinator.Phase.preparing_backup)
+        assert not controller.is_safe_to_reload()
+
+    def test_safe_in_later_restore_phases(self):
+        # Phases after --prepare are independently resumable, so reload is fine.
+        for phase in (
+            RestoreCoordinator.Phase.rebuilding_tables,
+            RestoreCoordinator.Phase.applying_binlogs,
+            RestoreCoordinator.Phase.finalizing,
+            RestoreCoordinator.Phase.completed,
+        ):
+            controller = self._make_controller(phase=phase)
+            assert controller.is_safe_to_reload(), f"expected safe in phase {phase}"
+
+    def test_unsafe_while_taking_basebackup(self):
+        # Unrelated to the restore path but the method guards both.
+        assert not self._make_controller(basebackup_stream=True).is_safe_to_reload()

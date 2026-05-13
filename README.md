@@ -791,6 +791,7 @@ status 400. For successful requests the response body looks like this:
 {
   "basebackup_compressed_bytes_downloaded": 8489392354,
   "basebackup_compressed_bytes_total": 37458729461,
+  "basebackup_prepare_progress": null,
   "binlogs_being_restored": 0,
   "binlogs_pending": 73,
   "binlogs_restored": 0,
@@ -807,6 +808,16 @@ also been processed.
 **basebackup_compressed_bytes_total**
 
 Total number of (compressed) bytes in the full snapshot.
+
+**basebackup_prepare_progress**
+
+Progress of the current `xtrabackup --prepare` call as an integer
+percentage in the range 0..100, or `null` when the coordinator is
+outside `preparing_backup` or no scan line has been observed yet. The
+value is derived from the InnoDB "Doing recovery: scanned up to log
+sequence number N" lines and the `last_lsn` bound recorded in the
+backup's checkpoints file. On incremental restores this field tracks
+the current prepare iteration only and resets between required backups.
 
 **binlogs_being_restored**
 
@@ -832,7 +843,13 @@ Current phase of backup restoration. Possible options are these:
 - initiating_binlog_downloads: Binary log prefetch operations are being
   scheduled so that progress with those can be made while the full snapshot is
   being restored.
-- restoring_basebackup: The full snapshot is being downloaded and prepared.
+- restoring_basebackup: The full snapshot is being downloaded and
+  extracted via xbstream.
+- preparing_backup: `xtrabackup --prepare` (followed by a short
+  `--move-back`) is applying the redo/undo logs captured in the
+  basebackup. On multi-TB restores this step can take hours;
+  `basebackup_prepare_progress` reports LSN-derived progress during
+  this phase.
 - rebuilding_tables: Rebuilding tables before restoring binary logs. This can
   avoid data corruption when updating from older MySQL versions.
 - refreshing_binlogs: Refreshing binary log info to see if new binary logs have
