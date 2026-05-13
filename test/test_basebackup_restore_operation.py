@@ -140,23 +140,29 @@ class TestPrepareOutputParser:
         assert not captured
 
     def test_callback_fires_only_on_pct_change(self):
+        # The callback contract is "once per integer pct change", not "once per
+        # scan line". InnoDB emits scan lines much more often than the derived
+        # pct advances a whole percent, so we must dedupe at the pct level — not
+        # at the LSN level — to keep state-file writes and lock traffic bounded.
         op = _make_restore_op()
         op.prepare_last_lsn = 1000
-        calls = 0
+        pcts: list[int | None] = []
+        op.prepare_progress_callback = lambda **kw: pcts.append(kw["pct"])
 
-        def _cb(**_):
-            nonlocal calls
-            calls += 1
-
-        op.prepare_progress_callback = _cb
         # pylint: disable=protected-access
-        # First scan seeds scan_start=500 → pct=0; first callback fires.
+        # Seed scan_start=500 → pct=0.
         op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
-        # Same LSN on a subsequent line — no change, no callback.
+        # Same LSN: no advance, no callback.
         op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
+        # Different LSN but same truncated pct: (504-500)/(1000-500) = 0%. Must
+        # not re-fire despite the LSN having advanced — this is the regression
+        # path Copilot flagged in PR #232.
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 504", "stderr")
         # scan_start=500, current=700, last=1000 → 40%; callback fires.
         op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 700", "stderr")
-        assert calls == 2
+        # (703-500)/500 = 40.6% → truncates to the same 40%. Must not re-fire.
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 703", "stderr")
+        assert pcts == [0, 40]
 
 
 def test_get_xtrabackup_cmd():

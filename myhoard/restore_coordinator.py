@@ -491,6 +491,15 @@ class RestoreCoordinator(threading.Thread):
         apply_log_only: bool = False,
         incremental: bool = False,
     ) -> None:
+        # Every invocation starts with an xbstream extract (no prepare progress
+        # signal) before xtrabackup --prepare runs. In the required-backup loop
+        # we may get here with state left over from the previous iteration
+        # (phase=preparing_backup, basebackup_prepare_progress=100); reset both
+        # so /status/restore reflects what's actually happening.
+        self.update_state(
+            phase=self.Phase.restoring_basebackup,
+            basebackup_prepare_progress=None,
+        )
         encryption_key = rsa_decrypt_bytes(self.rsa_private_key_pem, bytes.fromhex(backup_info["encryption_key"]))
         self.basebackup_restore_operation = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
@@ -538,13 +547,6 @@ class RestoreCoordinator(threading.Thread):
 
         last_tool_version: str | None = None
         self.basebackup_bytes_downloaded = 0
-
-        # If we're resuming after a crash inside preparing_backup, rewind the phase
-        # back to restoring_basebackup — xbstream extract will re-run from scratch.
-        self.update_state(
-            phase=self.Phase.restoring_basebackup,
-            basebackup_prepare_progress=None,
-        )
 
         with tempfile.TemporaryDirectory(dir=self.temp_dir, prefix="myhoard_target_") as temp_target_dir:
             try:

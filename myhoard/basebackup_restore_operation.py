@@ -91,6 +91,10 @@ class BasebackupRestoreOperation:
         self.prepare_last_lsn: Optional[int] = None
         self.prepare_scan_start_lsn: Optional[int] = None
         self.prepare_current_lsn: Optional[int] = None
+        # Last integer pct fired to prepare_progress_callback, so we don't fire
+        # the callback repeatedly when successive scan lines advance the LSN but
+        # truncate to the same pct. Reset on each prepare_backup call.
+        self._last_emitted_prepare_pct: Optional[int] = None
         #: Fired when the xtrabackup --prepare subprocess is about to start (with
         #: pct=None) and again whenever the derived pct changes during the run.
         #: Called on the subprocess reader thread — the coordinator handles
@@ -110,6 +114,7 @@ class BasebackupRestoreOperation:
         self.prepare_last_lsn = None
         self.prepare_scan_start_lsn = None
         self.prepare_current_lsn = None
+        self._last_emitted_prepare_pct = None
         if checkpoints_file_content:
             checkpoints = parse_xtrabackup_info(checkpoints_file_content)
             self.prepare_last_lsn = int(checkpoints["last_lsn"])
@@ -182,8 +187,7 @@ class BasebackupRestoreOperation:
                 # --use-free-memory-pct introduced in 8.0.30, but it doesn't work in 8.0.30 and leads to PBX crash
                 if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 32):
                     command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
-                if self.prepare_progress_callback is not None:
-                    self.prepare_progress_callback(pct=None)
+                self._emit_prepare_progress(pct=None)
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -406,11 +410,30 @@ class BasebackupRestoreOperation:
 
         self._raise_if_no_space_left(line, "xtrabackup-prepare")
 
-        if self.prepare_progress_callback is not None and self._advance_prepare_lsn(line):
-            self.prepare_progress_callback(pct=self.prepare_progress_pct)
+        if self._advance_prepare_lsn(line):
+            self._emit_prepare_progress(pct=self.prepare_progress_pct)
 
         if not self._process_prepare_completed_line(line):
             self.log.info("xtrabackup-prepare: %r", line)
+
+    def _emit_prepare_progress(self, *, pct: Optional[int]) -> None:
+        """Fire prepare_progress_callback iff pct differs from the last emission.
+
+        Scan-line LSNs advance much more often than the derived integer pct: an
+        LSN bump of a few KB produces the same pct until the span crosses a 1 %
+        boundary. Without this guard we'd take the coordinator's state lock for
+        every scan line even though update_state would be a no-op, and any
+        non-coordinator callback user would see duplicates.
+
+        None is special-cased as "the prepare is starting" and always fires —
+        the coordinator relies on it to flip into Phase.preparing_backup.
+        """
+        if self.prepare_progress_callback is None:
+            return
+        if pct is not None and pct == self._last_emitted_prepare_pct:
+            return
+        self._last_emitted_prepare_pct = pct
+        self.prepare_progress_callback(pct=pct)
 
     def _process_prepare_completed_line(self, line):
         match = self.prepare_completed_re.search(line)
@@ -428,8 +451,7 @@ class BasebackupRestoreOperation:
                 self.prepare_current_lsn = self.prepare_last_lsn
                 if self.prepare_scan_start_lsn is None:
                     self.prepare_scan_start_lsn = self.prepare_last_lsn
-                if self.prepare_progress_callback is not None:
-                    self.prepare_progress_callback(pct=self.prepare_progress_pct)
+                self._emit_prepare_progress(pct=self.prepare_progress_pct)
         return match
 
     def _advance_prepare_lsn(self, line: str) -> bool:
