@@ -145,7 +145,7 @@ class Controller(threading.Thread):
         stream_to_be_purged: Optional[str]
         server_uuid: Optional[str]
         uploaded_binlogs: list
-        pause_backups_until: str | None
+        paused_backups_until: str | None
 
     def __init__(
         self,
@@ -236,7 +236,7 @@ class Controller(threading.Thread):
             "stream_to_be_purged": None,
             "server_uuid": None,
             "uploaded_binlogs": [],
-            "pause_backups_until": None,
+            "paused_backups_until": None,
         }
         self.state_dir = state_dir
         state_file = os.path.join(state_dir, "myhoard_controller_state.json")
@@ -310,9 +310,12 @@ class Controller(threading.Thread):
             current_requests[stream_id] = preserve_until.isoformat() if preserve_until else None
             self.state_manager.update_state(pending_preservation_requests=current_requests)
 
-    def pause_backups(self, until: datetime.datetime) -> None:
-        self.log.warning("Pausing backups until %s", until)
-        self.state_manager.update_state(pause_backups_until=until.isoformat())
+    def pause_backups(self, paused_until: datetime.datetime | None) -> None:
+        if paused_until is None:
+            self.log.info("Backups are now resumed")
+        else:
+            self.log.warning("Pausing backups until %s", paused_until)
+        self.state_manager.update_state(paused_backups_until=paused_until.isoformat() if paused_until else None)
 
     @property
     def mode(self) -> Mode:
@@ -1356,11 +1359,11 @@ class Controller(threading.Thread):
         return None
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
-        pause_backups_until: str | None = self.state["pause_backups_until"]
-        if pause_backups_until is not None and datetime.datetime.fromisoformat(pause_backups_until) > datetime.datetime.now(
-            datetime.timezone.utc
-        ):
-            self.log.warning("Skipping backup interval check, backups paused until %s", pause_backups_until)
+        paused_backups_until: str | None = self.state["paused_backups_until"]
+        if paused_backups_until is not None and datetime.datetime.fromisoformat(
+            paused_backups_until
+        ) > datetime.datetime.now(datetime.timezone.utc):
+            self.log.warning("Skipping backup interval check, backups paused until %s", paused_backups_until)
             return
 
         normalized_backup_time = self._current_normalized_backup_timestamp()

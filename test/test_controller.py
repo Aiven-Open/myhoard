@@ -1606,7 +1606,7 @@ def test_periodic_backups_are_paused(time_machine, master_controller) -> None:
     while_asserts(lambda: streaming_binlogs(m_controller, 1), timeout=10)
 
     # Pause backups
-    m_controller.state["pause_backups_until"] = datetime.datetime(2023, 1, 10, 3, tzinfo=datetime.timezone.utc).isoformat()
+    m_controller.state["paused_backups_until"] = datetime.datetime(2023, 1, 10, 3, tzinfo=datetime.timezone.utc).isoformat()
 
     flush_binlogs()
 

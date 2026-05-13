@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
+from typing import Any
 
 import asyncio
 import contextlib
@@ -89,21 +90,36 @@ class WebServer:
 
                 return json_response(response)
 
-    async def backup_pause(self, request):
-        with self._handle_request(name="backup_pause"):
+    async def backup_settings(self, request):
+        resource_params = ["paused_until"]  # Currently this endpoint updates only "paused_until"
+        with self._handle_request(name="backup_settings"):
             body = await self._get_request_json(request)
+            if len(body.keys() & resource_params) == 0:
+                raise BadRequest(f"No valid resource parameters were specified, valid params are: {resource_params}")
 
-            try:
-                pause_until = datetime.fromisoformat(body.get("until"))
-            except ValueError:
-                raise BadRequest("`until` must be a valid iso-format datetime string.")
-
-            if pause_until is None or pause_until < datetime.now(timezone.utc):
-                raise BadRequest("pause_until is not a valid date")
-
-            self.controller.pause_backups(until=pause_until)
+            if "paused_until" in body.keys():
+                self._set_paused_until(body)
 
             return json_response({"success": True})
+
+    def _set_paused_until(self, body: dict[str, Any]):
+        paused_until = body.get("paused_until")
+        if paused_until is None:
+            self.controller.pause_backups(paused_until=None)
+            return
+
+        try:
+            paused_until_date = datetime.fromisoformat(paused_until)
+        except ValueError:
+            raise BadRequest("`paused_until` must be a valid iso-format datetime string.")
+
+        if paused_until_date.tzinfo is None:
+            paused_until_date = paused_until_date.replace(tzinfo=timezone.utc)
+
+        if paused_until_date < datetime.now(timezone.utc):
+            raise BadRequest("`paused_until` is not a valid date: date is in the past")
+
+        self.controller.pause_backups(paused_until=paused_until_date)
 
     async def backup_preserve(self, request):
         with self._handle_request(name="backup_preserve"):
@@ -285,7 +301,7 @@ class WebServer:
             [
                 web.get("/backup", self.backup_list),
                 web.post("/backup", self.backup_create),
-                web.put("/backup/pause", self.backup_pause),
+                web.patch("/backup/settings", self.backup_settings),
                 web.put("/backup/{stream_id}/preserve", self.backup_preserve),
                 web.put("/replication_state", self.replication_state_set),
                 web.get("/status", self.status_show),
