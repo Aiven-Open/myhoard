@@ -19,11 +19,11 @@ def _make_restore_op():
     """Construct a BasebackupRestoreOperation with minimal args for parser unit tests.
 
     No subprocess is ever launched; we call _process_prepare_output_line directly.
-    The parser short-circuits when no callback is attached (so we don't parse lines
-    for nothing in production), so we attach a no-op callback by default here.
-    Tests that care about the callback reassign it.
+    Tests attach prepare_progress_callback themselves when they care about what
+    gets emitted; pct tracking (prepare_progress_pct / prepare_current_lsn) is
+    updated from scan lines regardless of whether a callback is attached.
     """
-    op = BasebackupRestoreOperation(
+    return BasebackupRestoreOperation(
         encryption_algorithm="AES256",
         encryption_key=b"0" * 24,
         free_memory_percentage=80,
@@ -34,8 +34,6 @@ def _make_restore_op():
         target_dir="",
         temp_dir="",
     )
-    op.prepare_progress_callback = lambda **_: None
-    return op
 
 
 class TestPrepareOutputParser:

@@ -97,8 +97,11 @@ class BasebackupRestoreOperation:
         self._last_emitted_prepare_pct: Optional[int] = None
         #: Fired when the xtrabackup --prepare subprocess is about to start (with
         #: pct=None) and again whenever the derived pct changes during the run.
-        #: Called on the subprocess reader thread — the coordinator handles
-        #: synchronisation.
+        #: Called synchronously from the thread that invoked prepare_backup() —
+        #: _process_output_loop drains stdout/stderr in-line and calls
+        #: _process_prepare_output_line which emits this callback. Callers must
+        #: not block in the callback for long; the prepare output parser can't
+        #: make progress until it returns.
         self.prepare_progress_callback: Optional[Callable[..., None]] = None
 
     def prepare_backup(

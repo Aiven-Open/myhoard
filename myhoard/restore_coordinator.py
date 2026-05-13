@@ -291,7 +291,16 @@ class RestoreCoordinator(threading.Thread):
             "backup_xtrabackup_version": None,
             "basebackup_prepare_progress": None,
         }
+        # Snapshot the initial defaults before handing self.state to the state manager:
+        # read_state() in StateManager.__init__ does `state.clear(); state.update(json)`,
+        # so any key the JSON file doesn't carry is gone after load. Later writes via
+        # update_state() would then trip its `assert name in self.state` check and
+        # crash the coordinator mid-restore. After the load, backfill any key the
+        # older state file didn't have so we keep working across upgrades.
+        state_defaults = dict(self.state)
         self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
+        for key, default in state_defaults.items():
+            self.state.setdefault(key, default)  # type: ignore[misc]
         self.stats = stats
         self.stream_id = stream_id
         self.target_time = target_time
