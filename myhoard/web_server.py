@@ -212,6 +212,10 @@ class WebServer:
                     "binlogs_pending": coordinator.binlogs_pending,
                     "binlogs_restored": coordinator.binlogs_restored,
                     "phase": coordinator.phase,
+                    # LSN-derived progress (0..100) for the current xtrabackup --prepare
+                    # call. None outside Phase.preparing_backup, or when the on-disk
+                    # state predates this field.
+                    "basebackup_prepare_progress": coordinator.state.get("basebackup_prepare_progress"),
                 }
             return json_response(response)
 
