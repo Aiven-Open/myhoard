@@ -582,19 +582,21 @@ Response on success looks like this:
 }
 ```
 
-## PUT /backup/pause
+## PATCH /backup/settings
 
-Pause scheduled backup until date. Binlogs are still uploaded
+This endpoint is used to update backup settings
 
 ```
 {
-  "until": "{isodatetime}",
+  "paused_until": "{isodatetime|null}",
 }
 ```
 
-**until**
+### Allowed parameters are:
 
-The date after which backups are resumed (should be in iso-format)
+**paused_until** (isodatetime | null) - The date after which backups are resumed (should be in iso-format), when null is specified the backups are resumed
+
+### Response
 
 ```
 {

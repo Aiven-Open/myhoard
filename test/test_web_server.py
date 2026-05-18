@@ -212,25 +212,30 @@ async def test_backup_preserve_wrong_preserve_until(web_client) -> None:
     assert response["message"] == "`preserve_until` must be a date in the future."
 
 
-async def get_and_verify_json_body(client, path, *, expected_status=200):
-    response = await client.get(path)
+async def verify_json_body(response, expected_status=200):
     response_json = await response.json()
     assert response.status == expected_status, f"{response.status} != {expected_status}: {response_json}"
     return response_json
+
+
+async def get_and_verify_json_body(client, path, *, expected_status=200):
+    response = await client.get(path)
+    return await verify_json_body(response=response, expected_status=expected_status)
 
 
 async def post_and_verify_json_body(client, path, body, *, expected_status=200):
     response = await client.post(path, json=body)
-    response_json = await response.json()
-    assert response.status == expected_status, f"{response.status} != {expected_status}: {response_json}"
-    return response_json
+    return await verify_json_body(response=response, expected_status=expected_status)
 
 
 async def put_and_verify_json_body(client, path, body, *, expected_status=200):
     response = await client.put(path, json=body)
-    response_json = await response.json()
-    assert response.status == expected_status, f"{response.status} != {expected_status}: {response_json}"
-    return response_json
+    return await verify_json_body(response=response, expected_status=expected_status)
+
+
+async def patch_and_verify_json_body(client, path, body, *, expected_status=200):
+    response = await client.patch(path, json=body)
+    return await verify_json_body(response=response, expected_status=expected_status)
 
 
 def test_validate_replication_state():
@@ -259,9 +264,25 @@ def test_validate_replication_state():
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}, "zob": {uuid2: []}})
 
 
-async def test_pause_backups(master_controller, web_client):
-    until = datetime.datetime(2099, 1, 3, 3, tzinfo=datetime.timezone.utc)
+async def test_backup_settings(web_client):
+    path = "/backup/settings"
+
+    await patch_and_verify_json_body(web_client, path, {"invalid": ""}, expected_status=400)
+
+
+async def test_backup_settings_paused_until(master_controller, web_client):
+    path = "/backup/settings"
     controller = master_controller[0]
-    response = await put_and_verify_json_body(web_client, "/backup/pause", {"until": until.isoformat()})
-    assert controller.state["pause_backups_until"] == until.isoformat()
+    until = datetime.datetime(1970, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    await patch_and_verify_json_body(web_client, path, {"paused_until": until.isoformat()}, expected_status=400)
+
+    await patch_and_verify_json_body(web_client, path, {"paused_until": "invalid"}, expected_status=400)
+
+    until = datetime.datetime(2099, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    response = await patch_and_verify_json_body(web_client, path, {"paused_until": until.isoformat()})
+    assert controller.state["paused_backups_until"] == until.isoformat()
+    assert response["success"]
+
+    response = await patch_and_verify_json_body(web_client, path, {"paused_until": None})
+    assert controller.state["paused_backups_until"] is None
     assert response["success"]
