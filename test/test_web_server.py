@@ -166,6 +166,9 @@ async def test_status_update_to_restore(master_controller, web_client):
         assert isinstance(response["binlogs_restored"], int)
         # Operation will fail because we faked the backup info
         assert response["phase"] != RestoreCoordinator.Phase.failed
+        # The prepare-progress field is always present in the response; None before
+        # the coordinator enters Phase.preparing_backup.
+        assert "basebackup_prepare_progress" in response
 
     master_controller[0].state["backups"].append(
         {"stream_id": "abc", "site": "default", "basebackup_info": {"end_ts": 1234567}}

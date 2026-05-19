@@ -9,6 +9,7 @@ from rohmu.object_storage.local import LocalTransfer
 from typing import Any, cast, Generic, List, Mapping, TypeVar
 from unittest.mock import Mock, patch
 
+import json
 import myhoard.util as myhoard_util
 import os
 import pytest
@@ -606,3 +607,77 @@ def test_basebackup_bytes_total(
     )
     rc.update_state(basebackup_info=basebackup_info, required_backups=required_backups)
     assert rc.basebackup_bytes_total == expected_bytes_total
+
+
+def _make_minimal_coordinator(session_tmpdir, state_file=None):
+    return RestoreCoordinator(
+        binlog_streams=[],
+        download_workers_count=2,
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params="-",
+        mysql_config_file_name="-",
+        mysql_data_directory="/dev/null",
+        mysql_relay_log_index_file="/dev/null",
+        mysql_relay_log_prefix="/dev/null",
+        pending_binlogs_state_file="/dev/null",
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="/dev/null",
+        site="default",
+        state_file=state_file or os.path.join(session_tmpdir().strpath, "the_state_file.json"),
+        stats=build_statsd_client(),
+        stream_id="-",
+        temp_dir=session_tmpdir().strpath,
+    )
+
+
+def test_on_prepare_progress_flips_phase_and_persists_pct(session_tmpdir):
+    # pylint: disable=protected-access
+    rc = _make_minimal_coordinator(session_tmpdir)
+    # Enter from restoring_basebackup with a leftover pct from a hypothetical
+    # previous required-backup iteration. The first pct=None call (fired at the
+    # xtrabackup --prepare Popen) both flips phase and wipes the stale pct.
+    rc.update_state(phase=RestoreCoordinator.Phase.restoring_basebackup, basebackup_prepare_progress=42)
+    rc._on_prepare_progress(pct=None)
+    assert rc.state["phase"] == RestoreCoordinator.Phase.preparing_backup
+    assert rc.state["basebackup_prepare_progress"] is None
+
+    # Subsequent calls carry the real pct from the LSN scan.
+    rc._on_prepare_progress(pct=37)
+    assert rc.state["basebackup_prepare_progress"] == 37
+    rc._on_prepare_progress(pct=88)
+    assert rc.state["basebackup_prepare_progress"] == 88
+
+
+def test_older_state_file_missing_keys_is_backfilled(session_tmpdir):
+    # StateManager.read_state() does `state.clear(); state.update(json)`, so any
+    # default set in RestoreCoordinator.__init__ that the on-disk JSON doesn't
+    # carry disappears after load. update_state() then asserts key presence and
+    # would crash the coordinator mid-restore on the first write. Simulate an
+    # in-progress restore that was persisted before this field existed and
+    # verify the coordinator transparently backfills.
+    state_file = os.path.join(session_tmpdir().strpath, "the_state_file.json")
+    # Intentionally minimal and missing basebackup_prepare_progress + other
+    # recently-added keys like backup_xtrabackup_version. This mirrors what an
+    # older myhoard release would have persisted.
+    old_state = {
+        "phase": "restoring_basebackup",
+        "basebackup_info": {},
+        "basebackup_restore_errors": 0,
+        "binlogs_restored": 0,
+    }
+    with open(state_file, "w") as f:
+        json.dump(old_state, f)
+
+    rc = _make_minimal_coordinator(session_tmpdir, state_file=state_file)
+
+    # Defaults for every field expected in a fresh state dict are now present,
+    # so update_state() can write any of them without tripping its assert.
+    assert rc.state["basebackup_prepare_progress"] is None
+    assert "backup_xtrabackup_version" in rc.state
+    rc.update_state(basebackup_prepare_progress=50)  # would previously AssertionError
+    assert rc.state["basebackup_prepare_progress"] == 50
+    # Fields that *were* in the on-disk file are preserved — backfill must not
+    # clobber them with defaults.
+    assert rc.phase == RestoreCoordinator.Phase.restoring_basebackup

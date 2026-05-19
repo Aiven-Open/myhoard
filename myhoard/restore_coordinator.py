@@ -107,6 +107,12 @@ class RestoreCoordinator(threading.Thread):
         getting_backup_info = "getting_backup_info"
         initiating_binlog_downloads = "initiating_binlog_downloads"
         restoring_basebackup = "restoring_basebackup"
+        # xtrabackup --prepare on the extracted basebackup data. Split out from
+        # restoring_basebackup because on large (multi-TB) datasets this step can
+        # take hours and we want to surface its own progress. The final
+        # --move-back step runs inside this same phase; it has no progress signal
+        # and is typically short.
+        preparing_backup = "preparing_backup"
         rebuilding_tables = "rebuilding_tables"
         refreshing_binlogs = "refreshing_binlogs"
         applying_binlogs = "applying_binlogs"
@@ -157,6 +163,14 @@ class RestoreCoordinator(threading.Thread):
         target_time_reached: bool
         write_relay_log_manually: bool
         backup_xtrabackup_version: BinVersion | None
+        # xtrabackup --prepare progress as a 0..100 integer percent, derived from how
+        # far the InnoDB scan LSN has advanced between the first scan-line LSN and
+        # last_lsn (the redo stop LSN from the checkpoints file). None outside
+        # Phase.preparing_backup or before the first scan line is seen. Reports
+        # progress for the *current* prepare call only; during an incremental restore
+        # that chains multiple prepare calls the value resets between them.
+        # Added field — read via .get() so older state files keep loading.
+        basebackup_prepare_progress: Optional[int]
 
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
@@ -275,8 +289,18 @@ class RestoreCoordinator(threading.Thread):
             "target_time_reached": False,
             "write_relay_log_manually": False,
             "backup_xtrabackup_version": None,
+            "basebackup_prepare_progress": None,
         }
+        # Snapshot the initial defaults before handing self.state to the state manager:
+        # read_state() in StateManager.__init__ does `state.clear(); state.update(json)`,
+        # so any key the JSON file doesn't carry is gone after load. Later writes via
+        # update_state() would then trip its `assert name in self.state` check and
+        # crash the coordinator mid-restore. After the load, backfill any key the
+        # older state file didn't have so we keep working across upgrades.
+        state_defaults = dict(self.state)
         self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
+        for key, default in state_defaults.items():
+            self.state.setdefault(key, default)  # type: ignore[misc]
         self.stats = stats
         self.stream_id = stream_id
         self.target_time = target_time
@@ -366,7 +390,10 @@ class RestoreCoordinator(threading.Thread):
                     self.get_backup_info()
                 if self.phase == self.Phase.initiating_binlog_downloads:
                     self.initiate_binlog_downloads()
-                if self.phase == self.Phase.restoring_basebackup:
+                if self.phase in {self.Phase.restoring_basebackup, self.Phase.preparing_backup}:
+                    # Phase.preparing_backup is not independently resumable: if the
+                    # process died during --prepare, we re-run the whole basebackup
+                    # restore (xbstream extract + prepare + move-back) from scratch.
                     self.restore_basebackup()
                 if self.phase == self.Phase.rebuilding_tables:
                     self.rebuild_tables()
@@ -473,6 +500,15 @@ class RestoreCoordinator(threading.Thread):
         apply_log_only: bool = False,
         incremental: bool = False,
     ) -> None:
+        # Every invocation starts with an xbstream extract (no prepare progress
+        # signal) before xtrabackup --prepare runs. In the required-backup loop
+        # we may get here with state left over from the previous iteration
+        # (phase=preparing_backup, basebackup_prepare_progress=100); reset both
+        # so /status/restore reflects what's actually happening.
+        self.update_state(
+            phase=self.Phase.restoring_basebackup,
+            basebackup_prepare_progress=None,
+        )
         encryption_key = rsa_decrypt_bytes(self.rsa_private_key_pem, bytes.fromhex(backup_info["encryption_key"]))
         self.basebackup_restore_operation = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
@@ -486,6 +522,7 @@ class RestoreCoordinator(threading.Thread):
             free_memory_percentage=self.free_memory_percentage,
             backup_tool_version=backup_info.get("tool_version"),
         )
+        self.basebackup_restore_operation.prepare_progress_callback = self._on_prepare_progress
         try:
             self.basebackup_restore_operation.prepare_backup(
                 apply_log_only=apply_log_only,
@@ -498,6 +535,16 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.disk_full_errors")
             self.update_state(phase=self.Phase.failed)
             raise
+
+    def _on_prepare_progress(self, *, pct: int | None) -> None:
+        # Fired once with pct=None when xtrabackup --prepare starts (that's our cue
+        # to flip phase) and again each time the derived pct changes during the run.
+        # update_state is a no-op on unchanged values so at most ~101 writes happen
+        # across a single prepare run.
+        self.update_state(
+            phase=self.Phase.preparing_backup,
+            basebackup_prepare_progress=pct,
+        )
 
     def restore_basebackup(self) -> None:
         if os.path.exists(self.mysql_data_directory):
@@ -569,6 +616,7 @@ class RestoreCoordinator(threading.Thread):
                     phase=next_phase,
                     basebackup_restore_duration=duration,
                     last_rebuilt_table=None,
+                    basebackup_prepare_progress=None,
                 )
 
             except Exception as ex:  # pylint: disable=broad-except

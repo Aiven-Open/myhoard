@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
+from myhoard.restore_coordinator import RestoreCoordinator
 from typing import Any
 
 import asyncio
@@ -205,6 +206,18 @@ class WebServer:
                 raise Exception("Restore coordinator is not available even though state is 'restore'")
 
             with coordinator.state_manager.lock:
+                # LSN-derived progress (0..100) for the current xtrabackup --prepare
+                # call. None outside Phase.preparing_backup, or when the on-disk state
+                # predates this field. The stored value is gated on the live phase
+                # because failure paths (DiskFullError -> Phase.failed, repeated
+                # errors -> Phase.failed_basebackup) do not clear the stored pct, so
+                # exposing it unconditionally can surface a stale 42% / 100% after
+                # the prepare is gone.
+                prepare_progress = (
+                    coordinator.state.get("basebackup_prepare_progress")
+                    if coordinator.phase == RestoreCoordinator.Phase.preparing_backup
+                    else None
+                )
                 response = {
                     "basebackup_compressed_bytes_downloaded": coordinator.basebackup_bytes_downloaded,
                     "basebackup_compressed_bytes_total": coordinator.basebackup_bytes_total,
@@ -212,6 +225,7 @@ class WebServer:
                     "binlogs_pending": coordinator.binlogs_pending,
                     "binlogs_restored": coordinator.binlogs_restored,
                     "phase": coordinator.phase,
+                    "basebackup_prepare_progress": prepare_progress,
                 }
             return json_response(response)
 
