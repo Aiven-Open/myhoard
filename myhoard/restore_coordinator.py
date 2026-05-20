@@ -503,8 +503,9 @@ class RestoreCoordinator(threading.Thread):
         if os.path.exists(self.mysql_data_directory):
             if not os.path.isdir(self.mysql_data_directory):
                 raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists and is not a directory")
-            if os.listdir(self.mysql_data_directory):
-                raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists and is not empty")
+            with os.scandir(self.mysql_data_directory) as entries:
+                if next(entries, None) is not None:
+                    raise ValueError(f"MySQL data directory {self.mysql_data_directory!r} already exists and is not empty")
 
         start_time = time.monotonic()
         restore_basebackup_info = self.state["basebackup_info"]
