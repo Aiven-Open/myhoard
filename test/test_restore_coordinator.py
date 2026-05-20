@@ -479,6 +479,78 @@ def test_should_mark_backup_as_broken(session_tmpdir):
     assert rc.should_mark_backup_as_broken()
 
 
+def test_restore_basebackup_allows_empty_existing_mysql_data_directory(session_tmpdir):
+    state_file = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
+    mysql_data_directory = os.path.join(session_tmpdir().strpath, "mysql-data")
+    temp_dir = os.path.join(session_tmpdir().strpath, "temp")
+    os.makedirs(mysql_data_directory)
+    os.makedirs(temp_dir)
+
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        download_workers_count=2,
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory=mysql_data_directory,
+        mysql_relay_log_index_file="",
+        mysql_relay_log_prefix="",
+        pending_binlogs_state_file=os.path.join(session_tmpdir().strpath, "restore_coordinator.pending_binlogs"),
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="",
+        site="default",
+        state_file=state_file,
+        stats=build_statsd_client(),
+        stream_id="stream-id",
+        target_time=None,
+        temp_dir=temp_dir,
+    )
+    rc.state["basebackup_info"] = {}
+
+    with patch.object(rc, "_run_basebackup_restore_operation") as mock_restore:
+        rc.restore_basebackup()
+
+    mock_restore.assert_called_once()
+    assert rc.state["phase"] == RestoreCoordinator.Phase.refreshing_binlogs
+
+
+def test_restore_basebackup_rejects_nonempty_existing_mysql_data_directory(session_tmpdir):
+    state_file = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
+    mysql_data_directory = os.path.join(session_tmpdir().strpath, "mysql-data")
+    temp_dir = os.path.join(session_tmpdir().strpath, "temp")
+    os.makedirs(mysql_data_directory)
+    os.makedirs(temp_dir)
+    with open(os.path.join(mysql_data_directory, "existing-file"), "w", encoding="utf-8") as existing_file:
+        existing_file.write("content")
+
+    rc = RestoreCoordinator(
+        binlog_streams=[],
+        download_workers_count=2,
+        file_storage_config={},
+        free_memory_percentage=80,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory=mysql_data_directory,
+        mysql_relay_log_index_file="",
+        mysql_relay_log_prefix="",
+        pending_binlogs_state_file=os.path.join(session_tmpdir().strpath, "restore_coordinator.pending_binlogs"),
+        rebuild_tables=False,
+        restart_mysqld_callback=lambda **kwargs: None,
+        rsa_private_key_pem="",
+        site="default",
+        state_file=state_file,
+        stats=build_statsd_client(),
+        stream_id="stream-id",
+        target_time=None,
+        temp_dir=temp_dir,
+    )
+
+    with pytest.raises(ValueError, match="already exists and is not empty"):
+        rc.restore_basebackup()
+
+
 def test_restore_coordinator_check_parameter_before_restart(session_tmpdir):
     # pylint: disable=W0212,W0108
     restarts = []
