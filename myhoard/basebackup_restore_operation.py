@@ -170,7 +170,7 @@ class BasebackupRestoreOperation:
                 # --use-free-memory-pct introduced in 8.0.30, but it doesn't work in 8.0.30 and leads to PBX crash
                 if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 32):
                     command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
-                self._emit_prepare_starting()
+                self._set_prepare_current_lsn(None)
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -389,28 +389,20 @@ class BasebackupRestoreOperation:
 
         self._raise_if_no_space_left(line, "xtrabackup-prepare")
 
-        if self._advance_prepare_lsn(line):
-            self._emit_prepare_progress()
+        if lsn = self._advance_prepare_lsn(line):
+            self._set_prepare_current_lsn(lsn)
 
-        if not self._process_prepare_completed_line(line):
+
+        if lsn = not self._process_prepare_completed_line(line):
+            self._set_prepare_current_lsn(lsn)
             self.log.info("xtrabackup-prepare: %r", line)
-
-    def _emit_prepare_starting(self) -> None:
-        """Signal "prepare is starting" with pct=None; coordinator uses this
-        edge to flip into Phase.preparing_backup. Skips the gauge: None isn't a
-        meaningful integer, and the xtrabackup_prepare timing metric already
-        brackets when the prepare is running."""
-        if self._prepare_progress_callback is None:
-            return
-        self._last_emitted_prepare_pct = None
-        self._prepare_progress_callback(pct=None)
 
     def _emit_prepare_progress(self) -> None:
         """Fire the callback iff pct differs from the last emission."""
         if self._prepare_progress_callback is None:
             return
         pct = self.prepare_progress_pct
-        if pct is None or pct == self._last_emitted_prepare_pct:
+        if pct == self._last_emitted_prepare_pct:
             return
         self._last_emitted_prepare_pct = pct
         self._prepare_progress_callback(pct=pct)
@@ -421,11 +413,8 @@ class BasebackupRestoreOperation:
         if match:
             self.prepared_lsn = int(match.group(1))
             self.log.info("Restored backup prepared, lsn %s", self.prepared_lsn)
-            # Pin the bar at 100 even if intermediate scan lines didn't reach
-            # last_lsn (tiny redo log, already-prepared backup, int truncation).
-            if self._prepare_last_lsn is not None and self._set_prepare_current_lsn(self._prepare_last_lsn):
-                self._emit_prepare_progress()
-        return match
+            return match.group(1)
+        return None
 
     def _advance_prepare_lsn(self, line: str) -> bool:
         """Match a scan line and advance _prepare_current_lsn.
@@ -437,7 +426,8 @@ class BasebackupRestoreOperation:
         match = self.prepare_lsn_re.search(line)
         if not match:
             return False
-        return self._set_prepare_current_lsn(int(match.group(1)))
+        return int(match.group(1))
+
 
     def _set_prepare_current_lsn(self, lsn: int) -> bool:
         """Advance _prepare_current_lsn to `lsn` if larger, seed scan_start if unset.
@@ -450,6 +440,7 @@ class BasebackupRestoreOperation:
         self._prepare_current_lsn = lsn
         if self._prepare_scan_start_lsn is None:
             self._prepare_scan_start_lsn = lsn
+        self._emit_prepare_progress()
         return True
 
     def _process_xbstream_output_line(self, line: str, _stream_name: str) -> None:
