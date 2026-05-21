@@ -5,10 +5,11 @@ from .util import (
     find_extra_xtrabackup_executables,
     get_xtrabackup_version,
     parse_version,
+    parse_xtrabackup_info,
 )
 from contextlib import suppress
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Dict, Final, Optional
+from typing import Callable, Dict, Final, Optional
 
 import base64
 import fnmatch
@@ -33,6 +34,11 @@ class BasebackupRestoreOperation:
 
     prepare_completed_re = re.compile(r"Shutdown completed; log sequence number (\d+)$")
 
+    # Canonical InnoDB scan line, emitted repeatedly during recovery; its LSN
+    # monotonically advances towards last_lsn and is the only signal we use for
+    # prepare progress.
+    prepare_lsn_re = re.compile(r"Doing recovery: scanned up to log sequence number (\d+)")
+
     def __init__(
         self,
         *,
@@ -46,6 +52,7 @@ class BasebackupRestoreOperation:
         target_dir: str,
         temp_dir: str,
         backup_tool_version: str | None = None,
+        prepare_progress_callback: Optional[Callable[..., None]] = None,
     ):
         self.current_file = None
         self.data_directory_size_end = None
@@ -65,11 +72,35 @@ class BasebackupRestoreOperation:
         self.temp_dir = temp_dir
         self.backup_xtrabackup_info: Dict[str, str] | None = None
         self.backup_tool_version = backup_tool_version
+        # LSN bounds for prepare progress. Use last_lsn (redo stop LSN) over
+        # to_lsn so the bar doesn't hit 100% before the redo tail is applied,
+        # and scan_start (first observed scan-line LSN) over from_lsn so the
+        # bar doesn't sit at ~99% on full backups (from_lsn=0 there).
+        self._prepare_last_lsn: Optional[int] = None
+        self._prepare_scan_start_lsn: Optional[int] = None
+        self._prepare_current_lsn: Optional[int] = None
+        # Dedupe the callback: scan lines advance the LSN much more often than
+        # the truncated integer pct.
+        self._last_emitted_prepare_pct: Optional[int] = None
+        # Called synchronously from the coordinator thread (_process_output_loop
+        # drains stdout/stderr in-line); long callbacks stall the parser.
+        self._prepare_progress_callback = prepare_progress_callback
 
     def prepare_backup(
         self, incremental: bool = False, apply_log_only: bool = False, checkpoints_file_content: str | None = None
     ):
         # Write encryption key to file to avoid having it on command line. NamedTemporaryFile has mode 0600
+
+        # Reset progress state so values don't leak across prepare calls (e.g.
+        # required-backup iteration). Legacy backups without checkpoints
+        # content leave _prepare_last_lsn unset, which suppresses the parser.
+        self._prepare_last_lsn = None
+        self._prepare_scan_start_lsn = None
+        self._prepare_current_lsn = None
+        self._last_emitted_prepare_pct = None
+        if checkpoints_file_content:
+            checkpoints = parse_xtrabackup_info(checkpoints_file_content)
+            self._prepare_last_lsn = int(checkpoints["last_lsn"])
 
         incremental_dir = None
         try:
@@ -139,6 +170,7 @@ class BasebackupRestoreOperation:
                 # --use-free-memory-pct introduced in 8.0.30, but it doesn't work in 8.0.30 and leads to PBX crash
                 if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 32):
                     command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
+                self._emit_prepare_starting()
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -336,6 +368,20 @@ class BasebackupRestoreOperation:
 
         self.log.info("xtrabackup-move: %r", line)
 
+    @property
+    def prepare_progress_pct(self) -> Optional[int]:
+        """xtrabackup --prepare progress as a 0..100 int, derived on demand.
+
+        None when last_lsn isn't known (legacy backup) or before the first scan
+        line has been seen.
+        """
+        if self._prepare_last_lsn is None or self._prepare_scan_start_lsn is None or self._prepare_current_lsn is None:
+            return None
+        span = self._prepare_last_lsn - self._prepare_scan_start_lsn
+        if span <= 0:
+            return 100
+        return max(0, min(100, int((self._prepare_current_lsn - self._prepare_scan_start_lsn) * 100.0 / span)))
+
     def _process_prepare_output_line(self, line: str, _stream_name: str) -> None:
         line = self.decode_output_line(line)
         if not line:
@@ -343,15 +389,68 @@ class BasebackupRestoreOperation:
 
         self._raise_if_no_space_left(line, "xtrabackup-prepare")
 
+        if self._advance_prepare_lsn(line):
+            self._emit_prepare_progress()
+
         if not self._process_prepare_completed_line(line):
             self.log.info("xtrabackup-prepare: %r", line)
+
+    def _emit_prepare_starting(self) -> None:
+        """Signal "prepare is starting" with pct=None; coordinator uses this
+        edge to flip into Phase.preparing_backup. Skips the gauge: None isn't a
+        meaningful integer, and the xtrabackup_prepare timing metric already
+        brackets when the prepare is running."""
+        if self._prepare_progress_callback is None:
+            return
+        self._last_emitted_prepare_pct = None
+        self._prepare_progress_callback(pct=None)
+
+    def _emit_prepare_progress(self) -> None:
+        """Fire the callback iff pct differs from the last emission."""
+        if self._prepare_progress_callback is None:
+            return
+        pct = self.prepare_progress_pct
+        if pct is None or pct == self._last_emitted_prepare_pct:
+            return
+        self._last_emitted_prepare_pct = pct
+        self._prepare_progress_callback(pct=pct)
+        self.stats.gauge_int("myhoard.basebackup_restore.xtrabackup_prepare_progress", pct)
 
     def _process_prepare_completed_line(self, line):
         match = self.prepare_completed_re.search(line)
         if match:
             self.prepared_lsn = int(match.group(1))
             self.log.info("Restored backup prepared, lsn %s", self.prepared_lsn)
+            # Pin the bar at 100 even if intermediate scan lines didn't reach
+            # last_lsn (tiny redo log, already-prepared backup, int truncation).
+            if self._prepare_last_lsn is not None and self._set_prepare_current_lsn(self._prepare_last_lsn):
+                self._emit_prepare_progress()
         return match
+
+    def _advance_prepare_lsn(self, line: str) -> bool:
+        """Match a scan line and advance _prepare_current_lsn.
+
+        Returns True only when both last_lsn is known and the LSN advanced.
+        """
+        if self._prepare_last_lsn is None:
+            return False
+        match = self.prepare_lsn_re.search(line)
+        if not match:
+            return False
+        return self._set_prepare_current_lsn(int(match.group(1)))
+
+    def _set_prepare_current_lsn(self, lsn: int) -> bool:
+        """Advance _prepare_current_lsn to `lsn` if larger, seed scan_start if unset.
+
+        Shared between scan-line advance and the post-shutdown pin-to-100 path.
+        Returns True if the value moved.
+        """
+        if self._prepare_current_lsn is not None and lsn <= self._prepare_current_lsn:
+            return False
+        self._prepare_current_lsn = lsn
+        if self._prepare_scan_start_lsn is None:
+            self._prepare_scan_start_lsn = lsn
+        return True
 
     def _process_xbstream_output_line(self, line: str, _stream_name: str) -> None:
         line = self.decode_output_line(line)

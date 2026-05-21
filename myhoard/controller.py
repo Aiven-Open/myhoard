@@ -257,7 +257,14 @@ class Controller(threading.Thread):
 
     def is_safe_to_reload(self) -> bool:
         restore_coordinator = self.restore_coordinator
-        if restore_coordinator and restore_coordinator.phase == RestoreCoordinator.Phase.restoring_basebackup:
+        # Neither phase is independently resumable: a reload-triggered restart
+        # rewinds to restoring_basebackup and re-runs the whole sequence,
+        # which can be hours on multi-TB restores.
+        unsafe_restore_phases = {
+            RestoreCoordinator.Phase.restoring_basebackup,
+            RestoreCoordinator.Phase.preparing_backup,
+        }
+        if restore_coordinator and restore_coordinator.phase in unsafe_restore_phases:
             return False
         with self.lock:
             for stream in self.backup_streams:

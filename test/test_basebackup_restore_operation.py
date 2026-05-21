@@ -15,6 +15,142 @@ import tempfile
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
+def _make_restore_op(prepare_progress_callback=None):
+    """Minimal BasebackupRestoreOperation for parser unit tests; no subprocess
+    is launched."""
+    return BasebackupRestoreOperation(
+        encryption_algorithm="AES256",
+        encryption_key=b"0" * 24,
+        free_memory_percentage=80,
+        mysql_config_file_name="/dev/null",
+        mysql_data_directory="/dev/null",
+        stats=build_statsd_client(),
+        stream_handler=None,
+        target_dir="",
+        temp_dir="",
+        prepare_progress_callback=prepare_progress_callback,
+    )
+
+
+class TestPrepareOutputParser:
+    """The parser only drives progress from the canonical InnoDB scan line:
+
+        InnoDB: Doing recovery: scanned up to log sequence number N
+
+    Other lines mentioning LSNs are intentionally ignored.
+    """
+
+    # pylint: disable=protected-access
+    def _feed(self, op, lines):
+        for line in lines:
+            op._process_prepare_output_line(line.encode("utf-8"), "stderr")
+
+    def test_lsn_progress_monotone(self):
+        # The first scan line seeds scan_start_lsn (so the window anchors at
+        # the first observed LSN, not from_lsn=0); later lines animate across
+        # (last_lsn - scan_start).
+        captured: list[int | None] = []
+        op = _make_restore_op(prepare_progress_callback=lambda **kw: captured.append(kw["pct"]))
+        op._prepare_last_lsn = 2000
+
+        self._feed(
+            op,
+            [
+                "InnoDB: Doing recovery: scanned up to log sequence number 1000",
+                "InnoDB: Doing recovery: scanned up to log sequence number 1500",
+                "InnoDB: Doing recovery: scanned up to log sequence number 1900",
+            ],
+        )
+        assert op.prepare_progress_pct == 90
+        assert captured == [0, 50, 90]
+
+    def test_ignores_non_scan_lines(self):
+        # Only "Doing recovery: scanned up to log sequence number N" drives progress.
+        # Other InnoDB lines that mention LSNs must not advance the bar.
+        op = _make_restore_op()
+        op._prepare_last_lsn = 1000
+        self._feed(
+            op,
+            [
+                "InnoDB: Applying log record at LSN 9999",
+                "InnoDB: Starting crash recovery from checkpoint LSN 500",
+            ],
+        )
+        assert op.prepare_progress_pct is None
+
+    def test_pct_never_regresses(self):
+        op = _make_restore_op()
+        op._prepare_last_lsn = 1000
+        self._feed(
+            op,
+            [
+                "InnoDB: Doing recovery: scanned up to log sequence number 500",
+                # Out-of-order smaller LSN must not pull the bar back.
+                "InnoDB: Doing recovery: scanned up to log sequence number 300",
+                "InnoDB: Doing recovery: scanned up to log sequence number 750",
+            ],
+        )
+        assert op.prepare_progress_pct == 50
+
+    def test_pct_pinned_at_100_on_shutdown_completed(self):
+        # "Shutdown completed" pins to 100% even when no scan line landed; the
+        # property's span<=0 branch handles scan_start==last_lsn.
+        op = _make_restore_op()
+        op._prepare_last_lsn = 1000
+        op._process_prepare_output_line(b"Shutdown completed; log sequence number 2000", "stderr")
+        assert op.prepared_lsn == 2000
+        assert op.prepare_progress_pct == 100
+
+    def test_zero_range_does_not_divide_by_zero(self):
+        # One scan line at exactly last_lsn → denominator zero, pin at 100.
+        op = _make_restore_op()
+        op._prepare_last_lsn = 500
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
+        assert op.prepare_progress_pct == 100
+
+    def test_no_checkpoints_means_no_pct_and_no_callback(self):
+        captured: list[int | None] = []
+        op = _make_restore_op(prepare_progress_callback=lambda **kw: captured.append(kw["pct"]))
+
+        self._feed(op, ["InnoDB: Doing recovery: scanned up to log sequence number 100"])
+        assert op.prepare_progress_pct is None
+        assert not captured
+
+    def test_callback_fires_only_on_pct_change(self):
+        # Dedupe at the integer-pct level: scan lines advance the LSN more
+        # often than the truncated pct, but the callback must fire once per
+        # whole-percent change.
+        pcts: list[int | None] = []
+        op = _make_restore_op(prepare_progress_callback=lambda **kw: pcts.append(kw["pct"]))
+        op._prepare_last_lsn = 1000
+
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
+        # Different LSN but same truncated pct (0%): must not re-fire.
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 504", "stderr")
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 700", "stderr")
+        # 40.6% → truncates to the same 40%: must not re-fire.
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 703", "stderr")
+        assert pcts == [0, 40]
+
+    def test_metric_emitted_on_pct_change(self):
+        # The gauge tracks the same dedupe gate as the callback; the starting
+        # marker (_emit_prepare_starting) doesn't emit because None isn't a
+        # meaningful integer.
+        pcts: list[int | None] = []
+        op = _make_restore_op(prepare_progress_callback=lambda **kw: pcts.append(kw["pct"]))
+        op._prepare_last_lsn = 1000
+        with patch.object(op.stats, "gauge_int") as gauge:
+            op._emit_prepare_starting()
+            op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
+            op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 700", "stderr")
+            op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 703", "stderr")
+        assert gauge.call_args_list == [
+            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0), {}),
+            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 40), {}),
+        ]
+
+
 def test_get_xtrabackup_cmd():
     op_kwargs = {
         "encryption_algorithm": "AES256",
@@ -79,6 +215,7 @@ def test_basic_restore(mysql_master, mysql_empty):
             stream.close()
 
         with tempfile.TemporaryDirectory(dir=mysql_empty.base_dir, prefix="myhoard_target_") as temp_target_dir:
+            progress_pcts: list[int | None] = []
             restore_op = BasebackupRestoreOperation(
                 encryption_algorithm="AES256",
                 encryption_key=encryption_key,
@@ -90,11 +227,15 @@ def test_basic_restore(mysql_master, mysql_empty):
                 target_dir=temp_target_dir,
                 temp_dir=mysql_empty.base_dir,
                 backup_tool_version=xtrabackup_version_to_string(myhoard_util.get_xtrabackup_version()),
+                prepare_progress_callback=lambda *, pct: progress_pcts.append(pct),
             )
-            restore_op.prepare_backup()
+            restore_op.prepare_backup(checkpoints_file_content=backup_op.checkpoints_file_content)
             restore_op.restore_backup()
 
         assert restore_op.number_of_files >= backup_op.number_of_files
+        assert progress_pcts[0] is None
+        assert progress_pcts[-1] == 100
+        assert restore_op.prepare_progress_pct == 100
 
     mysql_empty.proc = subprocess.Popen(mysql_empty.startup_command)  # pylint: disable=consider-using-with
     wait_for_port(mysql_empty.port)
