@@ -107,6 +107,12 @@ class RestoreCoordinator(threading.Thread):
         getting_backup_info = "getting_backup_info"
         initiating_binlog_downloads = "initiating_binlog_downloads"
         restoring_basebackup = "restoring_basebackup"
+        # Reached once xbstream extract is done and xtrabackup --prepare /
+        # --move-back is running. Distinct from restoring_basebackup so
+        # /status/restore can surface its own progress (multi-TB prepares can
+        # take hours). Not independently resumable: a resume re-enters
+        # restore_basebackup() and re-runs extract + prepare + move-back.
+        preparing_backup = "preparing_backup"
         rebuilding_tables = "rebuilding_tables"
         refreshing_binlogs = "refreshing_binlogs"
         applying_binlogs = "applying_binlogs"
@@ -157,6 +163,11 @@ class RestoreCoordinator(threading.Thread):
         target_time_reached: bool
         write_relay_log_manually: bool
         backup_xtrabackup_version: BinVersion | None
+        # 0..100 integer percent for the *current* xtrabackup --prepare call;
+        # reset between prepare calls in an incremental restore. Stored value
+        # may be stale outside Phase.preparing_backup (failure paths don't
+        # clear it); the API surface gates on the live phase.
+        basebackup_prepare_progress: Optional[int]
 
     POLL_PHASES = {Phase.waiting_for_apply_to_finish}
 
@@ -275,6 +286,7 @@ class RestoreCoordinator(threading.Thread):
             "target_time_reached": False,
             "write_relay_log_manually": False,
             "backup_xtrabackup_version": None,
+            "basebackup_prepare_progress": None,
         }
         self.state_manager = state_manager_class(lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
@@ -366,7 +378,9 @@ class RestoreCoordinator(threading.Thread):
                     self.get_backup_info()
                 if self.phase == self.Phase.initiating_binlog_downloads:
                     self.initiate_binlog_downloads()
-                if self.phase == self.Phase.restoring_basebackup:
+                if self.phase in {self.Phase.restoring_basebackup, self.Phase.preparing_backup}:
+                    # preparing_backup isn't independently resumable; on resume
+                    # we re-run extract + prepare + move-back from scratch.
                     self.restore_basebackup()
                 if self.phase == self.Phase.rebuilding_tables:
                     self.rebuild_tables()
@@ -473,6 +487,13 @@ class RestoreCoordinator(threading.Thread):
         apply_log_only: bool = False,
         incremental: bool = False,
     ) -> None:
+        # Reset state left over from a previous required-backup iteration so
+        # /status/restore reflects the upcoming xbstream extract, not the prior
+        # prepare.
+        self.update_state(
+            phase=self.Phase.restoring_basebackup,
+            basebackup_prepare_progress=None,
+        )
         encryption_key = rsa_decrypt_bytes(self.rsa_private_key_pem, bytes.fromhex(backup_info["encryption_key"]))
         self.basebackup_restore_operation = BasebackupRestoreOperation(
             encryption_algorithm="AES256",
@@ -485,6 +506,7 @@ class RestoreCoordinator(threading.Thread):
             temp_dir=temp_dir,
             free_memory_percentage=self.free_memory_percentage,
             backup_tool_version=backup_info.get("tool_version"),
+            prepare_progress_callback=self._on_prepare_progress,
         )
         try:
             self.basebackup_restore_operation.prepare_backup(
@@ -498,6 +520,14 @@ class RestoreCoordinator(threading.Thread):
             self.stats.increase("myhoard.disk_full_errors")
             self.update_state(phase=self.Phase.failed)
             raise
+
+    def _on_prepare_progress(self, *, pct: int | None) -> None:
+        # pct=None is the "prepare starting" edge; subsequent calls carry the
+        # latest integer pct from the xtrabackup output parser.
+        self.update_state(
+            phase=self.Phase.preparing_backup,
+            basebackup_prepare_progress=pct,
+        )
 
     def restore_basebackup(self) -> None:
         if os.path.exists(self.mysql_data_directory):
@@ -573,6 +603,7 @@ class RestoreCoordinator(threading.Thread):
                     phase=next_phase,
                     basebackup_restore_duration=duration,
                     last_rebuilt_table=None,
+                    basebackup_prepare_progress=None,
                 )
 
             except Exception as ex:  # pylint: disable=broad-except
