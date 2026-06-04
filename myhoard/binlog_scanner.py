@@ -2,10 +2,12 @@
 from .append_only_state_manager import AppendOnlyStateManager
 from .state_manager import StateManager
 from .util import build_gtid_ranges, GtidRangeDict, read_gtids_from_log
+from pathlib import Path
 from typing import List, Optional, TypedDict
 
 import logging
 import os
+import re
 import threading
 import time
 
@@ -58,6 +60,7 @@ class BinlogScanner:
         self.state_manager = StateManager[BinlogScanner.State](state=self.state, state_file=state_file)
         self.stats = stats
         self.server_id = server_id
+        self.seen_missing_binlog = False
 
     @property
     def latest_complete_binlog_index(self) -> int:
@@ -70,7 +73,18 @@ class BinlogScanner:
         last_processed_at = time.time()
 
         next_index: int = self.state["next_index"]
+
         for _ in range(BINLOG_UPLOAD_BATCH_SIZE):
+            if not os.path.exists(self.build_full_name(next_index)):
+                if self.seen_missing_binlog:
+                    break
+                if self._has_missing_binlog(next_index):
+                    self.log.error("Binlog with index %s is missing, backup is broken", next_index)
+                    self.seen_missing_binlog = True
+                    break
+
+            self.seen_missing_binlog = False
+
             # We only scan completed files so expect the index following our next
             # index to be present as well
             if not os.path.exists(self.build_full_name(next_index + 1)):
@@ -119,6 +133,7 @@ class BinlogScanner:
                     total_binlog_count=self.state["total_binlog_count"] + len(added),
                     total_binlog_size=self.state["total_binlog_size"] + new_size,
                 )
+        self.stats.gauge_int("myhoard.binlog.missing", 1 if self.seen_missing_binlog else 0)
         # Send data points regardless of whether we got any new binlogs
         self.stats.gauge_int("myhoard.binlog.count", self.state["total_binlog_count"])
         self.stats.gauge_int("myhoard.binlog.size", self.state["total_binlog_size"])
@@ -171,3 +186,18 @@ class BinlogScanner:
         # Extensions are zero padded to be always at least 6 characters. I.e. file names
         # are prefix.000001, prefix.001000, prefix.100000, prefix.1000000, etc
         return f"{self.binlog_prefix}.{index:06}"
+
+    def _has_missing_binlog(self, binlog_index: int) -> int | None:
+        prefix_path = Path(self.binlog_prefix)
+        directory = prefix_path.parent
+        base_name = prefix_path.name
+        pattern = re.compile(rf"^{re.escape(base_name)}\.(\d+)$")
+
+        for path in directory.glob(f"{base_name}.*"):
+            match = pattern.match(path.name)
+            if match:
+                index = int(match.group(1))
+                if index > binlog_index:
+                    return True
+
+        return False
