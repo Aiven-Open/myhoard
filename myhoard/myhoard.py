@@ -36,7 +36,7 @@ class MyHoard:
         self.controller = None
         self.is_running = True
         self.log = logging.getLogger(self.__class__.__name__)
-        self.loop = asyncio.get_event_loop()
+        self.loop = asyncio.new_event_loop()
         self.mysqld_pid = None
         self.reload_retry_interval = 10
         self.reloading = False
@@ -78,6 +78,7 @@ class MyHoard:
             self.reloading = False
 
     def run(self):
+        asyncio.set_event_loop(self.loop)
         self.loop.add_signal_handler(signal.SIGHUP, self.request_reload)
         self.loop.add_signal_handler(signal.SIGINT, self.request_shutdown)
         self.loop.add_signal_handler(signal.SIGTERM, self.request_shutdown)
