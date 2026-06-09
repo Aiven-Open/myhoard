@@ -604,6 +604,27 @@ This endpoint is used to update backup settings
 }
 ```
 
+## PATCH /binlogs
+
+This endpoint manages binlogs
+
+```
+{
+  "binlog_index": "{int}",
+}
+```
+
+### Allowed parameters are:
+
+**binlog_index** (int) - Is used to update the binlog index, is used when for some reason binlogs are missing
+
+### Response
+
+```
+{
+  "success": true
+}
+```
 
 ## PUT /backup/{stream_id}/preserve
 

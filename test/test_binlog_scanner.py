@@ -1,6 +1,8 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_statsd_client
 from myhoard.binlog_scanner import BinlogScanner
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import json
 import myhoard.util as myhoard_util
@@ -100,3 +102,20 @@ def test_read_gtids_from_log(session_tmpdir, mysql_master):
     assert scanner.binlogs[0] == binlog2
     binlog4 = scanner.binlogs[1]
     assert binlog4["file_name"] == "bin.000003"
+
+
+def test_missing_binlog_file(session_tmpdir, mysql_master):
+    state_file_name = os.path.join(session_tmpdir().strpath, "scanner_state.json")
+    scanner = BinlogScanner(
+        binlog_prefix=mysql_master.config_options.binlog_file_prefix,
+        server_id=mysql_master.server_id,
+        state_file=state_file_name,
+        stats=build_statsd_client(),
+    )
+    scanner.log = MagicMock()
+    binlog_index = 300
+
+    Path(mysql_master.config_options.binlog_file_prefix + ".000305").touch()
+    scanner.state["next_index"] = binlog_index
+    assert len(scanner.scan_new(None)) == 0
+    scanner.log.error.assert_any_call("Binlog with index %s is missing, backup is broken", binlog_index)

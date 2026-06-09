@@ -6,6 +6,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
+from os import path
 from typing import Any
 
 import asyncio
@@ -264,6 +265,39 @@ class WebServer:
 
             return json_response({"mode": self.controller.mode})
 
+    async def binlogs(self, request):
+        resource_params = ["binlog_index"]
+        with self._handle_request(name="binlogs"):
+            body = await self._get_request_json(request)
+            if len(body.keys() & resource_params) == 0:
+                raise BadRequest(f"No valid resource parameters were specified, valid params are: {resource_params}")
+
+            if "binlog_index" in body.keys():
+                self._set_binlog_index(body)
+
+            return json_response({"success": True})
+
+    def _set_binlog_index(self, request):
+        try:
+            binlog_index = int(request.get("binlog_index"))
+        except (TypeError, ValueError):
+            raise BadRequest("'binlog_index' is not a valid integer")
+
+        if binlog_index < 1:
+            raise BadRequest("Min value for 'binlog_index' is 1")
+
+        binlog_scanner = self.controller.binlog_scanner
+
+        with binlog_scanner.lock:
+            if binlog_index <= binlog_scanner.state["next_index"]:
+                raise BadRequest("Binlog index cannot be decreased.")
+
+            if not path.exists(binlog_scanner.build_full_name(binlog_index)):
+                raise BadRequest(f"Binlog with index {binlog_index} does not exist.")
+
+            binlog_scanner.state_manager.update_state(next_index=binlog_index)
+        self.log.warning("Updated binlog index to %s", binlog_index)
+
     @contextlib.contextmanager
     def _handle_request(self, *, name):
         with self._convert_exception_to_bad_request(method_name=name):
@@ -312,6 +346,7 @@ class WebServer:
                 web.get("/backup", self.backup_list),
                 web.post("/backup", self.backup_create),
                 web.patch("/backup/settings", self.backup_settings),
+                web.patch("/binlogs", self.binlogs),
                 web.put("/backup/{stream_id}/preserve", self.backup_preserve),
                 web.put("/replication_state", self.replication_state_set),
                 web.get("/status", self.status_show),

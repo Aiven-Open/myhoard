@@ -5,6 +5,7 @@ from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.web_server import WebServer
+from unittest.mock import patch
 
 import datetime
 import pytest
@@ -287,3 +288,29 @@ async def test_backup_settings_paused_until(master_controller, web_client):
     response = await patch_and_verify_json_body(web_client, path, {"paused_until": None})
     assert controller.state["paused_backups_until"] is None
     assert response["success"]
+
+
+async def test_binlogs(web_client):
+    path = "/binlogs"
+
+    await patch_and_verify_json_body(web_client, path, {"invalid": ""}, expected_status=400)
+
+
+async def test_binlogs_set_index(master_controller, web_client):
+    path = "/binlogs"
+    controller = master_controller[0]
+
+    await patch_and_verify_json_body(web_client, path, {"binlog_index": -1}, expected_status=400)
+
+    await patch_and_verify_json_body(web_client, path, {"binlog_index": "invalid"}, expected_status=400)
+
+    next_index = 10
+    response = await patch_and_verify_json_body(web_client, path, {"binlog_index": next_index}, expected_status=400)
+
+    with patch("myhoard.web_server.path.exists", return_value=True):
+        response = await patch_and_verify_json_body(web_client, path, {"binlog_index": next_index})
+
+    assert controller.binlog_scanner.state["next_index"] == next_index
+    assert response["success"]
+
+    await patch_and_verify_json_body(web_client, path, {"binlog_index": next_index - 2}, expected_status=400)
