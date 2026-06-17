@@ -553,7 +553,7 @@ class BackupStream(threading.Thread):
 
     @staticmethod
     def new_stream_id() -> str:
-        return f"{datetime.now(timezone.utc).isoformat()}Z_{uuid.uuid4()}"
+        return f"{datetime.now(timezone.utc).isoformat()}_{uuid.uuid4()}"
 
     @property
     def pending_binlog_bytes(self) -> int:

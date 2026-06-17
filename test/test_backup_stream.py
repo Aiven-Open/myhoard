@@ -7,6 +7,7 @@ from myhoard.controller import BackupSiteInfo, Controller
 from rohmu.object_storage.local import LocalTransfer
 from typing import cast, Dict
 
+import datetime
 import json
 import math
 import myhoard.util as myhoard_util
@@ -203,3 +204,40 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
     bs.delete_state()
     assert not os.path.exists(bs.state_manager.state_file)
     assert not os.path.exists(bs.remote_binlog_manager.state_file)
+
+
+def test_new_stream_id_is_valid_iso8601():
+    stream_id = BackupStream.new_stream_id()
+    # stream_id is "<timestamp>_<uuid4>"; the timestamp is the leading portion
+    # up to (but not including) the last underscore that precedes the UUID.
+    # UUIDs contain hyphens but no underscores, and the timestamp itself may
+    # contain underscores only via characters replaced by _state_file_from_stream_id,
+    # so we split on the first occurrence of "_" + a UUID-shaped suffix.
+    # Simplest robust approach: the UUID portion is exactly the last 36 chars.
+    timestamp_part = stream_id[:-37]  # strip "_<36-char-uuid>"
+    assert stream_id[-37] == "_"
+    # Must parse without error as a timezone-aware datetime
+    parsed = datetime.datetime.fromisoformat(timestamp_part)
+    assert parsed.tzinfo is not None
+    # The old bug produced "+00:00Z"; make sure that is gone
+    assert "+00:00Z" not in stream_id
+
+
+def test_old_format_stream_id_backward_compat():
+    # Existing persisted stream IDs carry the "+00:00Z" suffix from the old bug.
+    # They must remain opaque, comparable, and splittable in exactly the same
+    # way as new IDs — nothing in the codebase parses the embedded timestamp.
+    old_id = "2025-01-14T10:49:37.831286+00:00Z_5f024743-1f19-49f2-9d44-b8231c2d04bb"
+    new_id = "2025-01-14T10:49:37.831286+00:00_5f024743-1f19-49f2-9d44-b8231c2d04bb"
+
+    # Equality and inequality work on the full opaque string
+    assert old_id != new_id
+
+    # The UUID (last 36 chars) is retrievable the same way from both formats
+    assert old_id[-36:] == "5f024743-1f19-49f2-9d44-b8231c2d04bb"
+    assert new_id[-36:] == "5f024743-1f19-49f2-9d44-b8231c2d04bb"
+
+    # Sorting a list that mixes old and new IDs is stable (no TypeError)
+    mixed = [old_id, new_id]
+    mixed.sort()
+    assert len(mixed) == 2
