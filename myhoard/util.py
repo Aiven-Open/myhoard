@@ -38,6 +38,7 @@ DEFAULT_XTRABACKUP_SETTINGS = {
     "copy_threads": 1,
     "compress_threads": 1,
     "encrypt_threads": 1,
+    "estimate_memory": False,
     "register_redo_log_consumer": False,
 }
 
