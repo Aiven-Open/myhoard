@@ -1623,6 +1623,20 @@ def test_cap_binlogs_to_purge_passthrough_when_unset():
     assert not cap([], purge_settings={"max_files_per_cycle": 1}, log=MagicMock())
 
 
+def test_cap_binlogs_to_purge_non_positive_caps_mean_unbounded():
+    # A non-positive cap must behave identically to no cap for both dimensions (consistency at the zero boundary):
+    # neither 0 nor a negative value should ever purge fewer files than "unlimited" would.
+    cap = Controller._cap_binlogs_to_purge  # pylint: disable=protected-access
+    binlogs = _make_purgeable_binlogs(5, file_size=100)
+    for settings in (
+        {"max_files_per_cycle": 0, "max_bytes_per_cycle": 0},
+        {"max_files_per_cycle": -1, "max_bytes_per_cycle": -1},
+        {"max_files_per_cycle": 0, "max_bytes_per_cycle": None},
+        {"max_files_per_cycle": None, "max_bytes_per_cycle": 0},
+    ):
+        assert cap(binlogs, purge_settings=settings, log=MagicMock()) == binlogs
+
+
 def test_periodic_backup_based_on_exceeded_intervals(time_machine, master_controller) -> None:
     # pylint: disable=protected-access
     time_machine.move_to("2023-01-02T18:00:00")

@@ -618,10 +618,17 @@ class Controller(threading.Thread):
 
         Returns the longest prefix that satisfies both max_files_per_cycle and max_bytes_per_cycle. At least one
         binlog is always kept (even if it alone exceeds max_bytes_per_cycle) so that purging always makes forward
-        progress. A cap of None (or absent) means unbounded for that dimension.
+        progress. A cap that is None, absent or non-positive means unbounded for that dimension.
         """
         max_files = purge_settings.get("max_files_per_cycle")
         max_bytes = purge_settings.get("max_bytes_per_cycle")
+        # A cap only takes effect when it is a positive number. Normalize any non-positive value to None (no limit)
+        # so both dimensions behave consistently: otherwise max_bytes_per_cycle=0 would still purge a single file
+        # due to the forward-progress guarantee below, while max_files_per_cycle=0 would purge nothing at all.
+        if max_files is not None and max_files <= 0:
+            max_files = None
+        if max_bytes is not None and max_bytes <= 0:
+            max_bytes = None
         if (max_files is None and max_bytes is None) or not binlogs_to_purge:
             return binlogs_to_purge
 
