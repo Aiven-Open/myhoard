@@ -33,6 +33,8 @@
         "enabled": true,
         "min_binlog_age_before_purge": 600,
         "purge_interval": 60,
+        "max_files_per_cycle": 50,
+        "max_bytes_per_cycle": 5368709120,
         "purge_when_observe_no_streams": true
     },
     "http_address": "127.0.0.1",
