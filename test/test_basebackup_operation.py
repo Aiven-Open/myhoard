@@ -284,3 +284,38 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
         "file_position": 238,
         "gtid": None,
     }
+
+
+def _make_backup_op(*, estimate_memory: bool = False) -> BasebackupOperation:
+    # /dev/null is read for the mysql config at construction time; no live server or subprocess is needed.
+    op = BasebackupOperation(
+        encryption_algorithm="AES256",
+        encryption_key=b"0" * 24,
+        estimate_memory=estimate_memory,
+        mysql_client_params={"host": "127.0.0.1"},
+        mysql_config_file_name="/dev/null",
+        mysql_data_directory="/dev/null",
+        stats=build_statsd_client(),
+        stream_handler=None,
+        temp_dir="/tmp",
+    )
+    op.temp_dir = "/tmp/xtrabackup"
+    op.lsn_dir = "/tmp/xtrabackupmeta"
+    return op
+
+
+def test_build_backup_command_line_estimate_memory_off_by_default() -> None:
+    op = _make_backup_op()
+    command_line = op._build_backup_command_line(  # pylint: disable=protected-access
+        mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
+    )
+    assert "--backup" in command_line
+    assert "--estimate-memory=ON" not in command_line
+
+
+def test_build_backup_command_line_estimate_memory_enabled() -> None:
+    op = _make_backup_op(estimate_memory=True)
+    command_line = op._build_backup_command_line(  # pylint: disable=protected-access
+        mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
+    )
+    assert "--estimate-memory=ON" in command_line

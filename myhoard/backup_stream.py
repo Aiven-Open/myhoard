@@ -1035,6 +1035,7 @@ class BackupStream(threading.Thread):
             encrypt_threads=self.xtrabackup_settings["encrypt_threads"],
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
+            estimate_memory=self.xtrabackup_settings["estimate_memory"],
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,

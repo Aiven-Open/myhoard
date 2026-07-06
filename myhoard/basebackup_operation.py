@@ -4,7 +4,7 @@ from myhoard.errors import BlockMismatchError, XtraBackupError
 from myhoard.util import CHECKPOINT_FILENAME, get_mysql_version, mysql_cursor, parse_xtrabackup_info
 from packaging.version import Version
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import base64
 import logging
@@ -52,6 +52,7 @@ class BasebackupOperation:
         encrypt_threads=1,
         encryption_algorithm,
         encryption_key,
+        estimate_memory=False,
         mysql_client_params,
         mysql_config_file_name,
         mysql_data_directory,
@@ -75,6 +76,7 @@ class BasebackupOperation:
         self.encrypt_threads = encrypt_threads
         self.encryption_algorithm = encryption_algorithm
         self.encryption_key = encryption_key
+        self.estimate_memory = estimate_memory
         self.has_block_mismatch = False
         self.log = logging.getLogger(self.__class__.__name__)
         self.incremental_since_checkpoint = incremental_since_checkpoint
@@ -127,29 +129,10 @@ class BasebackupOperation:
 
                 self.temp_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackup")
                 self.lsn_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackupmeta")
-                command_line = [
-                    "xtrabackup",
-                    # defaults file must be given with --defaults-file=foo syntax, space here does not work
-                    f"--defaults-file={mysql_config_file.name}",
-                    "--backup",
-                    "--compress",
-                    f"--compress-threads={self.compress_threads}",
-                    "--encrypt",
-                    self.encryption_algorithm,
-                    f"--encrypt-threads={self.encrypt_threads}",
-                    "--encrypt-key-file",
-                    encryption_key_file.name,
-                    "--no-version-check",
-                    f"--parallel={self.copy_threads}",
-                    "--stream=xbstream",
-                    "--target-dir",
-                    self.temp_dir,
-                    "--extra-lsndir",
-                    self.lsn_dir,
-                ]
-
-                if self.register_redo_log_consumer:
-                    command_line.append("--register-redo-log-consumer")
+                command_line = self._build_backup_command_line(
+                    mysql_config_file_name=mysql_config_file.name,
+                    encryption_key_file_name=encryption_key_file.name,
+                )
 
                 if self.incremental_since_checkpoint:
                     self.prev_checkpoint_dir = tempfile.mkdtemp(dir=self.temp_dir_base, prefix="xtrabackupcheckpoint")
@@ -168,6 +151,38 @@ class BasebackupOperation:
 
         self.data_directory_size_end, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress(estimated_progress=100)
+
+    def _build_backup_command_line(self, *, mysql_config_file_name: str, encryption_key_file_name: str) -> List[str]:
+        command_line = [
+            "xtrabackup",
+            # defaults file must be given with --defaults-file=foo syntax, space here does not work
+            f"--defaults-file={mysql_config_file_name}",
+            "--backup",
+            "--compress",
+            f"--compress-threads={self.compress_threads}",
+            "--encrypt",
+            self.encryption_algorithm,
+            f"--encrypt-threads={self.encrypt_threads}",
+            "--encrypt-key-file",
+            encryption_key_file_name,
+            "--no-version-check",
+            f"--parallel={self.copy_threads}",
+            "--stream=xbstream",
+            "--target-dir",
+            self.temp_dir,
+            "--extra-lsndir",
+            self.lsn_dir,
+        ]
+
+        if self.register_redo_log_consumer:
+            command_line.append("--register-redo-log-consumer")
+
+        # Smart memory estimation (tech preview). Must be enabled at backup time so that the restore-side
+        # `xtrabackup --prepare --use-free-memory-pct` is honoured; without it that flag is ignored.
+        if self.estimate_memory:
+            command_line.append("--estimate-memory=ON")
+
+        return command_line
 
     def is_incremental(self) -> bool:
         return self.incremental_since_checkpoint is not None
