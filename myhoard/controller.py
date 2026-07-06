@@ -605,7 +605,54 @@ class Controller(threading.Thread):
                     binlogs_to_purge.append(binlog)
                 else:
                     break
+        # Bound the per-cycle purge so a large eligible backlog is drained as many small purges across successive
+        # ticks instead of a single PURGE BINARY LOGS covering the whole backlog (which holds LOCK_index, stalling
+        # all writes, for the entire duration). binlogs_to_purge is a contiguous oldest-first prefix and any
+        # shorter prefix is equally safe to purge, so we simply truncate it to satisfy whichever cap is hit first.
+        binlogs_to_purge = cls._cap_binlogs_to_purge(binlogs_to_purge, purge_settings=purge_settings, log=log)
         return binlogs_to_purge, bool(only_binlogs_without_gtids or only_binlogs_that_are_too_new)
+
+    @staticmethod
+    def _cap_binlogs_to_purge(binlogs_to_purge, *, purge_settings, log):
+        """Trim a contiguous oldest-first list of purgeable binlogs to the per-cycle caps.
+
+        Returns the longest prefix that satisfies both max_files_per_cycle and max_bytes_per_cycle. At least one
+        binlog is always kept (even if it alone exceeds max_bytes_per_cycle) so that purging always makes forward
+        progress. A cap that is None, absent or non-positive means unbounded for that dimension.
+        """
+        max_files = purge_settings.get("max_files_per_cycle")
+        max_bytes = purge_settings.get("max_bytes_per_cycle")
+        # A cap only takes effect when it is a positive number. Normalize any non-positive value to None (no limit)
+        # so both dimensions behave consistently: otherwise max_bytes_per_cycle=0 would still purge a single file
+        # due to the forward-progress guarantee below, while max_files_per_cycle=0 would purge nothing at all.
+        if max_files is not None and max_files <= 0:
+            max_files = None
+        if max_bytes is not None and max_bytes <= 0:
+            max_bytes = None
+        if (max_files is None and max_bytes is None) or not binlogs_to_purge:
+            return binlogs_to_purge
+
+        capped = []
+        total_bytes = 0
+        for binlog in binlogs_to_purge:
+            if max_files is not None and len(capped) >= max_files:
+                break
+            binlog_size = binlog.get("file_size", 0)
+            if max_bytes is not None and capped and total_bytes + binlog_size > max_bytes:
+                break
+            capped.append(binlog)
+            total_bytes += binlog_size
+
+        if len(capped) < len(binlogs_to_purge):
+            log.info(
+                "Capping per-cycle purge to %s/%s binlogs (%s bytes); max_files_per_cycle=%s max_bytes_per_cycle=%s",
+                len(capped),
+                len(binlogs_to_purge),
+                total_bytes,
+                max_files,
+                max_bytes,
+            )
+        return capped
 
     @staticmethod
     def get_backup_list(backup_sites: Dict[str, BackupSiteInfo], *, seen_basebackup_infos=None, site_transfers=None):
@@ -1659,6 +1706,13 @@ class Controller(threading.Thread):
                     raise
                 last_purge = time.time()
                 last_could_have_purged = last_purge
+                # Report the per-cycle purge batch size so we can verify the per-cycle caps are engaging in
+                # production (a large eligible backlog should drain across many bounded ticks, not one big purge).
+                self.stats.gauge_int("myhoard.binlog.purged_per_cycle.files", len(binlogs_to_purge))
+                self.stats.gauge_int(
+                    "myhoard.binlog.purged_per_cycle.bytes",
+                    sum(binlog.get("file_size", 0) for binlog in binlogs_to_purge),
+                )
             else:
                 # If we only had binlogs for which we legitimately couldn't tell whether purging was safe or not,
                 # or which according to settings should not have been purged, update the could have purged timestamp

@@ -396,6 +396,8 @@ def fixture_myhoard_config(default_backup_site, mysql_master, session_tmpdir):
             "enabled": True,
             "min_binlog_age_before_purge": 600,
             "purge_interval": 60,
+            "max_files_per_cycle": 50,
+            "max_bytes_per_cycle": 5368709120,
             "purge_when_observe_no_streams": True,
         },
         "http_address": "127.0.0.1",

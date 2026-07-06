@@ -301,6 +301,25 @@ needing.
 
 Number of seconds between checks for binary logs that could be removed.
 
+**binlog_purge_settings.max_files_per_cycle**
+
+Maximum number of binary log files to purge in a single purge cycle. When a large
+backlog of binary logs becomes eligible for purging at once (for example after
+lowering `min_binlog_age_before_purge`), purging them all in one
+`PURGE BINARY LOGS` statement makes MySQL hold `LOCK_index` for the entire
+operation, which stalls all committing transactions until it completes. Bounding
+the number of files per cycle spreads a large backlog over many successive
+`purge_interval` ticks, each holding the lock only briefly. The oldest eligible
+files are always purged first. Set to `null` to disable the file-count limit.
+
+**binlog_purge_settings.max_bytes_per_cycle**
+
+Maximum total size, in bytes, of binary log files to purge in a single purge
+cycle. This works together with `max_files_per_cycle`; whichever limit is reached
+first bounds the cycle. At least one file is always purged even if it alone
+exceeds this limit, so purging always makes forward progress. Set to `null` to
+disable the byte-size limit.
+
 **binlog_purge_settings.purge_when_observe_no_streams**
 
 Allow purging binary logs when no active backups exist. This setting is mostly
@@ -914,6 +933,8 @@ The following metrics are exported by myhoard:
 **myhoard.basebackup_restore.xtrabackup_prepare**
 **myhoard.binlog.count**
 **myhoard.binlog.count_new**
+**myhoard.binlog.purged_per_cycle.bytes**
+**myhoard.binlog.purged_per_cycle.files**
 **myhoard.binlog.remote_copy**
 **myhoard.binlog.removed**
 **myhoard.binlog.size**

@@ -1511,6 +1511,132 @@ def test_collect_binlogs_to_purge():
     log.info.assert_any_call("Binlog %s has been replicated to all servers, purging", 3)
 
 
+def _make_purgeable_binlogs(count, *, file_size=1, now=None):
+    # Build binlogs that collect_binlogs_to_purge will consider fully eligible: old enough, GTIDs present, and
+    # (combined with a replication_state covering them) replicated everywhere.
+    now = now if now is not None else time.time()
+    return [
+        {
+            "local_index": index,
+            "file_name": f"bin.{index:06d}",
+            "file_size": file_size,
+            "gtid_ranges": [{"server_uuid": "uuid1", "start": index, "end": index}],
+            "processed_at": now - 100,
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+def _collect_all_eligible(binlogs, purge_settings):
+    bs = MagicMock()
+    bs.is_binlog_safe_to_delete.return_value = True
+    replication_state = {"server1": {"uuid1": [[1, len(binlogs)]]}}
+    return Controller.collect_binlogs_to_purge(
+        backup_streams=[bs],
+        binlogs=binlogs,
+        log=MagicMock(),
+        mode=Controller.Mode.active,
+        purge_settings=purge_settings,
+        replication_state=replication_state,
+    )
+
+
+def test_collect_binlogs_to_purge_caps_by_file_count():
+    binlogs = _make_purgeable_binlogs(10, file_size=1)
+    purge_settings = {"min_binlog_age_before_purge": 5, "max_files_per_cycle": 3, "max_bytes_per_cycle": None}
+    binlogs_to_purge, only_inapplicable_binlogs = _collect_all_eligible(binlogs, purge_settings)
+    # Exactly the oldest 3 files, contiguous from the oldest end.
+    assert binlogs_to_purge == binlogs[:3]
+    assert only_inapplicable_binlogs is False
+
+
+def test_collect_binlogs_to_purge_caps_by_bytes():
+    binlogs = _make_purgeable_binlogs(10, file_size=100)
+    # 250 bytes fits 2 full files (200) but not a 3rd (300 > 250).
+    purge_settings = {"min_binlog_age_before_purge": 5, "max_files_per_cycle": None, "max_bytes_per_cycle": 250}
+    binlogs_to_purge, _ = _collect_all_eligible(binlogs, purge_settings)
+    assert binlogs_to_purge == binlogs[:2]
+
+    # A single file larger than the byte cap is still purged so we always make forward progress.
+    purge_settings["max_bytes_per_cycle"] = 10
+    binlogs_to_purge, _ = _collect_all_eligible(binlogs, purge_settings)
+    assert binlogs_to_purge == binlogs[:1]
+
+
+def test_collect_binlogs_to_purge_caps_with_no_gtid_tail():
+    # A run of no-GTID binlogs gets flushed into binlogs_to_purge once a later GTID binlog is confirmed
+    # replicated. The cap must count those flushed entries and still yield a contiguous oldest-first prefix.
+    now = time.time()
+    binlogs = [
+        {"local_index": 1, "file_name": "bin.000001", "file_size": 1, "gtid_ranges": [], "processed_at": now - 100},
+        {"local_index": 2, "file_name": "bin.000002", "file_size": 1, "gtid_ranges": [], "processed_at": now - 100},
+        {
+            "local_index": 3,
+            "file_name": "bin.000003",
+            "file_size": 1,
+            "gtid_ranges": [{"server_uuid": "uuid1", "start": 1, "end": 1}],
+            "processed_at": now - 100,
+        },
+        {
+            "local_index": 4,
+            "file_name": "bin.000004",
+            "file_size": 1,
+            "gtid_ranges": [{"server_uuid": "uuid1", "start": 2, "end": 2}],
+            "processed_at": now - 100,
+        },
+    ]
+    bs = MagicMock()
+    bs.is_binlog_safe_to_delete.return_value = True
+    replication_state = {"server1": {"uuid1": [[1, 2]]}}
+    purge_settings = {"min_binlog_age_before_purge": 5, "max_files_per_cycle": 2, "max_bytes_per_cycle": None}
+    binlogs_to_purge, _ = Controller.collect_binlogs_to_purge(
+        backup_streams=[bs],
+        binlogs=binlogs,
+        log=MagicMock(),
+        mode=Controller.Mode.active,
+        purge_settings=purge_settings,
+        replication_state=replication_state,
+    )
+    # The two leading no-GTID files are flushed when binlog 3 is confirmed replicated; the cap keeps the oldest 2.
+    assert binlogs_to_purge == binlogs[:2]
+
+
+def test_collect_binlogs_to_purge_no_change_below_caps():
+    binlogs = _make_purgeable_binlogs(5, file_size=100)
+    uncapped, uncapped_inapplicable = _collect_all_eligible(
+        binlogs, {"min_binlog_age_before_purge": 5, "max_files_per_cycle": None, "max_bytes_per_cycle": None}
+    )
+    capped, capped_inapplicable = _collect_all_eligible(
+        binlogs, {"min_binlog_age_before_purge": 5, "max_files_per_cycle": 50, "max_bytes_per_cycle": 5 << 30}
+    )
+    assert uncapped == binlogs
+    assert capped == uncapped
+    assert capped_inapplicable == uncapped_inapplicable
+
+
+def test_cap_binlogs_to_purge_passthrough_when_unset():
+    cap = Controller._cap_binlogs_to_purge  # pylint: disable=protected-access
+    binlogs = _make_purgeable_binlogs(5, file_size=100)
+    # No caps configured at all -> the list is returned unchanged.
+    assert cap(binlogs, purge_settings={}, log=MagicMock()) == binlogs
+    # Empty input is returned unchanged regardless of caps.
+    assert not cap([], purge_settings={"max_files_per_cycle": 1}, log=MagicMock())
+
+
+def test_cap_binlogs_to_purge_non_positive_caps_mean_unbounded():
+    # A non-positive cap must behave identically to no cap for both dimensions (consistency at the zero boundary):
+    # neither 0 nor a negative value should ever purge fewer files than "unlimited" would.
+    cap = Controller._cap_binlogs_to_purge  # pylint: disable=protected-access
+    binlogs = _make_purgeable_binlogs(5, file_size=100)
+    for settings in (
+        {"max_files_per_cycle": 0, "max_bytes_per_cycle": 0},
+        {"max_files_per_cycle": -1, "max_bytes_per_cycle": -1},
+        {"max_files_per_cycle": 0, "max_bytes_per_cycle": None},
+        {"max_files_per_cycle": None, "max_bytes_per_cycle": 0},
+    ):
+        assert cap(binlogs, purge_settings=settings, log=MagicMock()) == binlogs
+
+
 def test_periodic_backup_based_on_exceeded_intervals(time_machine, master_controller) -> None:
     # pylint: disable=protected-access
     time_machine.move_to("2023-01-02T18:00:00")
