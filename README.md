@@ -308,9 +308,12 @@ backlog of binary logs becomes eligible for purging at once (for example after
 lowering `min_binlog_age_before_purge`), purging them all in one
 `PURGE BINARY LOGS` statement makes MySQL hold `LOCK_index` for the entire
 operation, which stalls all committing transactions until it completes. Bounding
-the number of files per cycle spreads a large backlog over many successive
-`purge_interval` ticks, each holding the lock only briefly. The oldest eligible
-files are always purged first. Set to `null` to disable the file-count limit.
+the number of files per cycle breaks a large backlog into many small purges, each
+holding the lock only briefly. When a cycle is capped and more safely-purgeable
+binary logs remain, the next chunk runs on the following control-loop tick without
+waiting for `purge_interval`, so a large backlog drains one chunk per tick instead
+of one chunk per interval. The oldest eligible files are always purged first. Set
+to `null` to disable the file-count limit.
 
 **binlog_purge_settings.max_bytes_per_cycle**
 
