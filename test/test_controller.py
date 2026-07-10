@@ -5,7 +5,7 @@ from . import build_controller, DataGenerator, get_mysql_config_options, MySQLCo
 from .helpers.version import xtrabackup_version_to_string
 from myhoard.backup_stream import BackupStream
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
-from myhoard.controller import Backup, BaseBackup, Controller, sort_completed_backups
+from myhoard.controller import Backup, BaseBackup, Controller, ERR_BACKUP_IN_PROGRESS, sort_completed_backups
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
     change_replication_source_to,
@@ -18,12 +18,14 @@ from myhoard.util import (
     partition_sort_and_combine_gtid_ranges,
 )
 from rohmu import get_transfer
+from types import SimpleNamespace
 from typing import Any, Callable, cast, Dict, List, Optional, Set, TypedDict
 from unittest.mock import call, MagicMock, patch
 
 import contextlib
 import datetime
 import os
+import pymysql
 import pytest
 import random
 import re
@@ -1360,7 +1362,7 @@ def test_collect_binlogs_to_purge():
     }
     log = MagicMock()
 
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=None,
         binlogs=binlogs,
         log=log,
@@ -1379,7 +1381,7 @@ def test_collect_binlogs_to_purge():
     bs1.is_binlog_safe_to_delete.return_value = False
     bs2 = MagicMock()
     bs2.is_binlog_safe_to_delete.return_value = True
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1391,7 +1393,7 @@ def test_collect_binlogs_to_purge():
     assert only_inapplicable_binlogs is False
     log.info.assert_called_with("Binlog %s reported not safe to delete by some backup streams", 1)
 
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1410,7 +1412,7 @@ def test_collect_binlogs_to_purge():
 
     # No backup streams or replication state and observe node, should allow purging anything
     log = MagicMock()
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[],
         binlogs=binlogs,
         log=log,
@@ -1430,7 +1432,7 @@ def test_collect_binlogs_to_purge():
         "server1": {},
     }
     bs1.is_binlog_safe_to_delete.return_value = True
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1446,7 +1448,7 @@ def test_collect_binlogs_to_purge():
     replication_state = {
         "server1": {"uuid1": [[1, 7]]},
     }
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1463,7 +1465,7 @@ def test_collect_binlogs_to_purge():
     replication_state = {
         "server1": {"uuid1": [[1, 8]]},
     }
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1479,7 +1481,7 @@ def test_collect_binlogs_to_purge():
     log = MagicMock()
     binlogs[0]["gtid_ranges"] = []
     binlogs[1]["gtid_ranges"] = []
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1498,7 +1500,7 @@ def test_collect_binlogs_to_purge():
         }
     )
     log = MagicMock()
-    binlogs_to_purge, only_inapplicable_binlogs = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, only_inapplicable_binlogs, _ = Controller.collect_binlogs_to_purge(
         backup_streams=[bs1, bs2],
         binlogs=binlogs,
         log=log,
@@ -1544,23 +1546,27 @@ def _collect_all_eligible(binlogs, purge_settings):
 def test_collect_binlogs_to_purge_caps_by_file_count():
     binlogs = _make_purgeable_binlogs(10, file_size=1)
     purge_settings = {"min_binlog_age_before_purge": 5, "max_files_per_cycle": 3, "max_bytes_per_cycle": None}
-    binlogs_to_purge, only_inapplicable_binlogs = _collect_all_eligible(binlogs, purge_settings)
+    binlogs_to_purge, only_inapplicable_binlogs, more_purgeable_remaining = _collect_all_eligible(binlogs, purge_settings)
     # Exactly the oldest 3 files, contiguous from the oldest end.
     assert binlogs_to_purge == binlogs[:3]
     assert only_inapplicable_binlogs is False
+    # More safely-purgeable binlogs remain, so the caller should drain them without waiting a full interval.
+    assert more_purgeable_remaining is True
 
 
 def test_collect_binlogs_to_purge_caps_by_bytes():
     binlogs = _make_purgeable_binlogs(10, file_size=100)
     # 250 bytes fits 2 full files (200) but not a 3rd (300 > 250).
     purge_settings = {"min_binlog_age_before_purge": 5, "max_files_per_cycle": None, "max_bytes_per_cycle": 250}
-    binlogs_to_purge, _ = _collect_all_eligible(binlogs, purge_settings)
+    binlogs_to_purge, _, more_purgeable_remaining = _collect_all_eligible(binlogs, purge_settings)
     assert binlogs_to_purge == binlogs[:2]
+    assert more_purgeable_remaining is True
 
     # A single file larger than the byte cap is still purged so we always make forward progress.
     purge_settings["max_bytes_per_cycle"] = 10
-    binlogs_to_purge, _ = _collect_all_eligible(binlogs, purge_settings)
+    binlogs_to_purge, _, more_purgeable_remaining = _collect_all_eligible(binlogs, purge_settings)
     assert binlogs_to_purge == binlogs[:1]
+    assert more_purgeable_remaining is True
 
 
 def test_collect_binlogs_to_purge_caps_with_no_gtid_tail():
@@ -1589,7 +1595,7 @@ def test_collect_binlogs_to_purge_caps_with_no_gtid_tail():
     bs.is_binlog_safe_to_delete.return_value = True
     replication_state = {"server1": {"uuid1": [[1, 2]]}}
     purge_settings = {"min_binlog_age_before_purge": 5, "max_files_per_cycle": 2, "max_bytes_per_cycle": None}
-    binlogs_to_purge, _ = Controller.collect_binlogs_to_purge(
+    binlogs_to_purge, _, more_purgeable_remaining = Controller.collect_binlogs_to_purge(
         backup_streams=[bs],
         binlogs=binlogs,
         log=MagicMock(),
@@ -1599,28 +1605,32 @@ def test_collect_binlogs_to_purge_caps_with_no_gtid_tail():
     )
     # The two leading no-GTID files are flushed when binlog 3 is confirmed replicated; the cap keeps the oldest 2.
     assert binlogs_to_purge == binlogs[:2]
+    assert more_purgeable_remaining is True
 
 
 def test_collect_binlogs_to_purge_no_change_below_caps():
     binlogs = _make_purgeable_binlogs(5, file_size=100)
-    uncapped, uncapped_inapplicable = _collect_all_eligible(
+    uncapped, uncapped_inapplicable, uncapped_more_remaining = _collect_all_eligible(
         binlogs, {"min_binlog_age_before_purge": 5, "max_files_per_cycle": None, "max_bytes_per_cycle": None}
     )
-    capped, capped_inapplicable = _collect_all_eligible(
+    capped, capped_inapplicable, capped_more_remaining = _collect_all_eligible(
         binlogs, {"min_binlog_age_before_purge": 5, "max_files_per_cycle": 50, "max_bytes_per_cycle": 5 << 30}
     )
     assert uncapped == binlogs
     assert capped == uncapped
     assert capped_inapplicable == uncapped_inapplicable
+    # The eligible set is below both caps, so nothing was trimmed and no follow-up cycle is needed.
+    assert uncapped_more_remaining is False
+    assert capped_more_remaining is False
 
 
 def test_cap_binlogs_to_purge_passthrough_when_unset():
     cap = Controller._cap_binlogs_to_purge  # pylint: disable=protected-access
     binlogs = _make_purgeable_binlogs(5, file_size=100)
-    # No caps configured at all -> the list is returned unchanged.
-    assert cap(binlogs, purge_settings={}, log=MagicMock()) == binlogs
+    # No caps configured at all -> the list is returned unchanged and nothing remains for a follow-up cycle.
+    assert cap(binlogs, purge_settings={}, log=MagicMock()) == (binlogs, False)
     # Empty input is returned unchanged regardless of caps.
-    assert not cap([], purge_settings={"max_files_per_cycle": 1}, log=MagicMock())
+    assert cap([], purge_settings={"max_files_per_cycle": 1}, log=MagicMock()) == ([], False)
 
 
 def test_cap_binlogs_to_purge_non_positive_caps_mean_unbounded():
@@ -1634,7 +1644,76 @@ def test_cap_binlogs_to_purge_non_positive_caps_mean_unbounded():
         {"max_files_per_cycle": 0, "max_bytes_per_cycle": None},
         {"max_files_per_cycle": None, "max_bytes_per_cycle": 0},
     ):
-        assert cap(binlogs, purge_settings=settings, log=MagicMock()) == binlogs
+        assert cap(binlogs, purge_settings=settings, log=MagicMock()) == (binlogs, False)
+
+
+def test_next_binlogs_purged_at():
+    # pylint: disable=protected-access
+    schedule = Controller._next_binlogs_purged_at
+    now = 1000.0
+    settings = {"purge_interval": 60}
+
+    # No fast follow-up (nothing capped, or nothing purged): normal cadence, gate stays closed for a full interval.
+    assert schedule(now=now, purge_settings=settings, fast_follow_up=False) == now
+
+    # Fast follow-up: rewind past the whole interval so the gate is already open on the next control-loop tick.
+    assert schedule(now=now, purge_settings=settings, fast_follow_up=True) == now - 60
+
+
+def _run_purge_old_binlogs(*, capped_more_remaining, purge_raises=None):
+    # Drive _purge_old_binlogs against a lightweight stub so the finally-block scheduling contract can be tested
+    # without a running MySQL. Only the attributes _purge_old_binlogs touches are provided; the real
+    # _next_binlogs_purged_at is bound so we exercise the actual scheduling decision.
+    purge_settings = {
+        "enabled": True,
+        "min_binlog_age_before_purge": 30,
+        "purge_interval": 60,
+        "purge_when_observe_no_streams": True,
+    }
+    binlog = {"file_name": "binlog.000001", "file_size": 1}
+    stub = SimpleNamespace(
+        binlog_purge_settings=purge_settings,
+        state={"binlogs_purged_at": 0, "last_binlog_purge": 0, "last_could_have_purged": 0, "replication_state": {}},
+        binlog_scanner=SimpleNamespace(binlogs=[binlog]),
+        backup_streams=[MagicMock()],
+        mode=Controller.Mode.active,
+        Mode=Controller.Mode,
+        log=MagicMock(),
+        stats=MagicMock(),
+        state_manager=MagicMock(),
+        _should_purge_binlogs=MagicMock(return_value=True),
+        collect_binlogs_to_purge=MagicMock(return_value=([binlog], False, capped_more_remaining)),
+        _get_long_timeout_params=MagicMock(return_value={}),
+        _next_binlogs_purged_at=Controller._next_binlogs_purged_at,  # pylint: disable=protected-access
+    )
+
+    cursor_cm = MagicMock()
+    if purge_raises is not None:
+        cursor_cm.__enter__.return_value.execute.side_effect = pymysql.err.OperationalError(purge_raises, "boom")
+
+    with patch("myhoard.controller.mysql_cursor", return_value=cursor_cm):
+        Controller._purge_old_binlogs(stub)  # pylint: disable=protected-access
+    return stub
+
+
+def test_purge_old_binlogs_schedules_fast_follow_up_only_on_successful_capped_chunk():
+    # Successful purge with more capped binlogs remaining -> rewind binlogs_purged_at so the gate is open next tick.
+    stub = _run_purge_old_binlogs(capped_more_remaining=True)
+    saved = stub.state_manager.update_state.call_args.kwargs["binlogs_purged_at"]
+    assert saved < time.time() - 30  # rewound roughly a full purge_interval into the past
+
+    # Successful purge but nothing capped -> normal cadence, no rewind.
+    stub = _run_purge_old_binlogs(capped_more_remaining=False)
+    saved = stub.state_manager.update_state.call_args.kwargs["binlogs_purged_at"]
+    assert saved >= time.time() - 5
+
+
+def test_purge_old_binlogs_does_not_fast_retry_when_purge_fails():
+    # PURGE fails (e.g. a backup holds the lock) even though the cap says more remain: we must NOT rewind,
+    # otherwise the once-per-interval retry becomes a tight retry loop while the lock is held.
+    stub = _run_purge_old_binlogs(capped_more_remaining=True, purge_raises=ERR_BACKUP_IN_PROGRESS)
+    saved = stub.state_manager.update_state.call_args.kwargs["binlogs_purged_at"]
+    assert saved >= time.time() - 5  # normal cadence, not rewound
 
 
 def test_periodic_backup_based_on_exceeded_intervals(time_machine, master_controller) -> None:

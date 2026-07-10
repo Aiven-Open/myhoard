@@ -609,16 +609,24 @@ class Controller(threading.Thread):
         # ticks instead of a single PURGE BINARY LOGS covering the whole backlog (which holds LOCK_index, stalling
         # all writes, for the entire duration). binlogs_to_purge is a contiguous oldest-first prefix and any
         # shorter prefix is equally safe to purge, so we simply truncate it to satisfy whichever cap is hit first.
-        binlogs_to_purge = cls._cap_binlogs_to_purge(binlogs_to_purge, purge_settings=purge_settings, log=log)
-        return binlogs_to_purge, bool(only_binlogs_without_gtids or only_binlogs_that_are_too_new)
+        binlogs_to_purge, more_purgeable_remaining = cls._cap_binlogs_to_purge(
+            binlogs_to_purge, purge_settings=purge_settings, log=log
+        )
+        return (
+            binlogs_to_purge,
+            bool(only_binlogs_without_gtids or only_binlogs_that_are_too_new),
+            more_purgeable_remaining,
+        )
 
     @staticmethod
     def _cap_binlogs_to_purge(binlogs_to_purge, *, purge_settings, log):
         """Trim a contiguous oldest-first list of purgeable binlogs to the per-cycle caps.
 
-        Returns the longest prefix that satisfies both max_files_per_cycle and max_bytes_per_cycle. At least one
-        binlog is always kept (even if it alone exceeds max_bytes_per_cycle) so that purging always makes forward
-        progress. A cap that is None, absent or non-positive means unbounded for that dimension.
+        Returns a ``(capped, was_capped)`` tuple where ``capped`` is the longest prefix that satisfies both
+        max_files_per_cycle and max_bytes_per_cycle and ``was_capped`` indicates whether anything was trimmed
+        (i.e. a safe backlog still remains after this cycle). At least one binlog is always kept (even if it alone
+        exceeds max_bytes_per_cycle) so that purging always makes forward progress. A cap that is None, absent or
+        non-positive means unbounded for that dimension.
         """
         max_files = purge_settings.get("max_files_per_cycle")
         max_bytes = purge_settings.get("max_bytes_per_cycle")
@@ -630,7 +638,7 @@ class Controller(threading.Thread):
         if max_bytes is not None and max_bytes <= 0:
             max_bytes = None
         if (max_files is None and max_bytes is None) or not binlogs_to_purge:
-            return binlogs_to_purge
+            return binlogs_to_purge, False
 
         capped = []
         total_bytes = 0
@@ -643,7 +651,8 @@ class Controller(threading.Thread):
             capped.append(binlog)
             total_bytes += binlog_size
 
-        if len(capped) < len(binlogs_to_purge):
+        was_capped = len(capped) < len(binlogs_to_purge)
+        if was_capped:
             log.info(
                 "Capping per-cycle purge to %s/%s binlogs (%s bytes); max_files_per_cycle=%s max_bytes_per_cycle=%s",
                 len(capped),
@@ -652,7 +661,7 @@ class Controller(threading.Thread):
                 max_files,
                 max_bytes,
             )
-        return capped
+        return capped, was_capped
 
     @staticmethod
     def get_backup_list(backup_sites: Dict[str, BackupSiteInfo], *, seen_basebackup_infos=None, site_transfers=None):
@@ -1626,6 +1635,23 @@ class Controller(threading.Thread):
                 owned_stream_ids = [sid for sid in self.state["owned_stream_ids"] if sid != backup["stream_id"]]
                 self.state_manager.update_state(owned_stream_ids=owned_stream_ids)
 
+    @staticmethod
+    def _next_binlogs_purged_at(*, now, purge_settings, fast_follow_up):
+        """Compute the ``binlogs_purged_at`` timestamp to store at the end of a purge cycle.
+
+        The purge interval gate (top of ``_purge_old_binlogs``) opens when ``now - binlogs_purged_at >=
+        purge_interval``. Returning ``now`` gives the normal one-cycle-per-``purge_interval`` cadence. When
+        ``fast_follow_up`` is set (a chunk was purged and more safely-purgeable binlogs remain) we rewind past the
+        whole interval so the gate is already open on the next control-loop tick and the backlog keeps draining a
+        chunk per tick instead of a chunk per ``purge_interval``.
+
+        Expressed purely via ``binlogs_purged_at`` (which the gate reads), so the shared run-loop sleep is never
+        altered and no drain state has to be tracked across calls.
+        """
+        if not fast_follow_up:
+            return now
+        return now - purge_settings["purge_interval"]
+
     def _purge_old_binlogs(self, *, mysql_maybe_not_running=False):
         purge_settings = self.binlog_purge_settings
         if not purge_settings["enabled"] or time.time() - self.state["binlogs_purged_at"] < purge_settings["purge_interval"]:
@@ -1655,6 +1681,12 @@ class Controller(threading.Thread):
         # This is reported in another metric to indicate time since we could've purged binlogs but didn't because
         # there was not sufficient info to make a decision (due to system being idle and no changes happening)
         last_could_have_purged = self.state["last_could_have_purged"]
+        # more_purgeable_remaining is set at collection time when the per-cycle caps trimmed the eligible set, i.e.
+        # more safely-purgeable binlogs remain for a follow-up chunk. purged_chunk records whether we actually ran a
+        # PURGE this cycle; both must be true to schedule a fast follow-up (see the finally block), so a PURGE that
+        # early-returns on error does not turn the once-per-interval retry into a tight retry loop.
+        more_purgeable_remaining = False
+        purged_chunk = False
         try:
             should_purge = self._should_purge_binlogs(
                 backup_streams=backup_streams,
@@ -1669,7 +1701,7 @@ class Controller(threading.Thread):
                     last_could_have_purged = time.time()
                 return
 
-            binlogs_to_purge, only_inapplicable_binlogs = self.collect_binlogs_to_purge(
+            binlogs_to_purge, only_inapplicable_binlogs, more_purgeable_remaining = self.collect_binlogs_to_purge(
                 backup_streams=backup_streams,
                 binlogs=binlogs,
                 exclude_uuid=exclude_uuid,
@@ -1704,6 +1736,7 @@ class Controller(threading.Thread):
                         self.log.warning("Cannot purge binary logs while a backup lock is held: %r", ex)
                         return
                     raise
+                purged_chunk = True
                 last_purge = time.time()
                 last_could_have_purged = last_purge
                 # Report the per-cycle purge batch size so we can verify the per-cycle caps are engaging in
@@ -1723,8 +1756,20 @@ class Controller(threading.Thread):
         finally:
             current_time = time.time()
 
+            # Decide when the next purge cycle may run. Normally the interval gate allows one cycle per
+            # purge_interval; when we just purged a capped chunk and more safely-purgeable binlogs remain we rewind
+            # binlogs_purged_at past the interval so the gate is already open on the next control-loop tick and the
+            # backlog drains a chunk per tick instead of one chunk per purge_interval. Scheduling is expressed purely
+            # via binlogs_purged_at (which the gate reads), so the shared run-loop cadence (_get_iteration_sleep) is
+            # untouched and other controller work is never paced by the drain.
+            binlogs_purged_at = self._next_binlogs_purged_at(
+                now=current_time,
+                purge_settings=purge_settings,
+                fast_follow_up=more_purgeable_remaining and purged_chunk,
+            )
+
             self.state_manager.update_state(
-                binlogs_purged_at=current_time,
+                binlogs_purged_at=binlogs_purged_at,
                 last_binlog_purge=last_purge,
                 last_could_have_purged=last_could_have_purged,
             )
