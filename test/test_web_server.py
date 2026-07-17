@@ -168,6 +168,10 @@ async def test_status_update_to_restore(master_controller, web_client):
         # Operation will fail because we faked the backup info
         assert response["phase"] != RestoreCoordinator.Phase.failed
         assert "basebackup_prepare_progress" in response
+        assert response["current_backup_name"] == "abc"
+        assert isinstance(response["current_backup_incremental"], bool)
+        assert response["restore_chain_index"] == 1
+        assert response["restore_chain_total"] == 1
 
     master_controller[0].state["backups"].append(
         {"stream_id": "abc", "site": "default", "basebackup_info": {"end_ts": 1234567}}

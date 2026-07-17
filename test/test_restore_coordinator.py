@@ -680,7 +680,7 @@ def test_basebackup_bytes_total(
     assert rc.basebackup_bytes_total == expected_bytes_total
 
 
-def _make_minimal_coordinator(session_tmpdir):
+def _make_minimal_coordinator(session_tmpdir, stream_id: str = "-"):
     return RestoreCoordinator(
         binlog_streams=[],
         download_workers_count=2,
@@ -698,9 +698,41 @@ def _make_minimal_coordinator(session_tmpdir):
         site="default",
         state_file=os.path.join(session_tmpdir().strpath, "the_state_file.json"),
         stats=build_statsd_client(),
-        stream_id="-",
+        stream_id=stream_id,
         temp_dir=session_tmpdir().strpath,
     )
+
+
+@pytest.mark.parametrize(
+    "stream_id,basebackup_info,required_backups,required_backups_restored,expected",
+    [
+        # Plain (non-incremental) restore: no prerequisite backups, collapses to 1 of 1.
+        ("full", {}, [], 0, ("full", False, 1, 1)),
+        ("full", {"incremental": False}, [], 0, ("full", False, 1, 1)),
+        # Incremental target "inc2" needs full + inc1 restored first (chain of 3).
+        # Prerequisites are worked through in order; required_backups_restored counts
+        # how many have completed, so it points at the backup currently being applied.
+        ("inc2", {"incremental": True}, [("full", {}), ("inc1", {"incremental": True})], 0, ("full", False, 1, 3)),
+        ("inc2", {"incremental": True}, [("full", {}), ("inc1", {"incremental": True})], 1, ("inc1", True, 2, 3)),
+        # All prerequisites done -> now applying the target itself, at the tail of the chain.
+        ("inc2", {"incremental": True}, [("full", {}), ("inc1", {"incremental": True})], 2, ("inc2", True, 3, 3)),
+    ],
+)
+def test_restore_chain_progress(
+    session_tmpdir,
+    stream_id: str,
+    basebackup_info: dict[str, Any],
+    required_backups: list[tuple[str, dict[str, Any]]],
+    required_backups_restored: int,
+    expected: tuple[str, bool, int, int],
+) -> None:
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id=stream_id)
+    rc.update_state(
+        basebackup_info=basebackup_info,
+        required_backups=required_backups,
+        required_backups_restored=required_backups_restored,
+    )
+    assert tuple(rc.restore_chain_progress) == expected
 
 
 def test_on_prepare_progress_flips_phase_and_persists_pct(session_tmpdir):
