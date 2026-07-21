@@ -37,7 +37,7 @@ from functools import partial
 from pymysql import OperationalError
 from rohmu import errors as rohmu_errors
 from rohmu.transfer_pool import TransferPool
-from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple, TypedDict
 
 import contextlib
 import enum
@@ -71,6 +71,19 @@ class PendingBinlogInfo(TypedDict):
 class BinlogStream(TypedDict):
     site: str
     stream_id: str
+
+
+class RestoreChainProgress(NamedTuple):
+    """Which basebackup in an incremental chain is currently being restored.
+
+    ``chain_index``/``chain_total`` are 1-based (e.g. "incremental 3 of 7"); for
+    a plain non-incremental restore the chain collapses to ``1 of 1``.
+    """
+
+    current_backup_name: str
+    current_backup_incremental: bool
+    chain_index: int
+    chain_total: int
 
 
 class RestoreCoordinator(threading.Thread):
@@ -322,6 +335,36 @@ class RestoreCoordinator(threading.Thread):
     @property
     def binlogs_restored(self) -> int:
         return self.state["binlogs_restored"]
+
+    @property
+    def restore_chain_progress(self) -> RestoreChainProgress:
+        """Identify which basebackup in the chain is currently being restored.
+
+        ``required_backups`` holds the prerequisite streams (the full backup followed by
+        any earlier incrementals); the restore target ``self.stream_id`` is applied last,
+        so the full chain length is ``len(required_backups) + 1``. ``required_backups`` is
+        populated during the ``getting_backup_info`` phase, so this is only meaningful once
+        the basebackup phases are reached; before then it reports ``1 of 1``.
+        """
+        required_backups = self.state.get("required_backups") or []
+        total = len(required_backups) + 1
+        restored = self.state["required_backups_restored"]
+        if restored < len(required_backups):
+            # Still working through the prerequisite backups. Items are stored as
+            # (stream_id, info) pairs (lists after a state-file round-trip).
+            stream_id, info = required_backups[restored]
+            return RestoreChainProgress(
+                current_backup_name=stream_id,
+                current_backup_incremental=bool(info.get("incremental", False)),
+                chain_index=restored + 1,
+                chain_total=total,
+            )
+        return RestoreChainProgress(
+            current_backup_name=self.stream_id,
+            current_backup_incremental=bool(self.state["basebackup_info"].get("incremental", False)),
+            chain_index=total,
+            chain_total=total,
+        )
 
     def can_add_binlog_streams(self):
         # If we're restoring to a specific backup then we don't want to look for possible new backup

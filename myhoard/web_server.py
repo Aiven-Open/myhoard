@@ -215,6 +215,7 @@ class WebServer:
                     if coordinator.phase == RestoreCoordinator.Phase.preparing_backup
                     else None
                 )
+                chain = coordinator.restore_chain_progress
                 response = {
                     "basebackup_compressed_bytes_downloaded": coordinator.basebackup_bytes_downloaded,
                     "basebackup_compressed_bytes_total": coordinator.basebackup_bytes_total,
@@ -223,6 +224,10 @@ class WebServer:
                     "binlogs_restored": coordinator.binlogs_restored,
                     "phase": coordinator.phase,
                     "basebackup_prepare_progress": prepare_progress,
+                    "current_backup_name": chain.current_backup_name,
+                    "current_backup_incremental": chain.current_backup_incremental,
+                    "restore_chain_index": chain.chain_index,
+                    "restore_chain_total": chain.chain_total,
                 }
             return json_response(response)
 
