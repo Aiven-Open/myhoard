@@ -2374,6 +2374,99 @@ def test_count_non_broken_backups(
     assert Controller.count_non_broken_backups(controller.state["backups"]) == expected_result
 
 
+def test_request_mark_stream_as_broken_and_handle_mark_streams_as_broken(master_controller):
+    controller, _ = master_controller
+    controller.state_manager.update_state(mode=Controller.Mode.active)
+    add_fake_backup(controller, "1234")
+
+    request_id = controller.request_mark_stream_as_broken(stream_id="1234", broken=True, expire_after_seconds=5)
+    expires_at = controller.state["broken_backup_requests"][0]["expires_at"]
+    assert controller.state["broken_backup_requests"] == [
+        {"request_id": request_id, "stream_id": "1234", "broken": True, "expires_at": expires_at}
+    ]
+
+    backup_stream = MagicMock()
+    backup_stream.mark_as_broken.return_value = (True, None)
+    with patch.object(controller, "_build_backup_stream", return_value=backup_stream) as mocked_build_backup_stream:
+        controller._handle_mark_streams_as_broken()  # pylint: disable=protected-access
+
+    mocked_build_backup_stream.assert_called_once_with(controller.get_backup_by_stream_id("1234"))
+    backup_stream.mark_as_broken.assert_called_once_with(broken=True)
+    assert controller.state["broken_backup_requests"] == []
+    assert controller.state["broken_backup_results"] == {
+        request_id: {"success": True, "error": None, "expires_at": expires_at}
+    }
+
+
+def test_handle_mark_streams_as_broken_drops_request_for_missing_stream(master_controller):
+    controller, _ = master_controller
+    controller.state_manager.update_state(mode=Controller.Mode.active)
+    add_fake_backup(controller, "1234")
+
+    request_id = controller.request_mark_stream_as_broken(stream_id="1234", broken=True, expire_after_seconds=5)
+    controller.state["backups"] = [b for b in controller.state["backups"] if b["stream_id"] != "1234"]
+
+    controller._handle_mark_streams_as_broken()  # pylint: disable=protected-access
+
+    assert controller.state["broken_backup_requests"] == []
+    result = controller.state["broken_backup_results"][request_id]
+    assert result["success"] is False
+    assert result["error"]
+
+
+def test_request_mark_stream_as_broken_raises_when_mode_is_not_active(master_controller):
+    controller, _ = master_controller
+    add_fake_backup(controller, "1234")
+
+    assert controller.mode == Controller.Mode.idle
+    with pytest.raises(ValueError, match="marking streams as broken only allowed while in active mode"):
+        controller.request_mark_stream_as_broken(stream_id="1234", broken=True)
+    assert controller.state["broken_backup_requests"] == []
+
+
+def test_request_mark_stream_as_broken_persists_to_disk(master_controller):
+    controller, _ = master_controller
+    controller.state_manager.update_state(mode=Controller.Mode.active)
+    add_fake_backup(controller, "1234")
+
+    request_id = controller.request_mark_stream_as_broken(stream_id="1234", broken=True)
+
+    # Reload state from disk to make sure the request was actually persisted
+    # and not just held in memory.
+    controller.state_manager.read_state()
+    assert controller.state["broken_backup_requests"] == [
+        {"request_id": request_id, "stream_id": "1234", "broken": True, "expires_at": None}
+    ]
+
+
+def test_handle_mark_streams_as_broken_removes_expired_requests_and_results(master_controller):
+    controller, _ = master_controller
+    controller.state_manager.update_state(mode=Controller.Mode.active)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expired_at = str(now - datetime.timedelta(seconds=10))
+    not_expired_at = str(now + datetime.timedelta(seconds=10))
+
+    # Only expired requests are seeded so the cleanup step empties the queue before the
+    # processing loop below it would otherwise try to act on any surviving request.
+    controller.state_manager.update_state(
+        broken_backup_requests=[
+            {"request_id": "expired-req", "stream_id": "1234", "broken": True, "expires_at": expired_at},
+        ],
+        broken_backup_results={
+            "expired-res": {"success": True, "error": None, "expires_at": expired_at},
+            "live-res": {"success": True, "error": None, "expires_at": not_expired_at},
+        },
+    )
+
+    controller._handle_mark_streams_as_broken()  # pylint: disable=protected-access
+
+    assert controller.state["broken_backup_requests"] == []
+    assert controller.state["broken_backup_results"] == {
+        "live-res": {"success": True, "error": None, "expires_at": not_expired_at},
+    }
+
+
 @patch.object(BackupStream, "remove", autospec=True)
 def test_purge_old_incremental_backups_exceeding_backup_age_days_max(
     mocked_backup_stream_remove: MagicMock,

@@ -1,13 +1,16 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from . import awhile_asserts, while_asserts
+from . import awhile_asserts, build_statsd_client, while_asserts
+from aiohttp import web
 from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.web_server import WebServer
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import asyncio
 import datetime
+import json
 import pytest
 import uuid
 
@@ -218,6 +221,26 @@ async def test_backup_preserve_wrong_preserve_until(web_client) -> None:
     assert response["message"] == "`preserve_until` must be a date in the future."
 
 
+async def test_update_resource():
+    server = WebServer(controller=Mock(), http_port=-1, stats=build_statsd_client())
+    update_resource = server._update_resource  # pylint: disable=protected-access
+    action = Mock()
+    actions = {"valid_key": action}
+    request = Mock()
+
+    request.text = AsyncMock(return_value=json.dumps({"valid_key": "value"}))
+    response = await update_resource(name="test_resource", request=request, actions=actions)
+    assert response.status == 200
+    assert json.loads(response.text) == {"success": True}
+    action.assert_called_once_with({"valid_key": "value"})
+
+    action.reset_mock()
+    request.text = AsyncMock(return_value=json.dumps({"invalid_key": "value"}))
+    with pytest.raises(web.HTTPBadRequest):
+        await update_resource(name="test_resource", request=request, actions=actions)
+    action.assert_not_called()
+
+
 async def verify_json_body(response, expected_status=200):
     response_json = await response.json()
     assert response.status == expected_status, f"{response.status} != {expected_status}: {response_json}"
@@ -270,12 +293,6 @@ def test_validate_replication_state():
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}, "zob": {uuid2: []}})
 
 
-async def test_backup_settings(web_client):
-    path = "/backup/settings"
-
-    await patch_and_verify_json_body(web_client, path, {"invalid": ""}, expected_status=400)
-
-
 async def test_backup_settings_paused_until(master_controller, web_client):
     path = "/backup/settings"
     controller = master_controller[0]
@@ -294,10 +311,49 @@ async def test_backup_settings_paused_until(master_controller, web_client):
     assert response["success"]
 
 
-async def test_binlogs(web_client):
-    path = "/binlogs"
+async def test_backup_stream_settings(master_controller, web_client):
+    path = "/backup/1234"
+    controller = master_controller[0]
+    controller.state_manager.update_state(mode=Controller.Mode.active)
 
-    await patch_and_verify_json_body(web_client, path, {"invalid": ""}, expected_status=400)
+    with patch.object(controller, "request_mark_stream_as_broken") as request_mark_stream_as_broken:
+        response = await patch_and_verify_json_body(web_client, path, {"broken": True})
+    assert response["success"]
+    request_mark_stream_as_broken.assert_called_once_with(stream_id="1234", broken=True, expire_after_seconds=None)
+
+    # marking a stream that does not exist in completed backups fails
+    response = await patch_and_verify_json_body(web_client, path, {"broken": True}, expected_status=400)
+    assert "1234" in response["message"]
+
+    controller.state["backups"].append({"stream_id": "1234", "site": "default"})
+
+    async def apply_broken_request_after_delay():
+        await asyncio.sleep(0.1)
+        requests = controller.state["broken_backup_requests"]
+        pending = next(r for r in requests if r["stream_id"] == "1234")
+        remaining = [r for r in requests if r["request_id"] != pending["request_id"]]
+        controller.state_manager.update_state(
+            broken_backup_requests=remaining,
+            broken_backup_results={
+                **controller.state["broken_backup_results"],
+                pending["request_id"]: {"success": True, "error": None},
+            },
+        )
+
+    # expire_after_seconds blocks until the queued request is applied (simulated here rather
+    # than run through the real controller loop, which is covered separately in test_controller.py)
+    apply_task = asyncio.ensure_future(apply_broken_request_after_delay())
+    response = await patch_and_verify_json_body(web_client, path, {"broken": True, "expire_after_seconds": 5})
+    await apply_task
+    assert response["success"]
+    assert controller.state["broken_backup_requests"] == []
+
+    # expire_after_seconds times out if nothing applies the queued request in time
+    response = await patch_and_verify_json_body(
+        web_client, path, {"broken": True, "expire_after_seconds": 0.2}, expected_status=400
+    )
+    assert "not applied in time" in response["message"]
+    controller.state_manager.update_state(broken_backup_requests={})
 
 
 async def test_binlogs_set_index(master_controller, web_client):

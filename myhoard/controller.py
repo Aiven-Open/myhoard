@@ -45,6 +45,7 @@ import pymysql
 import re
 import threading
 import time
+import uuid
 
 ERR_CANNOT_CONNECT = 2003
 ERR_BACKUP_IN_PROGRESS = 4085
@@ -100,6 +101,19 @@ def sort_completed_backups(backups: List[Backup], reverse: bool = False) -> List
     return sorted((backup for backup in backups if backup["completed_at"]), key=key, reverse=reverse)
 
 
+class BrokenBackupResult(TypedDict):
+    success: bool
+    error: str | None
+    expires_at: str
+
+
+class BrokenBackupRequest(TypedDict):
+    request_id: str
+    stream_id: str
+    broken: bool
+    expires_at: str | None
+
+
 class Controller(threading.Thread):
     """Main logic controller for the service. This drives the individual handlers like
     BackupStream, BinlogScanner and RestoreCoordinator as well as provides state info
@@ -146,6 +160,8 @@ class Controller(threading.Thread):
         server_uuid: Optional[str]
         uploaded_binlogs: list
         paused_backups_until: str | None
+        broken_backup_requests: list[BrokenBackupRequest]
+        broken_backup_results: dict[str, BrokenBackupResult]
 
     def __init__(
         self,
@@ -237,6 +253,8 @@ class Controller(threading.Thread):
             "server_uuid": None,
             "uploaded_binlogs": [],
             "paused_backups_until": None,
+            "broken_backup_requests": [],
+            "broken_backup_results": {},
         }
         self.state_dir = state_dir
         state_file = os.path.join(state_dir, "myhoard_controller_state.json")
@@ -1241,7 +1259,7 @@ class Controller(threading.Thread):
             raise KeyError(f"Stream {stream_id} not found in backups")
         return backup["site"]
 
-    def get_backup_by_stream_id(self, stream_id: str):
+    def get_backup_by_stream_id(self, stream_id: str) -> Backup | None:
         for backup in self.state["backups"]:
             if backup["stream_id"] == stream_id:
                 return backup
@@ -1277,6 +1295,7 @@ class Controller(threading.Thread):
         self._purge_old_binlogs()
         self._process_local_binlog_updates()
         self._send_binlog_stats()
+        self._handle_mark_streams_as_broken()
 
     def _handle_mode_idle(self):
         self._refresh_backups_list()
@@ -1345,16 +1364,82 @@ class Controller(threading.Thread):
                 restore_options={},
             )
 
-    def _mark_failed_restore_backup_as_broken(self) -> None:
-        failed_stream_id = self.state["restore_options"]["stream_id"]
-        broken_backup = self.get_backup_by_stream_id(stream_id=failed_stream_id)
-
-        if not broken_backup:
-            raise Exception(
-                f'Stream {failed_stream_id} to be marked as broken not found in completed backups: {self.state["backups"]}'
+    def _handle_mark_streams_as_broken(self):
+        with self.lock:
+            now = str(datetime.datetime.now(datetime.timezone.utc))
+            broken_backup_requests = [
+                req
+                for req in self.state["broken_backup_requests"]
+                if req.get("expires_at") is None or req["expires_at"] > now
+            ]
+            broken_backup_results = {
+                request_id: res for request_id, res in self.state["broken_backup_results"].items() if res["expires_at"] > now
+            }
+            self.state_manager.update_state(
+                broken_backup_requests=broken_backup_requests,
+                broken_backup_results=broken_backup_results,
             )
 
-        self._build_backup_stream(broken_backup).mark_as_broken()
+        while any(self.state["broken_backup_requests"]):
+            with self.lock:
+                broken_backup_request = self.state["broken_backup_requests"][0]
+            stream_id = broken_backup_request["stream_id"]
+            request_id = broken_backup_request["request_id"]
+            expires_at = broken_backup_request["expires_at"]
+            broken = broken_backup_request["broken"]
+            broken_backup = self.get_backup_by_stream_id(stream_id=stream_id)
+            if not broken_backup:
+                error = f"Stream {stream_id} does not exist anymore"
+                logging.info("Skipping marking stream=%s to broken=%s as stream does not exist anymore", stream_id, broken)
+                success = False
+            else:
+                backup_stream = next((s for s in self.backup_streams if s.stream_id == stream_id), None)
+                success, error = (backup_stream or self._build_backup_stream(broken_backup)).mark_as_broken(broken=broken)
+            with self.lock:
+                new_bbr = [elem for elem in self.state["broken_backup_requests"] if elem != broken_backup_request]
+
+                self.state_manager.update_state(broken_backup_requests=new_bbr)
+                if expires_at:
+                    self.state_manager.update_state(
+                        broken_backup_results=self.state["broken_backup_results"]
+                        | {request_id: BrokenBackupResult(success=success, error=error, expires_at=expires_at)},
+                    )
+
+    def _check_existing_streams(self, stream_id: str) -> Backup | None:
+        broken_backup = self.get_backup_by_stream_id(stream_id=stream_id)
+        if not broken_backup:
+            raise Exception(
+                f'Stream {stream_id} to be marked as broken not found in completed backups: {self.state["backups"]}'
+            )
+        return broken_backup
+
+    def request_mark_stream_as_broken(self, stream_id: str, broken: bool, expire_after_seconds: float | None = None) -> str:
+        if self.mode != self.Mode.active:
+            raise ValueError(f"Current mode is {self.mode}, marking streams as broken only allowed while in active mode")
+        request_id = str(uuid.uuid4())
+        with self.lock:
+            expires_at = None
+            if expire_after_seconds:
+                expires_at = str(
+                    datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=expire_after_seconds)
+                )
+            try:
+                self._check_existing_streams(stream_id=stream_id)
+            except Exception as e:
+                raise BadRequest(e) from e
+
+            new_req = BrokenBackupRequest(request_id=request_id, stream_id=stream_id, broken=broken, expires_at=expires_at)
+            self.state_manager.update_state(broken_backup_requests=self.state["broken_backup_requests"] + [new_req])
+        self.log.info("Requested stream=%s to mark as broken=%s with id=%s", stream_id, broken, request_id)
+        return request_id
+
+    def mark_stream_as_broken(self, stream_id: str, broken: bool) -> None:
+        broken_backup = self._check_existing_streams(stream_id=stream_id)
+        self._build_backup_stream(broken_backup).mark_as_broken(broken=broken)
+
+    def _mark_failed_restore_backup_as_broken(self) -> None:
+        failed_stream_id = self.state["restore_options"]["stream_id"]
+        self.mark_stream_as_broken(stream_id=failed_stream_id, broken=True)
 
     def _should_schedule_incremental_backup(self) -> bool:
         incremental_settings = self.backup_settings.get("incremental", {})

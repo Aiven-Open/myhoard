@@ -7,7 +7,7 @@ from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
 from os import path
-from typing import Any
+from typing import Any, Callable
 
 import asyncio
 import contextlib
@@ -93,16 +93,8 @@ class WebServer:
                 return json_response(response)
 
     async def backup_settings(self, request):
-        resource_params = ["paused_until"]  # Currently this endpoint updates only "paused_until"
-        with self._handle_request(name="backup_settings"):
-            body = await self._get_request_json(request)
-            if len(body.keys() & resource_params) == 0:
-                raise BadRequest(f"No valid resource parameters were specified, valid params are: {resource_params}")
-
-            if "paused_until" in body.keys():
-                self._set_paused_until(body)
-
-            return json_response({"success": True})
+        actions = {"paused_until": self._set_paused_until}
+        return await self._update_resource(name="backup_settings", request=request, actions=actions)
 
     def _set_paused_until(self, body: dict[str, Any]):
         paused_until = body.get("paused_until")
@@ -271,16 +263,8 @@ class WebServer:
             return json_response({"mode": self.controller.mode})
 
     async def binlogs(self, request):
-        resource_params = ["binlog_index"]
-        with self._handle_request(name="binlogs"):
-            body = await self._get_request_json(request)
-            if len(body.keys() & resource_params) == 0:
-                raise BadRequest(f"No valid resource parameters were specified, valid params are: {resource_params}")
-
-            if "binlog_index" in body.keys():
-                self._set_binlog_index(body)
-
-            return json_response({"success": True})
+        actions = {"binlog_index": self._set_binlog_index}
+        return await self._update_resource(name="binlogs", request=request, actions=actions)
 
     def _set_binlog_index(self, request):
         try:
@@ -302,6 +286,58 @@ class WebServer:
 
             binlog_scanner.state_manager.update_state(next_index=binlog_index)
         self.log.warning("Updated binlog index to %s", binlog_index)
+
+    async def _update_resource(self, name: str, request: web.Request, actions: dict[str, Callable[[dict[str, Any]], Any]]):
+        resource_params = actions.keys()
+        with self._handle_request(name=name):
+            body = await self._get_request_json(request)
+            if len(body.keys() & resource_params) == 0:
+                raise BadRequest(f"No valid resource parameters were specified, valid params are: {resource_params}")
+
+            for key in body.keys() & resource_params:
+                result = actions[key](body)
+                if asyncio.iscoroutine(result):
+                    await result
+
+            return json_response({"success": True})
+
+    async def backup_stream_settings(self, request):
+        stream_id = request.match_info["stream_id"]
+        actions = {"broken": lambda body: self._set_backup_broken(body, stream_id)}
+        return await self._update_resource(name="backup_stream_settings", request=request, actions=actions)
+
+    async def _set_backup_broken(self, body: dict[str, Any], stream_id: str):
+        broken = body.get("broken")
+        if not isinstance(broken, bool):
+            raise BadRequest("'broken' is not a valid bool")
+
+        expire_after_seconds = body.get("expire_after_seconds")
+        if expire_after_seconds and not isinstance(expire_after_seconds, (int, float)):
+            raise BadRequest("expire_after_seconds is not a valid number.")
+        request_id = self.controller.request_mark_stream_as_broken(
+            stream_id=stream_id, broken=broken, expire_after_seconds=expire_after_seconds
+        )
+
+        if expire_after_seconds:
+            self.log.info(
+                "Waiting up to %.1f seconds for broken=%s of stream %s to be applied.",
+                expire_after_seconds,
+                broken,
+                stream_id,
+            )
+            start = time.monotonic()
+            while request_id not in self.controller.state["broken_backup_results"]:
+                elapsed = time.monotonic() - start
+                if elapsed > expire_after_seconds:
+                    self.log.info("broken=%s for stream %s was not applied in %.1f seconds", broken, stream_id, elapsed)
+                    raise BadRequest(f"Marking stream {stream_id} as broken={broken} was not applied in time.")
+
+                wait_time = min(expire_after_seconds - elapsed, 0.1)
+                await asyncio.sleep(wait_time)
+
+            res = self.controller.state["broken_backup_results"][request_id]
+            if not res["success"]:
+                raise BadRequest(f"Marking stream {stream_id} as broken={broken} failed with error {res['error']}.")
 
     @contextlib.contextmanager
     def _handle_request(self, *, name):
@@ -351,6 +387,7 @@ class WebServer:
                 web.get("/backup", self.backup_list),
                 web.post("/backup", self.backup_create),
                 web.patch("/backup/settings", self.backup_settings),
+                web.patch("/backup/{stream_id}", self.backup_stream_settings),
                 web.patch("/binlogs", self.binlogs),
                 web.put("/backup/{stream_id}/preserve", self.backup_preserve),
                 web.put("/replication_state", self.replication_state_set),

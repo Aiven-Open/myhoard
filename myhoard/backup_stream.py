@@ -32,6 +32,7 @@ from rohmu import errors as rohmu_errors
 from rohmu.compressor import CompressionStream
 from rohmu.encryptor import EncryptorStream
 from rohmu.errors import FileNotFoundFromStorageError
+from rohmu.object_storage.base import BaseTransfer
 from rohmu.object_storage.s3 import S3Transfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
@@ -51,7 +52,6 @@ import uuid
 
 if TYPE_CHECKING:
     from .statsd import StatsClient
-    from rohmu.object_storage.base import BaseTransfer
 
 
 BINLOG_BUCKET_SIZE = 500
@@ -428,33 +428,45 @@ class BackupStream(threading.Thread):
         for binlog in binlogs:
             yield binlog
 
-    def mark_as_broken(self) -> None:
-        if self.state["broken_info"]:
-            self.log.warning("Stream %s marked as broken multiple times", self.stream_id)
-            return
-
+    def _mark_as_broken(self, key: str, file_storage: BaseTransfer):
         self.stop()
-        self.log.info("Marking stream %s as broken.", self.stream_id)
 
         broken_info = {
             "broken_at": time.time(),
             "server_id": self.server_id,
         }
-        # Write the broken info to local state too
         self.state_manager.update_state(broken_info=broken_info)
 
-        try:
-            key = self._build_full_name("broken.json")
-            data = json.dumps(broken_info)
-            metadata = make_fs_metadata(broken_info)
+        data = json.dumps(broken_info)
+        metadata = make_fs_metadata(broken_info)
+        file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
 
+    def _mark_as_non_broken(self, key: str, file_storage: BaseTransfer):
+        self.state_manager.update_state(broken_info=None)
+        file_storage.delete_key(key=key)
+
+    def mark_as_broken(self, broken: bool) -> Tuple[bool, Optional[str]]:
+        try:
+            self.log.info("Marking stream=%s to broken=%s", self.stream_id, broken)
             file_storage = self.file_storage_setup_fn()
-            file_storage.store_file_from_memory(key, data.encode("utf-8"), metadata=metadata)
+            key = self._build_full_name("broken.json")
+            if any(file_storage.iter_key(key=key, include_key=True)) == broken:
+                error = f"Error stream={self.stream_id} was marked as broken={broken} multiple times"
+                self.log.warning(error)
+                return False, error
+
+            if broken:
+                self._mark_as_broken(key=key, file_storage=file_storage)
+            else:
+                self._mark_as_non_broken(key=key, file_storage=file_storage)
+            return True, None
         except Exception as ex:  # pylint: disable=broad-except
-            self.log.exception("Failed to create broken.json")
+            error = f"Failed to set stream={self.stream_id} to broken={broken}"
+            self.log.exception(error)
             self.stats.unexpected_exception(ex=ex, where="BackupStream.mark_as_broken")
             self.state_manager.update_state(remote_write_errors=self.state["remote_write_errors"] + 1)
             self.stats.increase("myhoard.remote_write_errors")
+            return False, error
 
     def mark_as_closed(self) -> None:
         if self.state["closed_info"]:
