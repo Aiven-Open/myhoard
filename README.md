@@ -838,7 +838,11 @@ status 400. For successful requests the response body looks like this:
   "binlogs_being_restored": 0,
   "binlogs_pending": 73,
   "binlogs_restored": 0,
-  "phase": "{current_phase}"
+  "current_backup_incremental": true,
+  "current_backup_name": "{backup_identifier}",
+  "phase": "{current_phase}",
+  "restore_chain_index": 2,
+  "restore_chain_total": 3
 }
 ```
 
@@ -877,6 +881,19 @@ given.
 
 Number of binary logs that have been successfully applied.
 
+**current_backup_incremental**
+
+Tells whether the backup currently being restored is an incremental backup.
+This is `false` while the full snapshot at the start of the restore chain is
+being restored.
+
+**current_backup_name**
+
+`stream_id` of the backup currently being restored. When the backup being
+restored is incremental, its prerequisite backups (the full backup and any
+earlier incremental backups) are restored first, so this differs from the
+`stream_id` given in the restore request until the last step of the chain.
+
 **phase**
 
 Current phase of backup restoration. Possible options are these:
@@ -913,6 +930,19 @@ Current phase of backup restoration. Possible options are these:
   details regarding the failure is advisable.
 - failed_basebackup: Terminal state for a RestoreCoordinator instance but
   restoring an earlier backup may be an option.
+
+**restore_chain_index**
+
+1-based position of the backup currently being restored within the restore
+chain. For a plain non-incremental restore this is always `1`.
+
+**restore_chain_total**
+
+Total number of backups in the restore chain: the prerequisite backups (the
+full backup and any earlier incremental backups) followed by the requested
+backup itself. For a plain non-incremental restore this is `1`. The chain is
+determined while backup metadata is being fetched, so during the
+`getting_backup_info` phase these fields report `1` of `1`.
 
 # Metrics
 
