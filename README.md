@@ -648,6 +648,41 @@ This endpoint manages binlogs
 }
 ```
 
+## PATCH /backup/{stream_id}
+
+This endpoint updates settings of a single, already completed backup.
+
+```
+{
+  "broken": "{bool}",
+  "expire_after_seconds": "{number}",
+}
+```
+
+**stream_id**
+
+Identifier of the backup to update.
+
+### Allowed parameters are:
+
+**broken** (bool) - Marks the backup as broken (`true`) or clears a previous broken
+mark (`false`). A broken backup is skipped when picking a backup to restore from. The
+request is queued and applied asynchronously by the controller.
+
+**expire_after_seconds** (number, optional) - Number of seconds to wait for the
+`broken` change to be applied before responding. Without this parameter the endpoint
+returns as soon as the request has been queued, without waiting for it to be applied.
+If the change has not been applied within the given time, or applying it failed, the
+endpoint responds with an error.
+
+### Response
+
+```
+{
+  "success": true
+}
+```
+
 ## PUT /backup/{stream_id}/preserve
 
 Create a request for updating the preservation status of a backup. Request body must be like this:

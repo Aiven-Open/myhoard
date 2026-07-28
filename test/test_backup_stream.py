@@ -6,6 +6,7 @@ from myhoard.binlog_scanner import BinlogScanner
 from myhoard.controller import BackupSiteInfo, Controller
 from rohmu.object_storage.local import LocalTransfer
 from typing import cast, Dict
+from unittest.mock import MagicMock
 
 import datetime
 import json
@@ -204,6 +205,48 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
     bs.delete_state()
     assert not os.path.exists(bs.state_manager.state_file)
     assert not os.path.exists(bs.remote_binlog_manager.state_file)
+
+
+def test_mark_as_broken_and_unmark(session_tmpdir):
+    state_dir = session_tmpdir().strpath
+    file_storage = MagicMock()
+    file_storage.calculate_max_unknown_file_size.return_value = sys.maxsize
+    _, public_key_pem = generate_rsa_key_pair()
+    bs = BackupStream(
+        backup_reason=BackupStream.BackupReason.requested,
+        file_storage_setup_fn=lambda: file_storage,
+        mode=BackupStream.Mode.observe,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory="",
+        normalized_backup_time="2019-02-25T08:20",
+        rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=os.path.join(state_dir, "backup_stream.remote_binlogs"),
+        server_id=1,
+        site="default",
+        state_file=os.path.join(state_dir, "backup_stream.json"),
+        stats=build_statsd_client(),
+        temp_dir=state_dir,
+    )
+    assert not bs.state["broken_info"]
+    broken_json_key = f"default/{bs.stream_id}/broken.json"
+
+    success, error = bs.mark_as_broken(broken=True)
+    assert success
+    assert error is None
+    assert bs.state["broken_info"]["server_id"] == 1
+    assert bs.state["broken_info"]["broken_at"] is not None
+    key, data = file_storage.store_file_from_memory.call_args[0]
+    assert key == broken_json_key
+    assert json.loads(data.decode("utf-8")) == bs.state["broken_info"]
+
+    file_storage.iter_key.return_value = [{"key": broken_json_key}]
+    success, error = bs.mark_as_broken(broken=False)
+    assert success
+    assert error is None
+    assert not bs.state["broken_info"]
+    file_storage.delete_key.assert_called_once_with(key=broken_json_key)
+    assert bs.state["remote_write_errors"] == 0
 
 
 def test_new_stream_id_is_valid_iso8601():
