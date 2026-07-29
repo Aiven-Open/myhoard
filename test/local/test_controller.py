@@ -113,6 +113,8 @@ def do_restore(
             assert all(b["broken_at"] is None for b in current_backups)
 
         else:
-            flow_tester.wait_for_restore_phase(RestoreCoordinator.Phase.completed)
+            # Basebackup restore plus binlog apply regularly takes longer than the
+            # default 10s timeout on busy CI runners.
+            flow_tester.wait_for_restore_phase(RestoreCoordinator.Phase.completed, timeout=40)
     finally:
         target_controller.stop()
