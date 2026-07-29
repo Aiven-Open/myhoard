@@ -424,6 +424,25 @@ def test_find_extra_xtrabackup_executables() -> None:
 
 
 @pytest.mark.parametrize(
+    "with_binlog,with_gtids,expected",
+    [
+        (
+            False,
+            False,
+            ["--disable-log-bin", "--skip-slave-preserve-commit-order", "--event-scheduler=OFF", "--gtid-mode=OFF"],
+        ),
+        (False, True, ["--disable-log-bin", "--skip-slave-preserve-commit-order", "--event-scheduler=OFF"]),
+        (True, False, ["--gtid-mode=OFF"]),
+        # The restart that finalizes a restore. It must produce no options at all so that mysqld goes
+        # back to whatever my.cnf says, in particular so the event scheduler is enabled again.
+        (True, True, []),
+    ],
+)
+def test_restore_mysqld_options(with_binlog: bool, with_gtids: bool, expected: list[str]) -> None:
+    assert myhoard_util.restore_mysqld_options(with_binlog=with_binlog, with_gtids=with_gtids) == expected
+
+
+@pytest.mark.parametrize(
     "dow_schedule,result",
     [
         ("abracadabra", ValueError),

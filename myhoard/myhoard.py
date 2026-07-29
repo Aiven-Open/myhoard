@@ -7,6 +7,7 @@ from myhoard.util import (
     detect_running_process_id,
     find_extra_xtrabackup_executables,
     parse_dow_schedule,
+    restore_mysqld_options,
     wait_for_port,
 )
 from myhoard.web_server import WebServer
@@ -154,14 +155,7 @@ class MyHoard:
         if systemd_service:
             self._restart_systemd(with_binlog=with_binlog, with_gtids=with_gtids, service=systemd_service)
         else:
-            mysqld_options = []
-            if not with_binlog:
-                mysqld_options.append("--disable-log-bin")
-                # If config says slave-preserve-commit-order=ON MySQL would refuse to start if binlog is
-                # disabled. To prevent that from happening ensure preserve commit order is disabled
-                mysqld_options.append("--skip-slave-preserve-commit-order")
-            if not with_gtids:
-                mysqld_options.append("--gtid-mode=OFF")
+            mysqld_options = restore_mysqld_options(with_binlog=with_binlog, with_gtids=with_gtids)
             self._restart_process(mysqld_options=mysqld_options)
 
         # Ensure the server is accepting connections
