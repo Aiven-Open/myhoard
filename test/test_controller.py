@@ -2740,6 +2740,11 @@ def test_should_schedule_incremental_backup(
     assert m_controller._should_schedule_incremental_backup()
 
 
+# Evaluated once at collection time, so it must stay in the future for however long
+# the whole test session takes or the preserved backups become purgeable mid-run.
+PRESERVE_UNTIL = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).isoformat()
+
+
 @pytest.mark.parametrize(
     "backups,expected_no_purge_reason,travel_to_datetime,backup_settings_extra",
     [
@@ -2825,9 +2830,7 @@ def test_should_schedule_incremental_backup(
             [
                 {
                     "stream_id": "stream1",
-                    "preserve_until": (
-                        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
-                    ).isoformat(),
+                    "preserve_until": PRESERVE_UNTIL,
                 },
                 {"stream_id": "stream2"},
                 {"stream_id": "stream3"},
@@ -2843,9 +2846,7 @@ def test_should_schedule_incremental_backup(
                 {"stream_id": "stream1"},
                 {
                     "stream_id": "stream2",
-                    "preserve_until": (
-                        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
-                    ).isoformat(),
+                    "preserve_until": PRESERVE_UNTIL,
                 },
                 {"stream_id": "stream3"},
                 {"stream_id": "stream4"},
@@ -2860,9 +2861,7 @@ def test_should_schedule_incremental_backup(
                 {"stream_id": "stream1"},
                 {
                     "stream_id": "stream2",
-                    "preserve_until": (
-                        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
-                    ).isoformat(),
+                    "preserve_until": PRESERVE_UNTIL,
                     "incremental": True,
                 },
                 {"stream_id": "stream3"},
