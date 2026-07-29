@@ -9,6 +9,7 @@ from myhoard.controller import Backup, BaseBackup, Controller, ERR_BACKUP_IN_PRO
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
     change_replication_source_to,
+    get_replica_status,
     get_xtrabackup_version,
     GtidExecuted,
     make_fs_metadata,
@@ -300,6 +301,21 @@ def test_promoted_node_does_not_resume_streams_for_backups_initiated_by_old_mast
         # backup after the promotion process of the standby was triggered.
         with mysql_cursor(**standby1.connect_options) as cursor:
             cursor.execute("STOP REPLICA IO_THREAD")
+
+        def standby_has_applied_all_received_transactions():
+            with mysql_cursor(**standby1.connect_options) as cursor:
+                replica_status = get_replica_status(cursor)
+                assert replica_status is not None
+                cursor.execute(
+                    "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS all_applied",
+                    [replica_status["Retrieved_Gtid_Set"]],
+                )
+                assert cursor.fetchone()["all_applied"]
+
+        # The SQL thread and its parallel workers may still be applying transactions received
+        # before the IO thread was stopped; switching to active mode is not allowed until the
+        # standby has caught up.
+        while_asserts(standby_has_applied_all_received_transactions, timeout=30)
         s1_controller.switch_to_active_mode()
 
         m_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
