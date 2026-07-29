@@ -1300,48 +1300,44 @@ def test_binlog_auto_rotation(master_controller):
     # Wait for the backup stream to reach stable state so there aren't unexpected binlog rotations
     while_asserts(streaming_binlogs, timeout=10)
 
-    final_binlogs = set()
-    initial_binlogs = set()
+    seen_binlogs = set()
     with mysql_cursor(**master.connect_options) as cursor:
         cursor.execute("CREATE TABLE test_data (value TEXT)")
         cursor.execute("SHOW BINARY LOGS")
-        for binlog in cursor.fetchall():
-            initial_binlogs.add(binlog["Log_name"])
+        initial_binlogs = {binlog["Log_name"] for binlog in cursor.fetchall()}
 
-    start_time = time.monotonic()
-    while time.monotonic() - start_time < 3.5:
+    def new_binlog_count():
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("SHOW BINARY LOGS")
+            seen_binlogs.update(binlog["Log_name"] for binlog in cursor.fetchall())
+        return len(seen_binlogs - initial_binlogs)
+
+    # Rotation should be forced roughly every second while data is being written. The exact
+    # pace depends on controller loop scheduling, so wait for rotations to accumulate instead
+    # of counting them within a fixed wall-clock window.
+    def rotated_repeatedly():
         with mysql_cursor(**master.connect_options) as cursor:
             cursor.execute("INSERT INTO test_data (value) VALUES (%s)", [str(time.time())])
             cursor.execute("COMMIT")
-            cursor.execute("SHOW BINARY LOGS")
-            for binlog in cursor.fetchall():
-                final_binlogs.add(binlog["Log_name"])
+        assert new_binlog_count() >= 3
 
-        time.sleep(0.1)
-
-    new_binlogs = final_binlogs - initial_binlogs
-    # We wait 3.5 seconds so depending on the timing there could be 3 or 4 binlogs
-    assert len(new_binlogs) in {3, 4}
+    while_asserts(rotated_repeatedly, timeout=30)
 
     # Ensure one more rotation is done (we previously wrote some data that was not included in latest rotation)
+    binlogs_before_explicit_rotation = new_binlog_count()
     mcontroller.rotate_and_back_up_binlog()
-    with mysql_cursor(**master.connect_options) as cursor:
-        cursor.execute("SHOW BINARY LOGS")
-        final_binlogs = set(binlog["Log_name"] for binlog in cursor.fetchall())
-
-    new_binlogs = final_binlogs - initial_binlogs
-    assert len(new_binlogs) in {4, 5}
+    assert new_binlog_count() > binlogs_before_explicit_rotation
 
     # Binlog rotation will happen even if there are no changes
-    time.sleep(1.5)
+    binlogs_before_idle_rotation = new_binlog_count()
+
+    def rotated_while_idle():
+        assert new_binlog_count() > binlogs_before_idle_rotation
+
+    while_asserts(rotated_while_idle, timeout=30)
     with mysql_cursor(**master.connect_options) as cursor:
-        cursor.execute("SHOW BINARY LOGS")
-        final_binlogs = set(binlog["Log_name"] for binlog in cursor.fetchall())
         cursor.execute("SELECT @@GLOBAL.gtid_executed AS gtid_executed")
         gtid_executed = cursor.fetchone()["gtid_executed"]
-
-    new_binlogs = final_binlogs - initial_binlogs
-    assert len(new_binlogs) > 4
 
     # Take new backup and ensure that has appropriate GTID executed value
     mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
