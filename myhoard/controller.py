@@ -1354,6 +1354,8 @@ class Controller(threading.Thread):
             if self.restore_coordinator.should_mark_backup_as_broken():
                 self._mark_failed_restore_backup_as_broken()
             self._switch_basebackup_if_possible()
+        if self.restore_coordinator.phase == RestoreCoordinator.Phase.broken_basebackup:
+            self._switch_basebackup_if_possible()
         if self.state["promote_on_restore_completion"] and self.restore_coordinator.is_complete():
             self.state_manager.update_state(
                 # Ensure latest backup list is fetched before promotion so that we

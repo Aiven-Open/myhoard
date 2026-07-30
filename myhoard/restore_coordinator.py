@@ -135,6 +135,7 @@ class RestoreCoordinator(threading.Thread):
         failed = "failed"
         # Terminal state for a RestoreCoordinator instance but restoring an earlier backup may be an option
         failed_basebackup = "failed_basebackup"
+        broken_basebackup = "broken_basebackup"
 
     class State(TypedDict):
         applying_binlogs: List[PendingBinlogInfo]
@@ -472,6 +473,16 @@ class RestoreCoordinator(threading.Thread):
         self.worker_processes = []
         self.log.info("Restore coordinator stopped")
 
+    def _handle_broken_backup(self, stream_id: str):
+        broken_info = self._load_file_data("broken.json", stream_id=stream_id, missing_ok=True)
+        if broken_info and broken_info.get("broken_at"):
+            self.log.error("Cannot use backup=%s for restoration marked as broken, will try to switch backup", stream_id)
+            self.update_state(
+                phase=self.Phase.broken_basebackup,
+            )
+            return True
+        return False
+
     def get_backup_info(self) -> None:
         if not self.state["completed_info"]:
             completed_info = self._load_file_data("completed.json")
@@ -483,6 +494,9 @@ class RestoreCoordinator(threading.Thread):
 
         basebackup_info = self._load_file_data("basebackup.json")
         if not basebackup_info:
+            return
+
+        if self._handle_broken_backup(stream_id=self.stream_id):
             return
 
         required_backups = []
@@ -506,6 +520,9 @@ class RestoreCoordinator(threading.Thread):
                 if not completed_info:
                     self.log.error("Required backup %r is not complete, cannot restore", stream_id)
                     self.state_manager.increment_counter(name="restore_errors")
+                    return
+
+                if self._handle_broken_backup(stream_id=stream_id):
                     return
 
                 required_backups.append((stream_id, info))
