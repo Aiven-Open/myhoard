@@ -515,6 +515,25 @@ def detect_running_process_id(command: str) -> Tuple[Optional[int], bytes]:
     return ids[0], output_bytes
 
 
+def restore_mysqld_options(*, with_binlog: bool, with_gtids: bool) -> list[str]:
+    """Extra mysqld command line options for a server start that is part of a restore"""
+    options = []
+    if not with_binlog:
+        options.append("--disable-log-bin")
+        # If config says slave-preserve-commit-order=ON MySQL would refuse to start if binlog is
+        # disabled. To prevent that from happening ensure preserve commit order is disabled
+        options.append("--skip-slave-preserve-commit-order")
+        # Only restore phases run with the binlog disabled. A physical basebackup keeps events in
+        # ENABLED state and every restored event whose schedule lapsed during the restore fires
+        # within seconds of startup, so their writes race the transactions being replayed from the
+        # binlogs and the applier dies on a duplicate key. This has to be a startup option: by the
+        # time we could connect and SET GLOBAL, the events have already fired.
+        options.append("--event-scheduler=OFF")
+    if not with_gtids:
+        options.append("--gtid-mode=OFF")
+    return options
+
+
 def wait_for_port(*, host, port, timeout):
     """Waits until given (address, port) tuple starts listening or given timeout is exceeded"""
     start_time = time.monotonic()

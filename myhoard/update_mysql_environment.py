@@ -1,5 +1,5 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from myhoard.util import atomic_create_file
+from myhoard.util import atomic_create_file, restore_mysqld_options
 
 import argparse
 import logging
@@ -17,14 +17,9 @@ class EnvironmentUpdater:
     def update(self):
         # make sure we only update the parameter we need to update i.e., MYSQLD_OPTS
         key = "MYSQLD_OPTS"  # we only update this environment variable
-        options = []
-        if self.args.with_bin_log != "true":
-            options.append("--disable-log-bin")
-            # If config says slave-preserve-commit-order=ON MySQL would refuse to start if binlog is
-            # disabled. To prevent that from happening ensure preserve commit order is disabled
-            options.append("--skip-slave-preserve-commit-order")
-        if self.args.gtid_mode != "true":
-            options.append("--gtid-mode=OFF")
+        options = restore_mysqld_options(
+            with_binlog=self.args.with_bin_log == "true", with_gtids=self.args.gtid_mode == "true"
+        )
         try:
             with open(self.args.env_file, "r") as f:
                 contents = [line.rstrip("\n") for line in f.readlines() if line.strip() and not line.startswith(key)]

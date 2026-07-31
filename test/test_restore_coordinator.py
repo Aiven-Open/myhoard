@@ -299,6 +299,17 @@ def _restore_coordinator_sequence(
         "user": mysql_master.user,
     }
     state_file_name = os.path.join(session_tmpdir().strpath, "restore_coordinator.json")
+
+    # Record what the event scheduler was actually set to by each restart the restore performs
+    scheduler_states: list[tuple[bool, str]] = []
+
+    def restart_mysql_and_record_scheduler(**kwargs):
+        restart_mysql(mysql_empty, **kwargs)
+        with myhoard_util.mysql_cursor(**restored_connect_options) as cursor:
+            cursor.execute("SELECT @@GLOBAL.event_scheduler AS event_scheduler")
+            scheduler = cast(dict, cursor.fetchone())["event_scheduler"]
+        scheduler_states.append((kwargs["with_binlog"], scheduler))
+
     # Restore basebackup from backup stream 1 but binlogs from both streams. First stream doesn't
     # contain latest state but applying binlogs from second stream should get it fully up-to-date
     rc = RestoreCoordinator(
@@ -319,7 +330,7 @@ def _restore_coordinator_sequence(
         mysql_relay_log_prefix=mysql_empty.config_options.relay_log_file_prefix,
         pending_binlogs_state_file=state_file_name.replace(".json", "") + ".pending_binlogs",
         rebuild_tables=rebuild_tables,
-        restart_mysqld_callback=lambda **kwargs: restart_mysql(mysql_empty, **kwargs),
+        restart_mysqld_callback=restart_mysql_and_record_scheduler,
         rsa_private_key_pem=private_key_pem,
         site="default",
         state_file=state_file_name,
@@ -349,6 +360,14 @@ def _restore_coordinator_sequence(
     assert len(rc.state["backup_xtrabackup_version"]) >= 3
     assert get_xtrabackup_version() == rc.state["backup_xtrabackup_version"]
     assert rc.should_mark_backup_as_broken() is False
+
+    # A basebackup keeps events in ENABLED state, so any restore-phase server start must keep the event
+    # scheduler off: the events would otherwise fire immediately and write rows that collide with the
+    # transactions still being replayed from the binlogs. The restart that finalizes the restore passes
+    # no options at all, so the scheduler is back on for the restored server.
+    assert (False, "OFF") in scheduler_states
+    assert all(scheduler == "OFF" for with_binlog, scheduler in scheduler_states if not with_binlog)
+    assert scheduler_states[-1] == (True, "ON")
 
     if fail_and_resume:
         assert isinstance(rc.state_manager, FailingStateManager)

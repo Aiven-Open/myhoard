@@ -191,8 +191,11 @@ def restart_mysql(mysql_config, *, with_binlog=True, with_gtids=True):
         proc.wait(timeout=20.0)
         print("Stopped mysqld with pid", proc.pid)
     command = mysql_config.startup_command
+    # Deliberately not myhoard.util.restore_mysqld_options: that one spells the option the 8.0 way
+    # as --skip-slave-preserve-commit-order, while the tests also run against 8.4. Keep the rest of
+    # the list in sync with it.
     if not with_binlog:
-        command = command + ["--disable-log-bin", "--skip-replica-preserve-commit-order"]
+        command = command + ["--disable-log-bin", "--skip-replica-preserve-commit-order", "--event-scheduler=OFF"]
     if not with_gtids:
         command = command + ["--gtid-mode=OFF"]
     mysql_config.proc = subprocess.Popen(command)  # pylint: disable=consider-using-with
