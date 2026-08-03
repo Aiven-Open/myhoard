@@ -60,6 +60,80 @@ def test_backup_and_restore_fail_on_disk_full(
     )
 
 
+def test_restore_switches_to_previous_backup_when_latest_is_broken(
+    master_controller: tuple[Controller, MySQLConfig],
+    empty_controller: tuple[Controller, MySQLConfig],
+    caplog: LogCaptureFixture,
+) -> None:
+    """Test that restoration switches to the previous backup when the requested one is broken.
+
+    Builds a full backup followed by two incremental backups. The latest (incremental) backup is
+    marked broken only after the restoring controller has already fetched the backup list, so the
+    explicit restore request below still goes through; the restore coordinator must then discover
+    on its own, while restoring, that the requested backup is broken and fall back to the previous,
+    healthy incremental backup instead.
+    """
+    master, mysql_master = master_controller
+    target, mysql_target = empty_controller
+    mysql_target.connect_options["password"] = mysql_master.connect_options["password"]
+
+    flow_tester = ControllerFlowTester(master)
+    master.switch_to_active_mode()
+    master.start()
+    flow_tester.wait_for_streaming_binlogs()
+
+    populate_table(mysql_master, "test")
+    full_backup = do_backup_round(master, flow_tester, incremental=False)
+    assert not full_backup.state["basebackup_info"]["incremental"]
+
+    populate_table(mysql_master, "test")
+    previous_backup = do_backup_round(master, flow_tester, incremental=True)
+    assert previous_backup.state["basebackup_info"]["incremental"]
+
+    populate_table(mysql_master, "test")
+    broken_backup = do_backup_round(master, flow_tester, incremental=True)
+    assert broken_backup.state["basebackup_info"]["incremental"]
+
+    target_flow_tester = ControllerFlowTester(target)
+    target.start()
+    try:
+        target_flow_tester.wait_for_fetched_backup(timeout=2)
+
+        # Mark the latest backup as broken only now: the target's cached backup list (fetched
+        # above) still considers it healthy, so the restore request below is accepted. The restore
+        # coordinator itself must notice that the backup is broken once it starts restoring it.
+        master.mark_stream_as_broken(stream_id=broken_backup.stream_id, broken=True)
+
+        target.restore_backup(site=broken_backup.site, stream_id=broken_backup.stream_id)
+
+        # Two basebackups worth of restoring (the broken one is detected before anything is
+        # downloaded, then the previous one is restored in full) can take longer than the default.
+        target_flow_tester.wait_for_restore_phase(RestoreCoordinator.Phase.completed, timeout=60)
+    finally:
+        target.stop()
+
+    assert any(
+        f"Cannot use backup={broken_backup.stream_id}" in record.message and "marked as broken" in record.message
+        for record in caplog.records
+    )
+
+    # The restore coordinator must have switched to the previous, non-broken backup.
+    assert target.state["restore_options"]["stream_id"] == previous_backup.stream_id
+
+    orig_size = get_table_size(mysql_master, "test")
+    restored_size = get_table_size(mysql_target, "test")
+    assert orig_size == restored_size
+
+
+def do_backup_round(controller: Controller, flow_tester: ControllerFlowTester, *, incremental: bool) -> BackupStream:
+    """Request one more backup (full or incremental) on an already started, actively backing up controller."""
+    controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested, incremental_requested=incremental)
+    flow_tester.wait_for_multiple_streams()
+    flow_tester.wait_for_streaming_binlogs()
+    flow_tester.wait_for_single_stream()
+    return controller.backup_streams[0]
+
+
 def do_backup(controller: Controller) -> list[BackupStream]:
     """Trigger a backup and wait for it to finish."""
     flow_tester = ControllerFlowTester(controller)
