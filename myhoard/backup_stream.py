@@ -429,8 +429,6 @@ class BackupStream(threading.Thread):
             yield binlog
 
     def _mark_as_broken(self, key: str, file_storage: BaseTransfer):
-        self.stop()
-
         broken_info = {
             "broken_at": time.time(),
             "server_id": self.server_id,
