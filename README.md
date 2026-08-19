@@ -395,6 +395,14 @@ Maximum percentage of system memory to allow xtrabackup to use while
 preparing a basebackup for restoration. If not defined, use xtrabackup's
 default value.
 
+**restore_use_memory**
+
+This option affects how much memory is allocated and is similar to
+innodb_buffer_pool_size. This option is only relevant in the --prepare phase.
+The default value is 100MB. The recommended value is between 1GB to 2GB.
+THe size is specified in bytes.
+When use_memory and free_memory_percentage are both set, free_memory_percentage will be ignored.
+
 **restore_max_binlog_bytes**
 
 Maximum amount of disk space to use for binary logs including pre-fetched logs

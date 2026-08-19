@@ -184,6 +184,7 @@ class Controller(threading.Thread):
         temp_dir,
         restore_download_workers_count: int,
         restore_free_memory_percentage=None,
+        restore_use_memory: Optional[int] = None,
         xtrabackup_settings: Dict[str, int],
         auto_mark_backups_broken: bool = False,
     ):
@@ -228,6 +229,7 @@ class Controller(threading.Thread):
         self.restore_max_binlog_bytes = restore_max_binlog_bytes
         self.restore_download_workers_count = restore_download_workers_count
         self.restore_free_memory_percentage: Optional[int] = restore_free_memory_percentage
+        self.restore_use_memory = restore_use_memory
         self.restore_coordinator: Optional[RestoreCoordinator] = None
         self.seen_basebackup_infos: Dict[str, BaseBackup] = {}
         self.server_id = server_id
@@ -991,6 +993,7 @@ class Controller(threading.Thread):
             file_storage_config=storage_config,
             max_binlog_bytes=self.restore_max_binlog_bytes,
             free_memory_percentage=self.restore_free_memory_percentage,
+            use_memory=self.restore_use_memory,
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,

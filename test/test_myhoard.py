@@ -1,7 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import get_random_port, wait_for_port, while_asserts
 from myhoard.myhoard import MyHoard
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import contextlib
 import json
@@ -45,6 +45,23 @@ def test_sample_config_keys_match_fixture_config_keys(myhoard_config):
         actual_config = json.load(f)
 
     validate_recursive(actual_config, myhoard_config)
+
+
+def test_load_configuration_warns_when_use_memory_combined_with_free_memory_percentage(caplog):
+    config = {
+        "backup_settings": {"backup_interval_minutes": 1440},
+        "http_address": "127.0.0.1",
+        "start_command": ["mysqld"],
+        "restore_free_memory_percentage": 50,
+        "restore_use_memory": 2 * 1024 * 1024 * 1024,
+    }
+    hoard = MyHoard.__new__(MyHoard)
+    hoard.config_file = "myhoard.json"
+    hoard.log = logging.getLogger("MyHoard")
+    with patch("builtins.open", mock_open(read_data=json.dumps(config))):
+        with caplog.at_level(logging.WARNING, logger="MyHoard"):
+            hoard._load_configuration()  # pylint: disable=protected-access
+    assert "free_memory_percentage will be ignored" in caplog.text
 
 
 def test_basic_daemon_execution(myhoard_config):

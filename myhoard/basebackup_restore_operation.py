@@ -52,6 +52,7 @@ class BasebackupRestoreOperation:
         target_dir: str,
         temp_dir: str,
         backup_tool_version: str | None = None,
+        use_memory: Optional[int] = None,
         prepare_progress_callback: Optional[Callable[..., None]] = None,
     ):
         self.current_file = None
@@ -70,6 +71,7 @@ class BasebackupRestoreOperation:
         self.stream_handler = stream_handler
         self.target_dir = target_dir
         self.temp_dir = temp_dir
+        self.use_memory = use_memory
         self.backup_xtrabackup_info: Dict[str, str] | None = None
         self.backup_tool_version = backup_tool_version
         # LSN bounds for prepare progress. Use last_lsn (redo stop LSN) over
@@ -168,8 +170,18 @@ class BasebackupRestoreOperation:
                         checkpoints_file.write(checkpoints_file_content)
 
                 # --use-free-memory-pct introduced in 8.0.30, but it doesn't work in 8.0.30 and leads to PBX crash
-                if self.free_memory_percentage is not None and get_xtrabackup_version() >= (8, 0, 32):
+                if (
+                    self.free_memory_percentage is not None
+                    and get_xtrabackup_version() >= (8, 0, 32)
+                    and self.use_memory is None
+                ):
                     command_line.insert(2, f"--use-free-memory-pct={self.free_memory_percentage}")
+                if self.use_memory is not None:
+                    if self.free_memory_percentage is not None:
+                        self.log.warning(
+                            "use_memory and free_memory_percentage are both set, free_memory_percentage will be ignored"
+                        )
+                    command_line.extend(["--use-memory", str(self.use_memory)])
                 self._set_prepare_current_lsn(None)
                 with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
                     with subprocess.Popen(

@@ -192,6 +192,7 @@ class RestoreCoordinator(threading.Thread):
         download_workers_count: int,
         file_storage_config,
         free_memory_percentage,
+        use_memory: Optional[int] = None,
         max_binlog_bytes=None,
         mysql_client_params,
         mysql_config_file_name,
@@ -222,6 +223,7 @@ class RestoreCoordinator(threading.Thread):
         # can be successfully restored.
         self.binlog_streams = binlog_streams
         self.download_workers_count = download_workers_count
+        self.use_memory = use_memory
         self.current_file = None
         self.file_storage_pool = TransferPool()
         self.file_storage_config = file_storage_config
@@ -565,6 +567,7 @@ class RestoreCoordinator(threading.Thread):
             target_dir=target_dir,
             temp_dir=temp_dir,
             free_memory_percentage=self.free_memory_percentage,
+            use_memory=self.use_memory,
             backup_tool_version=backup_info.get("tool_version"),
             prepare_progress_callback=self._on_prepare_progress,
         )

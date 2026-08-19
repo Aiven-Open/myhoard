@@ -119,7 +119,8 @@ class MyHoard:
             raise Exception("Either 'start_command' or 'systemd_service' must be specified")
         if start_command and not isinstance(start_command, list):
             raise Exception("'start_command' must be a list")
-
+        if self.config.get("restore_use_memory") and self.config.get("restore_free_memory_percentage"):
+            self.log.warning("use_memory and free_memory_percentage are both set, free_memory_percentage will be ignored")
         backup_settings = self.config["backup_settings"]
         ival = backup_settings["backup_interval_minutes"]
         if (ival > 1440 and ival // 1440 * 1440 != ival) or (ival < 1440 and 1440 // ival * ival != 1440):
@@ -241,6 +242,7 @@ class MyHoard:
             restore_max_binlog_bytes=self.config["restore_max_binlog_bytes"],
             restore_download_workers_count=restore_download_workers_count,
             restore_free_memory_percentage=self.config.get("restore_free_memory_percentage"),
+            restore_use_memory=self.config.get("restore_use_memory"),
             server_id=self.config["server_id"],
             state_dir=self.config["state_directory"],
             stats=statsd,
