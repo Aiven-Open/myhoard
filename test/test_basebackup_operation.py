@@ -286,12 +286,13 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
     }
 
 
-def _make_backup_op(*, estimate_memory: bool = False) -> BasebackupOperation:
+def _make_backup_op(*, estimate_memory: bool = False, lock_ddl: str = myhoard_util.LOCK_DDL_ON) -> BasebackupOperation:
     # /dev/null is read for the mysql config at construction time; no live server or subprocess is needed.
     op = BasebackupOperation(
         encryption_algorithm="AES256",
         encryption_key=b"0" * 24,
         estimate_memory=estimate_memory,
+        lock_ddl=lock_ddl,
         mysql_client_params={"host": "127.0.0.1"},
         mysql_config_file_name="/dev/null",
         mysql_data_directory="/dev/null",
@@ -319,3 +320,29 @@ def test_build_backup_command_line_estimate_memory_enabled() -> None:
         mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
     )
     assert "--estimate-memory=ON" in command_line
+
+
+@pytest.mark.parametrize(
+    ("lock_ddl", "xtrabackup_version", "expected_option"),
+    [
+        # ON is xtrabackup's own default so the option is left out and the command line stays what
+        # MyHoard has always produced
+        (myhoard_util.LOCK_DDL_ON, (8, 4, 8, 1), None),
+        (myhoard_util.LOCK_DDL_REDUCED, (8, 4, 8, 1), "--lock-ddl=REDUCED"),
+        # 8.0 has no REDUCED enum value and refuses to start with it, so it must not be requested
+        (myhoard_util.LOCK_DDL_REDUCED, (8, 0, 35, 30), None),
+        # a value we don't know must not be passed through to xtrabackup either
+        ("BOGUS", (8, 4, 8, 1), None),
+    ],
+)
+def test_build_backup_command_line_lock_ddl(
+    lock_ddl: str, xtrabackup_version: myhoard_util.BinVersion, expected_option: str | None
+) -> None:
+    op = _make_backup_op(lock_ddl=lock_ddl)
+    with patch("myhoard.basebackup_operation.get_xtrabackup_version", return_value=xtrabackup_version):
+        command_line = op._build_backup_command_line(  # pylint: disable=protected-access
+            mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
+        )
+
+    lock_ddl_options = [option for option in command_line if option.startswith("--lock-ddl")]
+    assert lock_ddl_options == ([expected_option] if expected_option else [])

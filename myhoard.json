@@ -78,6 +78,7 @@
         "compress_threads": 1,
         "encrypt_threads": 1,
         "estimate_memory": false,
+        "lock_ddl": "ON",
         "register_redo_log_consumer": false
     }
 }

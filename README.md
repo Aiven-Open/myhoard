@@ -481,6 +481,23 @@ Number of worker threads created by XtraBackup for parallel compression when tak
 
 Number of worker threads created by XtraBackup for parallel encryption when taking a backup. The default value is ``1``.
 
+**xtrabackup.lock_ddl**
+
+How XtraBackup should lock DDL while taking a basebackup, either ``ON``
+(the default) or ``REDUCED``.
+
+With ``ON`` the DDL lock is taken before the data files are copied and held
+until the copy finishes, so the lock lasts as long as the backup and grows with
+the size of the data. With ``REDUCED`` the InnoDB data is copied without the
+lock, DDL is tracked through the redo log, and a short lock is taken at the end
+of the backup only to reconcile the tables that DDL touched. That keeps the lock
+window roughly constant regardless of how much data there is.
+
+``REDUCED`` requires Percona XtraBackup 8.4 or newer (and therefore MySQL 8.4 or
+newer). On older versions the setting is ignored and ``ON`` is used instead. It
+works for both full and incremental backups but cannot be combined with
+XtraBackup's page tracking, which MyHoard does not use.
+
 **xtrabackup.register_redo_log_consumer**
 
 Lets XtraBackup register as a redo log consumer at the start of the backup.

@@ -34,11 +34,18 @@ ERR_TIMEOUT = 2013
 XTRABACKUP_VERSION_REGEX = re.compile(r"xtrabackup version ([\d\.\-]+)")
 VERSION_SPLITTING_REGEX = re.compile(r"[\.-]")
 
-DEFAULT_XTRABACKUP_SETTINGS = {
+# Values accepted by xtrabackup's --lock-ddl option. OFF is deliberately not supported here: it
+# leaves DDL executed during the copy phase entirely unprotected, which can produce a backup that
+# cannot be restored. Leaving the option out of the command line is equivalent to ON.
+LOCK_DDL_ON = "ON"
+LOCK_DDL_REDUCED = "REDUCED"
+
+DEFAULT_XTRABACKUP_SETTINGS: dict[str, Any] = {
     "copy_threads": 1,
     "compress_threads": 1,
     "encrypt_threads": 1,
     "estimate_memory": False,
+    "lock_ddl": LOCK_DDL_ON,
     "register_redo_log_consumer": False,
 }
 

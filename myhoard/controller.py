@@ -184,7 +184,7 @@ class Controller(threading.Thread):
         temp_dir,
         restore_download_workers_count: int,
         restore_free_memory_percentage=None,
-        xtrabackup_settings: Dict[str, int],
+        xtrabackup_settings: Dict[str, Any],
         auto_mark_backups_broken: bool = False,
     ):
         super().__init__()

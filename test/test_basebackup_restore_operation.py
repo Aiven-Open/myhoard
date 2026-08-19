@@ -3,6 +3,7 @@ from . import build_statsd_client, wait_for_port
 from .helpers.version import xtrabackup_version_to_string
 from myhoard.basebackup_operation import BasebackupOperation
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
+from packaging.version import Version
 from unittest.mock import patch
 
 import myhoard.util as myhoard_util
@@ -11,6 +12,8 @@ import pytest
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
@@ -252,6 +255,174 @@ def test_basic_restore(mysql_master, mysql_empty):
         cursor.execute(mysql_master.show_binary_logs_status_cmd)
         new_master_status = cursor.fetchone()
         assert old_master_status["Executed_Gtid_Set"] == new_master_status["Executed_Gtid_Set"]
+
+
+@pytest.mark.parametrize("lock_ddl", [myhoard_util.LOCK_DDL_ON, myhoard_util.LOCK_DDL_REDUCED])
+def test_backup_and_restore_with_lock_ddl(mysql_master, mysql_empty, lock_ddl: str) -> None:
+    """Takes a real backup with the given lock_ddl setting while DDL runs on the server, and restores it.
+
+    DDL during the copy is the only thing `--lock-ddl=REDUCED` changes: ON takes the DDL lock before the
+    copy starts and holds it until the copy ends, so DDL simply waits, while REDUCED lets the DDL through
+    and defers reconciling the affected tables to `--prepare`. Running the whole backup and restore flow
+    for both values is what proves that deferred reconciliation actually produces a restorable server.
+    """
+    if lock_ddl == myhoard_util.LOCK_DDL_REDUCED:
+        xtrabackup_version = myhoard_util.get_xtrabackup_version()
+        if xtrabackup_version < (8, 4):
+            pytest.skip(f"--lock-ddl=REDUCED needs Percona XtraBackup 8.4+, running {xtrabackup_version}")
+        if mysql_master.version < Version("8.4.0"):
+            pytest.skip(f"--lock-ddl=REDUCED needs MySQL 8.4+, running {mysql_master.version}")
+
+    baseline_table_count = 5
+    baseline_row_count = 15
+    ddl_row_count = 10
+
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        cursor.execute("CREATE DATABASE db_test")
+        for table_index in range(baseline_table_count):
+            cursor.execute(f"CREATE TABLE db_test.baseline{table_index} (id integer primary key)")
+            values = ", ".join(f"({value})" for value in range(baseline_row_count))
+            cursor.execute(f"INSERT INTO db_test.baseline{table_index} (id) VALUES {values}")
+        # Kept separate from the baseline tables so that ALTERing it below doesn't make the assertions on
+        # those ambiguous.
+        cursor.execute("CREATE TABLE db_test.alter_target (id integer primary key, payload varchar(64))")
+        values = ", ".join(f"({value}, 'payload{value}')" for value in range(baseline_row_count))
+        cursor.execute(f"INSERT INTO db_test.alter_target (id, payload) VALUES {values}")
+        cursor.execute("COMMIT")
+        cursor.execute("FLUSH LOGS")
+
+    stop_ddl = threading.Event()
+    created_tables: list[str] = []
+    ddl_errors: list[Exception] = []
+
+    def run_ddl() -> None:
+        # With lock_ddl=ON the very first statement blocks for as long as the copy takes, so this connection
+        # needs a read timeout far above the default 4s.
+        connect_options = dict(mysql_master.connect_options, timeout=300)
+        try:
+            with myhoard_util.mysql_cursor(**connect_options) as ddl_cursor:
+                # ADD INDEX rewrites an existing data file, which is the case REDUCED has to recopy
+                ddl_cursor.execute("ALTER TABLE db_test.alter_target ADD INDEX payload_index (payload)")
+                table_index = 0
+                while not stop_ddl.is_set():
+                    # CREATE TABLE auto-commits and the rows land in a separate transaction, so a
+                    # consistent snapshot can hold the table with all of its rows or with none of them
+                    table_name = f"ddl{table_index}"
+                    ddl_cursor.execute(f"CREATE TABLE db_test.{table_name} (id integer primary key)")
+                    values = ", ".join(f"({value})" for value in range(ddl_row_count))
+                    ddl_cursor.execute(f"INSERT INTO db_test.{table_name} (id) VALUES {values}")
+                    ddl_cursor.execute("COMMIT")
+                    created_tables.append(table_name)
+                    table_index += 1
+                    time.sleep(0.05)
+        except Exception as ex:  # pylint: disable=broad-except
+            ddl_errors.append(ex)
+
+    encryption_key = os.urandom(24)
+
+    with tempfile.NamedTemporaryFile() as backup_file:
+
+        def output_stream_handler(stream):
+            shutil.copyfileobj(stream, backup_file)
+
+        backup_op = BasebackupOperation(
+            encryption_algorithm="AES256",
+            encryption_key=encryption_key,
+            lock_ddl=lock_ddl,
+            mysql_client_params=mysql_master.connect_options,
+            mysql_config_file_name=mysql_master.config_name,
+            mysql_data_directory=mysql_master.config_options.datadir,
+            stats=build_statsd_client(),
+            stream_handler=output_stream_handler,
+            temp_dir=mysql_master.base_dir,
+        )
+
+        ddl_thread = threading.Thread(target=run_ddl, name="ddl-during-backup")
+        ddl_thread.start()
+        try:
+            backup_op.create_backup()
+        finally:
+            stop_ddl.set()
+            ddl_thread.join(timeout=300)
+
+        assert not ddl_errors, f"DDL failed while backing up: {ddl_errors}"
+        assert not ddl_thread.is_alive()
+        if lock_ddl == myhoard_util.LOCK_DDL_REDUCED:
+            # The point of REDUCED: DDL is not blocked for the duration of the copy
+            assert created_tables, "no DDL got through during the backup, REDUCED did not reduce the lock"
+
+        with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+            cursor.execute(mysql_master.show_binary_logs_status_cmd)
+            source_status = cursor.fetchone()
+            assert source_status
+            source_gtid_executed = source_status["Executed_Gtid_Set"]
+
+        backup_file.seek(0)
+
+        def input_stream_handler(stream):
+            shutil.copyfileobj(backup_file, stream)
+            stream.close()
+
+        with tempfile.TemporaryDirectory(dir=mysql_empty.base_dir, prefix="myhoard_target_") as temp_target_dir:
+            restore_op = BasebackupRestoreOperation(
+                encryption_algorithm="AES256",
+                encryption_key=encryption_key,
+                free_memory_percentage=80,
+                mysql_config_file_name=mysql_empty.config_name,
+                mysql_data_directory=mysql_empty.config_options.datadir,
+                stats=build_statsd_client(),
+                stream_handler=input_stream_handler,
+                target_dir=temp_target_dir,
+                temp_dir=mysql_empty.base_dir,
+                backup_tool_version=xtrabackup_version_to_string(myhoard_util.get_xtrabackup_version()),
+            )
+            restore_op.prepare_backup(checkpoints_file_content=backup_op.checkpoints_file_content)
+            restore_op.restore_backup()
+
+        assert restore_op.number_of_files >= backup_op.number_of_files
+
+    mysql_empty.proc = subprocess.Popen(mysql_empty.startup_command)  # pylint: disable=consider-using-with
+    wait_for_port(mysql_empty.port)
+
+    with myhoard_util.mysql_cursor(
+        password=mysql_master.password,
+        port=mysql_empty.port,
+        user=mysql_master.user,
+    ) as cursor:
+        # Everything that was committed before the backup started must be there in full
+        for table_index in range(baseline_table_count):
+            cursor.execute(f"SELECT id FROM db_test.baseline{table_index}")
+            rows = cursor.fetchall()
+            assert sorted(row["id"] for row in rows) == list(range(baseline_row_count))
+
+        cursor.execute("SELECT id, payload FROM db_test.alter_target")
+        rows = cursor.fetchall()
+        assert sorted((row["id"], row["payload"]) for row in rows) == [
+            (value, f"payload{value}") for value in range(baseline_row_count)
+        ]
+
+        # Tables created while the backup ran may or may not have made the snapshot, but the ones that did
+        # must be readable and hold either all of their rows or none, never a partial transaction
+        cursor.execute("SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'db_test'")
+        restored_ddl_tables = {row["name"] for row in cursor.fetchall() if row["name"].startswith("ddl")}
+        assert restored_ddl_tables <= set(created_tables)
+        for table_name in sorted(restored_ddl_tables):
+            cursor.execute(f"SELECT id FROM db_test.{table_name}")
+            rows = cursor.fetchall()
+            ids = sorted(row["id"] for row in rows)
+            assert ids in ([], list(range(ddl_row_count))), f"{table_name} restored with a partial transaction: {ids}"
+
+        # The restored server must sit at a point that really existed in the source's history
+        cursor.execute(mysql_master.show_binary_logs_status_cmd)
+        restored_status = cursor.fetchone()
+        assert restored_status
+        cursor.execute(
+            "SELECT GTID_SUBSET(%s, %s) AS is_subset",
+            (restored_status["Executed_Gtid_Set"], source_gtid_executed),
+        )
+        gtid_subset = cursor.fetchone()
+        assert gtid_subset
+        assert gtid_subset["is_subset"] == 1
 
 
 def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:

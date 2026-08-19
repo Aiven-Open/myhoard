@@ -1,7 +1,16 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from contextlib import suppress
 from myhoard.errors import BlockMismatchError, XtraBackupError
-from myhoard.util import CHECKPOINT_FILENAME, get_mysql_version, mysql_cursor, parse_xtrabackup_info
+from myhoard.util import (
+    BinVersion,
+    CHECKPOINT_FILENAME,
+    get_mysql_version,
+    get_xtrabackup_version,
+    LOCK_DDL_ON,
+    LOCK_DDL_REDUCED,
+    mysql_cursor,
+    parse_xtrabackup_info,
+)
 from packaging.version import Version
 from rohmu.util import increase_pipe_capacity, set_stream_nonblocking
 from typing import Any, Dict, List, Optional
@@ -19,6 +28,12 @@ import threading
 # Number of seconds to allow for database operations to complete
 # while running the OPTIMIZE TABLE mitigation
 CURSOR_TIMEOUT_DURING_OPTIMIZE: int = 120
+
+# --lock-ddl=REDUCED only exists in Percona XtraBackup 8.4 and newer (Pro since 8.4.0-2, community
+# since 8.4.0-5); the 8.0 series has no REDUCED enum value and refuses to start with it. Since the
+# backup always runs the xtrabackup that matches the server it backs up, checking the binary version
+# also covers the MySQL 8.4+ requirement of the feature.
+LOCK_DDL_REDUCED_MIN_XTRABACKUP_VERSION: BinVersion = (8, 4)
 
 
 class AbortRequested(Exception):
@@ -53,6 +68,7 @@ class BasebackupOperation:
         encryption_algorithm,
         encryption_key,
         estimate_memory=False,
+        lock_ddl: str = LOCK_DDL_ON,
         mysql_client_params,
         mysql_config_file_name,
         mysql_data_directory,
@@ -78,6 +94,7 @@ class BasebackupOperation:
         self.encryption_key = encryption_key
         self.estimate_memory = estimate_memory
         self.has_block_mismatch = False
+        self.lock_ddl = lock_ddl
         self.log = logging.getLogger(self.__class__.__name__)
         self.incremental_since_checkpoint = incremental_since_checkpoint
         self.prev_checkpoint_dir = None
@@ -182,7 +199,44 @@ class BasebackupOperation:
         if self.estimate_memory:
             command_line.append("--estimate-memory=ON")
 
+        if lock_ddl := self._resolve_lock_ddl():
+            command_line.append(f"--lock-ddl={lock_ddl}")
+
         return command_line
+
+    def _resolve_lock_ddl(self) -> str | None:
+        """Resolves the `--lock-ddl` value to put on the command line, or None to leave the option out.
+
+        Omitting the option is what MyHoard has always done and is equivalent to `--lock-ddl=ON`, which is
+        also xtrabackup's own default: the DDL lock is taken before the copy starts and held until it ends,
+        so its duration grows with the dataset. REDUCED instead copies InnoDB data unlocked, tracks DDL
+        through the redo log, and takes a short lock at the end only to reconcile the tables that DDL
+        touched, which keeps the lock window roughly flat as data grows.
+
+        REDUCED works for both full and incremental backups. It is incompatible with xtrabackup's page
+        tracking (`--page-tracking`), which MyHoard does not use - anything adding page tracking must not
+        combine it with REDUCED. See
+        https://docs.percona.com/percona-xtrabackup/8.4/reduction-in-locks.html
+        """
+        if self.lock_ddl == LOCK_DDL_ON:
+            return None
+
+        if self.lock_ddl != LOCK_DDL_REDUCED:
+            self.log.warning("Unsupported lock_ddl value %r, using %r instead", self.lock_ddl, LOCK_DDL_ON)
+            return None
+
+        xtrabackup_version = get_xtrabackup_version()
+        if xtrabackup_version < LOCK_DDL_REDUCED_MIN_XTRABACKUP_VERSION:
+            self.log.warning(
+                "lock_ddl %r requires Percona XtraBackup %r or newer but %r is in use, using %r instead",
+                LOCK_DDL_REDUCED,
+                LOCK_DDL_REDUCED_MIN_XTRABACKUP_VERSION,
+                xtrabackup_version,
+                LOCK_DDL_ON,
+            )
+            return None
+
+        return LOCK_DDL_REDUCED
 
     def is_incremental(self) -> bool:
         return self.incremental_since_checkpoint is not None
