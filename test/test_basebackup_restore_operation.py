@@ -178,6 +178,35 @@ def test_get_xtrabackup_cmd():
         assert cmd == "xtrabackup"
 
 
+def test_prepare_command_applies_use_memory():
+    use_memory = 2 * 1024 * 1024 * 1024
+    op = BasebackupRestoreOperation(
+        encryption_algorithm="AES256",
+        encryption_key=b"0" * 24,
+        mysql_config_file_name="/etc/mysql/mysql.conf",
+        mysql_data_directory="/usr/lib/mysql/",
+        stats=build_statsd_client(),
+        free_memory_percentage=80,
+        stream_handler=None,
+        target_dir="",
+        temp_dir="",
+        use_memory=use_memory,
+    )
+    with (
+        patch("myhoard.basebackup_restore_operation.subprocess.Popen") as popen,
+        patch("myhoard.basebackup_restore_operation.get_xtrabackup_version", return_value=(8, 0, 33)),
+        patch.object(op, "_process_xbstream_input_output"),
+        patch.object(op, "_process_prepare_input_output"),
+    ):
+        op.prepare_backup()
+
+    assert popen.call_count == 2
+    prepare_command = popen.call_args_list[1][0][0]
+    assert "--prepare" in prepare_command
+    assert prepare_command[prepare_command.index("--use-memory") + 1] == str(use_memory)
+    assert not any(arg.startswith("--use-free-memory-pct") for arg in prepare_command)
+
+
 def test_basic_restore(mysql_master, mysql_empty):
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         for db_index in range(15):
