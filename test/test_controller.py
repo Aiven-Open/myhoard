@@ -1842,6 +1842,45 @@ def test_periodic_backups_are_paused(time_machine, master_controller) -> None:
     while_asserts(lambda: streaming_binlogs(m_controller, 2), timeout=10)
 
 
+def test_scheduled_backups_can_be_disabled(time_machine, master_controller) -> None:
+    time_machine.move_to("2023-01-02T18:00:00")
+
+    # By default backup_hour = 3, backup_interval_minutes = 1440
+    m_controller, master = master_controller
+
+    m_controller.switch_to_active_mode()
+    m_controller.start()
+
+    def streaming_binlogs(controller: Controller, expected_completed_backups: int):
+        assert controller.backup_streams
+        assert controller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog
+
+        complete_backups = [backup for backup in controller.state["backups"] if backup["completed_at"]]
+        assert len(complete_backups) == expected_completed_backups
+
+    def flush_binlogs():
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("FLUSH BINARY LOGS")
+
+    flush_binlogs()
+
+    while_asserts(lambda: streaming_binlogs(m_controller, 1), timeout=10)
+
+    # Disable scheduled backups
+    m_controller.backup_settings["scheduled_backups_enabled"] = False
+
+    flush_binlogs()
+
+    # Time passes well beyond the normal daily backup schedule but no new backup should be scheduled
+    time_machine.move_to("2023-01-11T03:00:00+00:00")
+    time.sleep(1)
+    streaming_binlogs(m_controller, 1)
+
+    # Manual backup requests still work while scheduled backups are disabled
+    m_controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+    while_asserts(lambda: streaming_binlogs(m_controller, 2), timeout=10)
+
+
 def test_changed_backup_hour_is_applied(time_machine, master_controller) -> None:
     # pylint: disable=protected-access
     time_machine.move_to("2023-01-02T03:30:00")

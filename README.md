@@ -209,6 +209,16 @@ been created otherwise. This setting ensures that environments with low rate of
 changes so that new binary logs are not created because the size limit is
 exceeded also get all data backed up frequently enough.
 
+**scheduled_backups_enabled**
+
+Boolean setting, defaults to `true`. When set to `false`, MyHoard will not
+automatically schedule new backups based on `backup_interval_minutes`,
+`backup_hour` and `backup_minute`. Backups can still be triggered manually via
+`POST /backup`. This is useful when backup timing should be fully controlled
+by an external scheduler rather than MyHoard itself. Note that this only
+affects new base backup scheduling; binary log uploads and existing backup
+streams continue as usual.
+
 **upload_site**
 
 Name of the backup site to which new backups should be created to. See

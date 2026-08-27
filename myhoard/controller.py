@@ -1512,6 +1512,10 @@ class Controller(threading.Thread):
         return None
 
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
+        if not self.backup_settings.get("scheduled_backups_enabled", True):
+            self.log.debug("Skipping backup interval check, scheduled backups are disabled")
+            return
+
         paused_backups_until: str | None = self.state["paused_backups_until"]
         if paused_backups_until is not None and datetime.datetime.fromisoformat(
             paused_backups_until
