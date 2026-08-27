@@ -1843,7 +1843,6 @@ def test_periodic_backups_are_paused(time_machine, master_controller) -> None:
 
 
 def test_scheduled_backups_can_be_disabled(time_machine, master_controller) -> None:
-    # pylint: disable=protected-access
     time_machine.move_to("2023-01-02T18:00:00")
 
     # By default backup_hour = 3, backup_interval_minutes = 1440
