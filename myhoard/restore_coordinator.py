@@ -810,7 +810,9 @@ class RestoreCoordinator(threading.Thread):
             ranges = list(build_gtid_ranges(read_gtids_from_log(file_name, read_until_time=self.target_time)))
             if ranges:
                 last_range = ranges[-1]
-                until_after_gtids = f'{last_range["server_uuid"]}:{last_range["end"]}'
+                # Stop once every GTID in the file is applied. The end of the last range would not be enough
+                # because a replica can write a transaction into its binlog after a transaction with a higher GNO.
+                until_after_gtids = make_gtid_range_string(ranges)
                 # Don't expect any specific file because if the GTID we're including is the very last entry
                 # in the file the SQL thread might switch to next file and if it is earlier then it won't
                 # so we'd need to be watching for two file names. Because execution is always single threaded

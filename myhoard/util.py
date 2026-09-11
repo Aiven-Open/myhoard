@@ -11,6 +11,7 @@ from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
 from typing import Any, Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
+import bisect
 import collections
 import contextlib
 import io
@@ -220,35 +221,109 @@ def read_gtids_from_log(
     # before crashing.
 
 
+# The parallel applier of a replica can write a transaction into the replica's own binlog after transactions
+# with higher GNOs. Such a transaction is folded into the ranges already being built as long as its GNO is at
+# most this far from them, and at most this many ranges are kept open. Anything further away is a real gap.
+# The number of transactions that can be outstanding at once is bounded by the applier's worker count, and
+# 1024 is the largest value MySQL accepts for replica_parallel_workers.
+GTID_REORDER_WINDOW = 1024
+
+
 def build_gtid_ranges(iterator: Iterable[GtidRangeTuple]) -> Iterator[GtidRangeDict]:
     """Yield dicts containing most compact representation of all (timestamp, UUID, GNO) tuples
-    returned by given iterator. Ranges are returned in correct order and no gaps are allowed.
-    If input contains uninterrupted sequence of events from a single server only one range is
-    produced."""
-    # Initialize to empty dict rather than None here to work around a pylint bug:
-    # https://github.com/PyCQA/pylint/issues/1498
-    current_range: Optional[GtidRangeDict] = {}  # type: ignore
+    returned by given iterator. GNOs of one server that are out of order within GTID_REORDER_WINDOW
+    of each other are folded into the same range. Ranges are yielded in GNO order once the input has
+    moved past them and no gaps are allowed within a range. If input contains uninterrupted sequence
+    of events from a single server only one range is produced.
+
+    `start_ts` is the timestamp of the event with the lowest GNO of the range and `end_ts` the
+    timestamp of the event with the highest GNO."""
+    open_ranges = _OpenGtidRanges()
     for timestamp, server_id, server_uuid, gno, _file_position in iterator:
-        if current_range:
-            if current_range["server_uuid"] == server_uuid and current_range["end"] + 1 == gno:
-                current_range["end"] = gno
-                current_range["end_ts"] = timestamp
-            else:
-                yield current_range
-                current_range = None
+        if open_ranges.fits(server_uuid, gno):
+            open_ranges.add(gno, timestamp)
+            yield from open_ranges.close_excess()
+        else:
+            yield from open_ranges.close()
+            open_ranges.open(server_id, server_uuid, gno, timestamp)
+    yield from open_ranges.close()
 
-        if not current_range:
-            current_range = {
-                "end": gno,
-                "end_ts": timestamp,
-                "server_id": server_id,
-                "server_uuid": server_uuid,
-                "start": gno,
-                "start_ts": timestamp,
-            }
 
-    if current_range:
-        yield current_range
+class _OpenGtidRanges:
+    """Disjoint GTID ranges of one server, sorted by GNO, that are still being built while a binlog is read.
+
+    A GNO fits when it comes from the same server, lies within GTID_REORDER_WINDOW of the open ranges and
+    is not covered yet. Adding it extends or joins the neighbouring ranges or opens a new range between them."""
+
+    def __init__(self) -> None:
+        self._ranges: List[GtidRangeDict] = []
+
+    def open(self, server_id: int, server_uuid: str, gno: int, timestamp: int) -> None:
+        """Start the ranges of a server from a single GNO"""
+        assert not self._ranges
+        self._ranges.append(_new_gtid_range(server_id, server_uuid, gno, timestamp))
+
+    def fits(self, server_uuid: str, gno: int) -> bool:
+        """True if `gno` belongs to the open ranges. Nothing fits while no range is open."""
+        ranges = self._ranges
+        if not ranges or ranges[0]["server_uuid"] != server_uuid:
+            return False
+        if gno < ranges[0]["start"] - GTID_REORDER_WINDOW or gno > ranges[-1]["end"] + GTID_REORDER_WINDOW:
+            return False
+        slot = self._slot(gno)
+        is_covered = slot > 0 and ranges[slot - 1]["end"] >= gno
+        return not is_covered
+
+    def add(self, gno: int, timestamp: int) -> None:
+        """Add a GNO that fits"""
+        ranges = self._ranges
+        slot = self._slot(gno)
+        left = ranges[slot - 1] if slot > 0 else None
+        right = ranges[slot] if slot < len(ranges) else None
+        if left and left["end"] + 1 == gno:
+            left["end"] = gno
+            left["end_ts"] = timestamp
+            if right and right["start"] == gno + 1:
+                # The last hole between the two ranges is filled, join them
+                left["end"] = right["end"]
+                left["end_ts"] = right["end_ts"]
+                del ranges[slot]
+        elif right and right["start"] - 1 == gno:
+            right["start"] = gno
+            right["start_ts"] = timestamp
+        else:
+            ranges.insert(slot, _new_gtid_range(ranges[0]["server_id"], ranges[0]["server_uuid"], gno, timestamp))
+
+    def close_excess(self) -> List[GtidRangeDict]:
+        """Close all but the highest range once more than GTID_REORDER_WINDOW are open, so memory stays bounded"""
+        if len(self._ranges) <= GTID_REORDER_WINDOW:
+            return []
+        closed, self._ranges = self._ranges[:-1], self._ranges[-1:]
+        return closed
+
+    def close(self) -> List[GtidRangeDict]:
+        """Close every range, in GNO order"""
+        closed, self._ranges = self._ranges, []
+        return closed
+
+    def _slot(self, gno: int) -> int:
+        """Number of ranges that start at or below `gno`. The range before the slot is the left neighbour
+        of `gno` and covers it if its end is at or above `gno`, the range at the slot is the right neighbour."""
+        # Events are almost always in order so skip the search when gno is above every open range
+        if gno > self._ranges[-1]["end"]:
+            return len(self._ranges)
+        return bisect.bisect_right(self._ranges, gno, key=lambda rng: rng["start"])
+
+
+def _new_gtid_range(server_id: int, server_uuid: str, gno: int, timestamp: int) -> GtidRangeDict:
+    return {
+        "end": gno,
+        "end_ts": timestamp,
+        "server_id": server_id,
+        "server_uuid": server_uuid,
+        "start": gno,
+        "start_ts": timestamp,
+    }
 
 
 def partition_sort_and_combine_gtid_ranges(ranges: Iterable[GtidRangeDict]) -> GtidExecuted:
