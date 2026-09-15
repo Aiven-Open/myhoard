@@ -2,10 +2,11 @@
 
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
 from myhoard.backup_stream import BackupStream
-from myhoard.binlog_scanner import BinlogScanner
+from myhoard.binlog_scanner import BinlogInfo, BinlogScanner
 from myhoard.controller import BackupSiteInfo, Controller
+from myhoard.util import GtidRangeDict
 from rohmu.object_storage.local import LocalTransfer
-from typing import cast, Dict
+from typing import Any, cast, Dict, List
 from unittest.mock import MagicMock
 
 import datetime
@@ -284,3 +285,68 @@ def test_old_format_stream_id_backward_compat():
     mixed = [old_id, new_id]
     mixed.sort()
     assert len(mixed) == 2
+
+
+def _binlog(local_index: int, gtid_ranges: List[GtidRangeDict]) -> BinlogInfo:
+    return {
+        "file_name": f"binlog.{local_index:06d}",
+        "file_size": 1,
+        "full_name": f"/var/lib/mysql/binlog.{local_index:06d}",
+        "gtid_ranges": gtid_ranges,
+        "local_index": local_index,
+        "processed_at": 0.0,
+        "processing_time": 0.0,
+        "server_id": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "basebackup_info, pending_binlogs",
+    [
+        pytest.param(
+            {"uploaded_from": 1, "binlog_index": 5},
+            [
+                _binlog(3, [{"end": 2, "end_ts": 0, "server_id": 1, "server_uuid": "u", "start": 1, "start_ts": 0}]),
+                _binlog(4, []),
+            ],
+            id="predate_own_basebackup",
+        ),
+        pytest.param(
+            {"uploaded_from": 2, "binlog_index": None},
+            [_binlog(7, []), _binlog(8, [])],
+            id="no_gtids_on_promoted_stream",
+        ),
+    ],
+)
+def test_skipped_binlogs_count_as_processed(
+    session_tmpdir, basebackup_info: Dict[str, Any], pending_binlogs: List[BinlogInfo]
+) -> None:
+    state_dir = session_tmpdir().strpath
+    _, public_key_pem = generate_rsa_key_pair()
+    bs = BackupStream(
+        backup_reason=BackupStream.BackupReason.requested,
+        file_storage_setup_fn=MagicMock,
+        mode=BackupStream.Mode.active,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory="",
+        normalized_backup_time="2019-02-25T08:20",
+        rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=os.path.join(state_dir, "backup_stream.remote_binlogs"),
+        server_id=1,
+        site="default",
+        state_file=os.path.join(state_dir, "backup_stream.json"),
+        stats=build_statsd_client(),
+        temp_dir=state_dir,
+    )
+    bs.state_manager.update_state(basebackup_info=basebackup_info, pending_binlogs=pending_binlogs)
+    last_index = pending_binlogs[-1]["local_index"]
+    assert not bs.is_log_backed_up(log_index=last_index)
+
+    bs._upload_binlogs()  # pylint: disable=protected-access
+
+    # Nothing was uploaded, yet every skipped binlog counts as processed: none of them is needed for a restore
+    assert not bs.state["pending_binlogs"]
+    assert not bs.state["valid_local_binlog_found"]
+    assert bs.highest_processed_local_index == last_index
+    assert bs.is_log_backed_up(log_index=last_index)
