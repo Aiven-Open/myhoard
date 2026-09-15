@@ -275,6 +275,24 @@ class Controller(threading.Thread):
             for backup_stream in self.backup_streams
         )
 
+    def get_latest_processed_binlog_index(self) -> Optional[int]:
+        """Highest local binlog index that every stream in the regular binlog phase has processed.
+
+        Processed means uploaded, or skipped because the file is not needed for a restore. Only
+        completed streams are restore candidates, so a stream still catching up after a new
+        basebackup does not count until it completes; is_log_backed_up is stricter and waits for it.
+        None when no stream is in the regular binlog phase or one of them has processed nothing yet.
+        """
+        indexes = [
+            backup_stream.highest_processed_local_index
+            for backup_stream in self.backup_streams
+            if backup_stream.active_phase == BackupStream.ActivePhase.binlog
+        ]
+        if not indexes:
+            return None
+        lowest = min(indexes)
+        return lowest if lowest >= 0 else None
+
     def is_safe_to_reload(self) -> bool:
         restore_coordinator = self.restore_coordinator
         # Neither phase is independently resumable: a reload-triggered restart
@@ -411,7 +429,8 @@ class Controller(threading.Thread):
 
         self.wakeup_event.set()
 
-    def rotate_and_back_up_binlog(self) -> None:
+    def rotate_and_back_up_binlog(self) -> Optional[int]:
+        """Rotate the binlog and return the local index of the completed one, None when there was nothing to back up"""
         local_log_index = self._rotate_binlog()
         self.wakeup_event.set()
         return local_log_index

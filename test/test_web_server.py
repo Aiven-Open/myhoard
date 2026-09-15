@@ -30,13 +30,24 @@ async def test_backup_create(master_controller, web_client):
     while_asserts(is_streaming_binlogs, timeout=15)
 
     log_count_before = len(controller.backup_streams[0].remote_binlogs)
-    await post_and_verify_json_body(
+    response = await post_and_verify_json_body(
         web_client, "/backup", {"backup_type": WebServer.BackupType.binlog, "wait_for_upload": 1}
     )
     log_count_after = len(controller.backup_streams[0].remote_binlogs)
     assert log_count_after > log_count_before
+    rotated_index = response["binlog_index"]
+    assert isinstance(rotated_index, int)
 
-    await post_and_verify_json_body(web_client, "/backup", {"backup_type": WebServer.BackupType.binlog})
+    async def status_covers(index):
+        status = await get_and_verify_json_body(web_client, "/status")
+        assert status["latest_processed_binlog_index"] >= index
+
+    await awhile_asserts(lambda: status_covers(rotated_index), timeout=15)
+
+    # Without wait_for_upload the response still names the rotated binlog and the status catches up later
+    response = await post_and_verify_json_body(web_client, "/backup", {"backup_type": WebServer.BackupType.binlog})
+    assert response["binlog_index"] > rotated_index
+    await awhile_asserts(lambda: status_covers(response["binlog_index"]), timeout=15)
 
     await post_and_verify_json_body(web_client, "/backup", {}, expected_status=400)
 
@@ -109,6 +120,8 @@ async def test_status_show(master_controller, web_client):
     controller = master_controller[0]
     response = await get_and_verify_json_body(web_client, "/status")
     assert response["mode"] == Controller.Mode.idle
+    # Nothing is backing up binlogs yet so there is no processed index to report
+    assert response["latest_processed_binlog_index"] is None
     controller.switch_to_active_mode()
     response = await get_and_verify_json_body(web_client, "/status")
     assert response["mode"] == Controller.Mode.promote

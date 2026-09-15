@@ -1265,7 +1265,10 @@ class BackupStream(threading.Thread):
 
                 if skip:
                     pending_binlogs.pop(0)
-                    self.state_manager.update_state(pending_binlogs=pending_binlogs)
+                    # A skipped binlog is not needed for restore, so it counts as processed like an uploaded one
+                    self.state_manager.update_state(
+                        pending_binlogs=pending_binlogs, last_processed_local_index=binlog["local_index"]
+                    )
                     continue
 
             if not self._upload_binlog(binlog):
