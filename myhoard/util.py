@@ -222,33 +222,138 @@ def read_gtids_from_log(
 
 def build_gtid_ranges(iterator: Iterable[GtidRangeTuple]) -> Iterator[GtidRangeDict]:
     """Yield dicts containing most compact representation of all (timestamp, UUID, GNO) tuples
-    returned by given iterator. Ranges are returned in correct order and no gaps are allowed.
-    If input contains uninterrupted sequence of events from a single server only one range is
-    produced."""
-    # Initialize to empty dict rather than None here to work around a pylint bug:
-    # https://github.com/PyCQA/pylint/issues/1498
-    current_range: Optional[GtidRangeDict] = {}  # type: ignore
+    returned by given iterator. The parallel applier of a replica can write a transaction into the
+    replica's own binlog after transactions with higher GNOs, so the GNOs of each uninterrupted run
+    of events from one server are folded as if they were sorted: the ranges of a run are yielded in
+    GNO order once the run ends and no gaps are allowed within a range. If input contains
+    uninterrupted sequence of events from a single server only one range is produced. A GNO that
+    repeats within a run ends the run and starts a new one, as it did before folding.
+
+    `start_ts` and `end_ts` are the earliest and the latest timestamp of the events in the range,
+    so together they cover the commit time of every transaction in it."""
+    run = _GtidRun()
     for timestamp, server_id, server_uuid, gno, _file_position in iterator:
-        if current_range:
-            if current_range["server_uuid"] == server_uuid and current_range["end"] + 1 == gno:
-                current_range["end"] = gno
-                current_range["end_ts"] = timestamp
-            else:
-                yield current_range
-                current_range = None
+        if not run.accepts(server_uuid, gno):
+            yield from run.close()
+            run.open(server_id, server_uuid)
+        run.add(gno, timestamp)
+    yield from run.close()
 
-        if not current_range:
-            current_range = {
-                "end": gno,
-                "end_ts": timestamp,
-                "server_id": server_id,
-                "server_uuid": server_uuid,
-                "start": gno,
-                "start_ts": timestamp,
-            }
 
-    if current_range:
-        yield current_range
+class _GtidRun:
+    """Ranges of one uninterrupted run of events from one server while a binlog is read.
+
+    Events almost always arrive in GNO order, so the range they extend is kept apart as `current` and
+    costs one comparison per event. A GNO that does not touch the current range waits in a pending
+    range, keyed by its start and its end GNO so that neighbours join in constant time, and the current
+    range absorbs a pending range the moment the two touch. Pending ranges are disjoint from each other
+    and from the current range, and there is one per real gap at most, which is the size of the output."""
+
+    def __init__(self) -> None:
+        self._server_id = 0
+        self._server_uuid = ""
+        self._current: Optional[GtidRangeDict] = None
+        self._pending_by_start: Dict[int, GtidRangeDict] = {}
+        self._pending_by_end: Dict[int, GtidRangeDict] = {}
+
+    def open(self, server_id: int, server_uuid: str) -> None:
+        assert self._current is None and not self._pending_by_start
+        self._server_id = server_id
+        self._server_uuid = server_uuid
+
+    def accepts(self, server_uuid: str, gno: int) -> bool:
+        """False for an event of another server and for a GNO the run already holds at a range boundary.
+        A repeat strictly inside a pending range is not detected and yields overlapping ranges, which every
+        consumer combines, as the builder before folding also did for repeated GNOs."""
+        current = self._current
+        if current is None or current["server_uuid"] != server_uuid:
+            return False
+        if current["start"] <= gno <= current["end"]:
+            return False
+        if not self._pending_by_start:
+            return True
+        return gno not in self._pending_by_start and gno not in self._pending_by_end
+
+    def add(self, gno: int, timestamp: int) -> None:
+        current = self._current
+        if current is None:
+            self._current = self._new_range(gno, timestamp)
+        elif gno == current["end"] + 1:
+            # The in-order path, kept as cheap as the builder before folding
+            current["end"] = gno
+            if timestamp > current["end_ts"]:
+                current["end_ts"] = timestamp
+            elif timestamp < current["start_ts"]:
+                current["start_ts"] = timestamp
+            if self._pending_by_start:
+                following = self._pending_by_start.pop(gno + 1, None)
+                if following is not None:
+                    del self._pending_by_end[following["end"]]
+                    _absorb_range(current, following)
+        elif gno == current["start"] - 1:
+            _extend_range(current, gno, timestamp)
+            preceding = self._pending_by_end.pop(gno - 1, None)
+            if preceding is not None:
+                del self._pending_by_start[preceding["start"]]
+                _absorb_range(current, preceding)
+        else:
+            self._add_pending(gno, timestamp)
+
+    def _add_pending(self, gno: int, timestamp: int) -> None:
+        """Extend, join or open the pending ranges around `gno`, which touches neither end of the current range"""
+        preceding = self._pending_by_end.pop(gno - 1, None)
+        following = self._pending_by_start.pop(gno + 1, None)
+        if preceding is not None:
+            del self._pending_by_start[preceding["start"]]
+            rng = preceding
+            _extend_range(rng, gno, timestamp)
+            if following is not None:
+                del self._pending_by_end[following["end"]]
+                _absorb_range(rng, following)
+        elif following is not None:
+            del self._pending_by_end[following["end"]]
+            rng = following
+            _extend_range(rng, gno, timestamp)
+        else:
+            rng = self._new_range(gno, timestamp)
+        self._pending_by_start[rng["start"]] = rng
+        self._pending_by_end[rng["end"]] = rng
+
+    def close(self) -> List[GtidRangeDict]:
+        """End the run and return its ranges in GNO order"""
+        if self._current is None:
+            return []
+        ranges = sorted([self._current, *self._pending_by_start.values()], key=lambda rng: rng["start"])
+        self._current = None
+        self._pending_by_start = {}
+        self._pending_by_end = {}
+        return ranges
+
+    def _new_range(self, gno: int, timestamp: int) -> GtidRangeDict:
+        return {
+            "end": gno,
+            "end_ts": timestamp,
+            "server_id": self._server_id,
+            "server_uuid": self._server_uuid,
+            "start": gno,
+            "start_ts": timestamp,
+        }
+
+
+def _extend_range(rng: GtidRangeDict, gno: int, timestamp: int) -> None:
+    """Grow `rng` by the adjacent `gno`, keeping the timestamps as the envelope of its events"""
+    rng["start"] = min(rng["start"], gno)
+    rng["end"] = max(rng["end"], gno)
+    rng["start_ts"] = min(rng["start_ts"], timestamp)
+    rng["end_ts"] = max(rng["end_ts"], timestamp)
+
+
+def _absorb_range(rng: GtidRangeDict, other: GtidRangeDict) -> None:
+    """Join the adjacent `other` into `rng`"""
+    rng["start"] = min(rng["start"], other["start"])
+    rng["end"] = max(rng["end"], other["end"])
+    rng["start_ts"] = min(rng["start_ts"], other["start_ts"])
+    rng["end_ts"] = max(rng["end_ts"], other["end_ts"])
 
 
 def partition_sort_and_combine_gtid_ranges(ranges: Iterable[GtidRangeDict]) -> GtidExecuted:
