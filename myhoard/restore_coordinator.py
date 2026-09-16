@@ -1198,19 +1198,23 @@ class RestoreCoordinator(threading.Thread):
                     if binlog["server_id"] in target_time_reached_by_server:
                         continue
                     if self.target_time and binlog["gtid_ranges"]:
-                        if binlog["gtid_ranges"][0]["start_ts"] >= self.target_time:
+                        # A file holds one range per real gap and per run of a server, in GNO order, so the earliest
+                        # and the latest commit time of the file can sit in any of them
+                        first_ts = min(rng["start_ts"] for rng in binlog["gtid_ranges"])
+                        last_ts = max(rng["end_ts"] for rng in binlog["gtid_ranges"])
+                        if first_ts >= self.target_time:
                             # We exclude entries whose time matches recovery target time so any file whose start_ts
                             # is equal or higher than target time is certain not to contain data we're going to apply
                             self.log.info(
                                 "Start time %s of binlog %s from server %s is after our target time %s, skipping",
-                                binlog["gtid_ranges"][0]["start_ts"],
+                                first_ts,
                                 binlog["remote_index"],
                                 binlog["server_id"],
                                 self.target_time,
                             )
                             target_time_reached_by_server.add(binlog["server_id"])
                             continue
-                        if binlog["gtid_ranges"][0]["end_ts"] >= self.target_time:
+                        if last_ts >= self.target_time:
                             # Log and mark target time reached but include binlog and continue processing results. We may
                             # get binlogs from multiple servers in some race conditions and we don't yet know if this binlog
                             # was from a server that was actually valid at that point in time and some other server may have
@@ -1218,7 +1222,7 @@ class RestoreCoordinator(threading.Thread):
                             self.log.info(
                                 "End time %s of binlog %s from server %s is at or after our target time %s,"
                                 " target time reached",
-                                binlog["gtid_ranges"][0]["end_ts"],
+                                last_ts,
                                 binlog["remote_index"],
                                 binlog["server_id"],
                                 self.target_time,

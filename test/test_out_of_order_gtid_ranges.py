@@ -410,6 +410,19 @@ def test_pitr_listing_marks_the_target_time_reached_by_the_file_whose_last_trans
     assert target_time_reached
 
 
+def test_pitr_listing_across_a_file_boundary_with_a_straddling_swap(session_tmpdir):
+    """GNO 5 ends the first file at 1003, GNO 4 opens the second at 1003 and the second file runs on to 1006.
+    A restore to 1005 needs both files and stops inside the second, so both are kept and the target time is
+    reached. The second file has two ranges and the one holding the target is not the first, so the check
+    must look at all ranges of a file, not only the first."""
+    rc = _coordinator(session_tmpdir, target_time=1005)
+    first_file = _ranges(_timed_events([(1000, 1), (1001, 2), (1002, 3), (1003, 5)]))
+    second_file = _ranges(_timed_events([(1003, 4), (1005, 6), (1006, 7)]))
+    kept, target_time_reached = _list_binlogs(rc, [_listed_binlog(1, first_file), _listed_binlog(2, second_file)])
+    assert kept == [1, 2]
+    assert target_time_reached
+
+
 def test_pitr_listing_skips_every_file_of_a_server_once_one_starts_at_the_target_time(session_tmpdir):
     """The behaviour the skip check exists for: a file whose earliest transaction is at or after the target has
     nothing to apply, and neither has any later file of the same server"""
