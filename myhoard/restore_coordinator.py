@@ -151,7 +151,9 @@ class RestoreCoordinator(threading.Thread):
         completed_info: Optional[Dict]
         current_binlog_bucket: int
         current_binlog_stream_index: int
-        current_executed_gtid_target: Optional[GtidRangeDict]
+        # All GTID ranges of the last binlog of the batch being applied. State files written before myhoard 1.9.2
+        # hold a single range here, _check_sql_replica_status wraps it in a list.
+        current_executed_gtid_target: Optional[List[GtidRangeDict]]
         current_relay_log_target: Optional[int]
         # This is required so that we can correctly update pending_binlogs state file if updating that
         # fails after the main state has already been updated
@@ -775,10 +777,12 @@ class RestoreCoordinator(threading.Thread):
             for binlog in binlogs
         ]
 
-        last_range = None
+        # The GTIDs whose application means the batch is done. Ranges are in GNO order, not in file order, and a
+        # replica can write a transaction after one with a higher GNO, so no single range marks the end of a file.
+        target_ranges: Optional[List[GtidRangeDict]] = None
         for binlog in binlogs:
             if binlog["gtid_ranges"]:
-                last_range = binlog["gtid_ranges"][-1]
+                target_ranges = binlog["gtid_ranges"]
         last_remote_index = binlogs[-1]["adjusted_remote_index"]
         relay_log_target: Optional[int] = last_remote_index + self.state["binlog_name_offset"] + 1
 
@@ -809,8 +813,10 @@ class RestoreCoordinator(threading.Thread):
                 file_name = self._relay_log_prefetch_name(index=last_remote_index)
             ranges = list(build_gtid_ranges(read_gtids_from_log(file_name, read_until_time=self.target_time)))
             if ranges:
-                last_range = ranges[-1]
-                until_after_gtids = f'{last_range["server_uuid"]}:{last_range["end"]}'
+                target_ranges = ranges
+                # Stop once every GTID in the file is applied. The end of the last range would not be enough
+                # because a replica can write a transaction into its binlog after a transaction with a higher GNO.
+                until_after_gtids = make_gtid_range_string(ranges)
                 # Don't expect any specific file because if the GTID we're including is the very last entry
                 # in the file the SQL thread might switch to next file and if it is earlier then it won't
                 # so we'd need to be watching for two file names. Because execution is always single threaded
@@ -921,7 +927,7 @@ class RestoreCoordinator(threading.Thread):
             self.update_state(
                 applying_binlogs=applying_binlogs,
                 binlogs_picked_for_apply=0,
-                current_executed_gtid_target=last_range,
+                current_executed_gtid_target=target_ranges,
                 current_relay_log_target=relay_log_target,
                 expected_first_pending_binlog_remote_index=expected_first_pending_binlog_remote_index,
                 phase=self.Phase.finalizing if all_gtids_applied else self.Phase.waiting_for_apply_to_finish,
@@ -1610,7 +1616,10 @@ class RestoreCoordinator(threading.Thread):
             restart_unexpected_dead_sql_thread(cursor, replica_status, self.stats, self.log)
 
     def _check_sql_replica_status(self) -> tuple[bool, int]:
-        expected_range = self.state["current_executed_gtid_target"]
+        expected_ranges = self.state["current_executed_gtid_target"]
+        if isinstance(expected_ranges, dict):
+            # State written by myhoard 1.9.1 or older holds the last range of the file only
+            expected_ranges = [expected_ranges]
         expected_index = self.state["current_relay_log_target"]
 
         with self._mysql_cursor() as cursor:
@@ -1632,7 +1641,7 @@ class RestoreCoordinator(threading.Thread):
                     # Sometimes if the next file is empty MySQL SQL thread does not update the relay log
                     # file to match the last one. Because the thread has finished doing anything we need
                     # to react to the situation or else restoration will stall indefinitely.
-                    if expected_range:
+                    if expected_ranges:
                         self.log.info(
                             "SQL thread has finished executing even though target file has not been reached (%r < %r), "
                             "target GTID range has been set. Continuing with GTID check",
@@ -1655,13 +1664,13 @@ class RestoreCoordinator(threading.Thread):
                     return False, current_index
 
             # The batch we're applying might not have contained any GTIDs
-            if not expected_range:
+            if not expected_ranges:
                 self.log.info(
                     "No expected GTID range available, assuming complete because Relay_Log_File (%r) matches", current_file
                 )
                 found = True
             else:
-                range_str = make_gtid_range_string([expected_range])
+                range_str = make_gtid_range_string(expected_ranges)
                 cursor.execute(
                     "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed, @@GLOBAL.gtid_executed AS gtid_executed",
                     [range_str],
@@ -1670,9 +1679,9 @@ class RestoreCoordinator(threading.Thread):
                 found = result["executed"]
                 if found:
                     self.log.info(
-                        "Expected log file %r reached and GTID range %r has been applied: %s",
+                        "Expected log file %r reached and GTID set %r has been applied: %s",
                         current_file,
-                        expected_range,
+                        range_str,
                         result["gtid_executed"],
                     )
                     # In some cases SQL thread doesn't change Relay_Log_File value appropriately. Update
