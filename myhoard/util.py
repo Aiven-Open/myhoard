@@ -244,10 +244,11 @@ class _GtidRun:
     """Ranges of one uninterrupted run of events from one server while a binlog is read.
 
     Events almost always arrive in GNO order, so the range they extend is kept apart as `current` and
-    costs one comparison per event. A GNO that does not touch the current range waits in a pending
-    range, keyed by its start and its end GNO so that neighbours join in constant time, and the current
-    range absorbs a pending range the moment the two touch. Pending ranges are disjoint from each other
-    and from the current range, and there is one per real gap at most, which is the size of the output."""
+    costs one comparison per event. A real gap parks the current range and starts a new one, so the
+    events after the gap stay on that path. A GNO below the current range waits in a pending range,
+    keyed by its start and its end GNO so that neighbours join in constant time, and the current range
+    absorbs the pending range right below it the moment the two touch. Pending ranges are disjoint from
+    each other and from the current range, and there is one per real gap at most, the size of the output."""
 
     def __init__(self) -> None:
         self._server_id = 0
@@ -285,11 +286,12 @@ class _GtidRun:
                 current["end_ts"] = timestamp
             elif timestamp < current["start_ts"]:
                 current["start_ts"] = timestamp
-            if self._pending_by_start:
-                following = self._pending_by_start.pop(gno + 1, None)
-                if following is not None:
-                    del self._pending_by_end[following["end"]]
-                    _absorb_range(current, following)
+        elif gno > current["end"]:
+            # A real gap in file order. Park the current range and continue from the new GNO, so that the events
+            # after the gap stay on the in-order path. Every pending range is below the current one from here on.
+            self._pending_by_start[current["start"]] = current
+            self._pending_by_end[current["end"]] = current
+            self._current = self._new_range(gno, timestamp)
         elif gno == current["start"] - 1:
             _extend_range(current, gno, timestamp)
             preceding = self._pending_by_end.pop(gno - 1, None)
@@ -300,7 +302,8 @@ class _GtidRun:
             self._add_pending(gno, timestamp)
 
     def _add_pending(self, gno: int, timestamp: int) -> None:
-        """Extend, join or open the pending ranges around `gno`, which touches neither end of the current range"""
+        """Extend, join or open the pending ranges around a stray `gno`, one below the current range that does
+        not touch it. A late transaction of a parallel applier lands here when it is more than one GNO behind."""
         preceding = self._pending_by_end.pop(gno - 1, None)
         following = self._pending_by_start.pop(gno + 1, None)
         if preceding is not None:
@@ -320,10 +323,14 @@ class _GtidRun:
         self._pending_by_end[rng["end"]] = rng
 
     def close(self) -> List[GtidRangeDict]:
-        """End the run and return its ranges in GNO order"""
+        """End the run and return its ranges in GNO order.
+
+        Pending ranges sit in the dicts in the order they were parked, which is GNO order as long as only forward
+        gaps opened them, and the sort then runs in linear time over that one run. It costs k log k for k ranges
+        only when strays opened isolated ranges between real gaps, the price of ordered output for unordered input."""
         if self._current is None:
             return []
-        ranges = sorted([self._current, *self._pending_by_start.values()], key=lambda rng: rng["start"])
+        ranges = sorted([*self._pending_by_start.values(), self._current], key=lambda rng: rng["start"])
         self._current = None
         self._pending_by_start = {}
         self._pending_by_end = {}
