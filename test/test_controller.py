@@ -3048,3 +3048,45 @@ class TestIsSafeToReload:
 
     def test_unsafe_while_taking_basebackup(self):
         assert not self._make_controller(basebackup_stream=True).is_safe_to_reload()
+
+
+def _stream(phase: Optional[BackupStream.ActivePhase], highest_processed_local_index: int) -> MagicMock:
+    stream = MagicMock()
+    stream.active_phase = phase
+    stream.highest_processed_local_index = highest_processed_local_index
+    return stream
+
+
+@pytest.mark.parametrize(
+    "streams, expected",
+    [
+        pytest.param([], None, id="no_streams"),
+        pytest.param([_stream(BackupStream.ActivePhase.binlog, 12)], 12, id="single_stream"),
+        pytest.param(
+            [_stream(BackupStream.ActivePhase.binlog, 12), _stream(BackupStream.ActivePhase.binlog, 9)],
+            9,
+            id="lowest_of_completed_streams",
+        ),
+        pytest.param(
+            [_stream(BackupStream.ActivePhase.binlog, 12), _stream(BackupStream.ActivePhase.binlog_catchup, -1)],
+            12,
+            id="catchup_stream_ignored",
+        ),
+        pytest.param(
+            [_stream(BackupStream.ActivePhase.binlog, 12), _stream(BackupStream.ActivePhase.basebackup, -1)],
+            12,
+            id="basebackup_stream_ignored",
+        ),
+        pytest.param([_stream(BackupStream.ActivePhase.binlog_catchup, 7)], None, id="only_catchup_stream"),
+        pytest.param([_stream(None, 12)], None, id="inactive_stream_ignored"),
+        pytest.param(
+            [_stream(BackupStream.ActivePhase.binlog, 12), _stream(BackupStream.ActivePhase.binlog, -1)],
+            None,
+            id="completed_stream_without_uploads",
+        ),
+    ],
+)
+def test_get_latest_uploaded_binlog_index(streams: List[MagicMock], expected: Optional[int]) -> None:
+    controller = Controller.__new__(Controller)
+    controller.backup_streams = cast(List[BackupStream], streams)
+    assert controller.get_latest_uploaded_binlog_index() == expected

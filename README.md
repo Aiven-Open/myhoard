@@ -622,6 +622,25 @@ Response on success looks like this:
 }
 ```
 
+When `backup_type` is `binlog` the response also carries the local index of
+the binary log file that was completed by the rotation and is now queued for
+upload:
+
+```
+{
+  "success": true,
+  "binlog_index": 123
+}
+```
+
+`binlog_index` is the file completed by the rotation. It is `null` only if
+MySQL lists fewer than two binary logs after the rotation, which does not
+happen in normal operation. The upload itself happens in the background.
+Callers that need to know when it landed should compare `binlog_index`
+against `latest_uploaded_binlog_index` from `GET /status` instead of relying
+on `wait_for_upload`, which holds the request open and says nothing about the
+outcome; `success` is `true` whether or not the upload completed in time.
+
 ## PATCH /backup/settings
 
 This endpoint is used to update backup settings
@@ -774,15 +793,41 @@ Response on success echoes back the same data sent in the request.
 
 ## GET /status
 
-Returns current main mode of MyHoard. Response looks like this:
+Returns current main mode of MyHoard and the binary log upload position.
+Response looks like this:
 
 ```
 {
-  "mode": "{active|idle|observe|promote|restore}"
+  "mode": "{active|idle|observe|promote|restore}",
+  "latest_uploaded_binlog_index": 123
 }
 ```
 
 See the status update API for more information regarding the different modes.
+
+**latest_uploaded_binlog_index** is the highest local binary log index that
+every completed backup stream, one in the regular binary log phase, has
+uploaded. Every binary log at or below it is in object storage for every
+currently active completed stream. Closed historical streams are not part of
+the value; they ended before these binary logs and can only be restored to a
+point in time within their own lifetime. This is deliberately a weaker rule
+than `wait_for_upload` uses. That wait also counts a stream still catching up
+after a new base backup; here such a stream is not counted, because it is not
+a restore candidate until it completes, and it completes only once it has
+caught up with the previous stream. So the value is not held back by the new
+stream's catch-up position during a base backup replacement, while
+`wait_for_upload` may still report the same index as pending during that
+window.
+
+The value is `null` when no stream is in the regular binary log phase
+(`idle`, `observe` or `restore` mode, or before the first base backup has
+completed) and while such a stream has not uploaded its first file yet. Note
+that a stream inherited through promotion skips, rather than uploads, binary
+logs that carry no new GTIDs until its first real upload, and a skipped file
+does not move this value. On an idle server after a failover the value can
+therefore stay `null` until the next base backup. Treat `null` as "not
+confirmed", never as "nothing to back up". Poll it after `POST /backup` with
+`backup_type` `binlog` to learn when the returned `binlog_index` has landed.
 
 ## PUT /status
 

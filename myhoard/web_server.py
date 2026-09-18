@@ -44,6 +44,7 @@ class WebServer:
         with self._handle_request(name="backup_create"):
             body = await self._get_request_json(request)
             log_index = None
+            response = {"success": True}
             backup_type = body.get("backup_type")
             incremental = body.get("incremental", False)
             wait_for_upload = body.get("wait_for_upload")
@@ -56,6 +57,8 @@ class WebServer:
                     )
                 elif backup_type == self.BackupType.binlog:
                     log_index = self.controller.rotate_and_back_up_binlog()
+                    # Callers compare this against latest_uploaded_binlog_index in /status to learn when the upload landed
+                    response["binlog_index"] = log_index
                 else:
                     raise BadRequest("`backup_type` must be set to `basebackup` or `binlog` in request body")
 
@@ -73,7 +76,7 @@ class WebServer:
                     wait_time = min(wait_for_upload - elapsed, 0.1)
                     await asyncio.sleep(wait_time)
 
-            return json_response({"success": True})
+            return json_response(response)
 
     async def backup_list(self, _request):
         with self._handle_request(name="backup_list"):
@@ -225,7 +228,12 @@ class WebServer:
 
     async def status_show(self, _request):
         with self._handle_request(name="status_show"):
-            return json_response({"mode": self.controller.mode})
+            return json_response(
+                {
+                    "mode": self.controller.mode,
+                    "latest_uploaded_binlog_index": self.controller.get_latest_uploaded_binlog_index(),
+                }
+            )
 
     async def status_update(self, request):
         with self._handle_request(name="status_update"):
