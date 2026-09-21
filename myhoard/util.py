@@ -222,26 +222,31 @@ def read_gtids_from_log(
 
 def build_gtid_ranges(iterator: Iterable[GtidRangeTuple]) -> Iterator[GtidRangeDict]:
     """Yield dicts containing most compact representation of all (timestamp, UUID, GNO) tuples
-    returned by given iterator. The parallel applier of a replica can write a transaction into the
-    replica's own binlog after transactions with higher GNOs, so the GNOs of each uninterrupted run
-    of events from one server are folded as if they were sorted: the ranges of a run are yielded in
-    GNO order once the run ends and no gaps are allowed within a range. If input contains
-    uninterrupted sequence of events from a single server only one range is produced. A GNO that
-    repeats within a run ends the run and starts a new one, as it did before folding.
+    returned by given iterator. The GNOs of each server are folded as if they were sorted, over the
+    whole file: the parallel applier of a replica can write a transaction into the replica's own binlog
+    after transactions with higher GNOs, and a node that replays the binlogs of its predecessor while
+    it writes transactions of its own alternates between the two servers many times in one file. No
+    gaps are allowed within a range, so a file holds one range per server and per real gap. The ranges
+    come out once the input is exhausted, servers in the order of their first event and the ranges of
+    a server in GNO order. A GNO that repeats ends the run of its server, whose ranges come out at
+    once, and starts a new one, as it did before folding.
 
     `start_ts` and `end_ts` are the earliest and the latest timestamp of the events in the range,
     so together they cover the commit time of every transaction in it."""
-    run = _GtidRun()
+    runs: Dict[str, _GtidRun] = {}
     for timestamp, server_id, server_uuid, gno, _file_position in iterator:
-        if not run.accepts(server_uuid, gno):
+        run = runs.get(server_uuid)
+        if run is None:
+            run = runs[server_uuid] = _GtidRun(server_id, server_uuid)
+        elif not run.accepts(gno):
             yield from run.close()
-            run.open(server_id, server_uuid)
         run.add(gno, timestamp)
-    yield from run.close()
+    for run in runs.values():
+        yield from run.close()
 
 
 class _GtidRun:
-    """Ranges of one uninterrupted run of events from one server while a binlog is read.
+    """Ranges of the events of one server while a binlog is read.
 
     Events almost always arrive in GNO order, so the range they extend is kept apart as `current` and
     costs one comparison per event. A real gap parks the current range and starts a new one, so the
@@ -250,25 +255,20 @@ class _GtidRun:
     absorbs the pending range right below it the moment the two touch. Pending ranges are disjoint from
     each other and from the current range, and there is one per real gap at most, the size of the output."""
 
-    def __init__(self) -> None:
-        self._server_id = 0
-        self._server_uuid = ""
+    def __init__(self, server_id: int, server_uuid: str) -> None:
+        self._server_id = server_id
+        self._server_uuid = server_uuid
         self._current: Optional[GtidRangeDict] = None
         self._pending_by_start: Dict[int, GtidRangeDict] = {}
         self._pending_by_end: Dict[int, GtidRangeDict] = {}
 
-    def open(self, server_id: int, server_uuid: str) -> None:
-        assert self._current is None and not self._pending_by_start
-        self._server_id = server_id
-        self._server_uuid = server_uuid
-
-    def accepts(self, server_uuid: str, gno: int) -> bool:
-        """False for an event of another server and for a GNO the run already holds at a range boundary.
-        A repeat strictly inside a pending range is not detected and yields overlapping ranges, which every
-        consumer combines, as the builder before folding also did for repeated GNOs."""
+    def accepts(self, gno: int) -> bool:
+        """False for a GNO the run already holds at a range boundary. A repeat strictly inside a pending
+        range is not detected and yields overlapping ranges, which every consumer combines, as the builder
+        before folding also did for repeated GNOs."""
         current = self._current
-        if current is None or current["server_uuid"] != server_uuid:
-            return False
+        if current is None:
+            return True
         if current["start"] <= gno <= current["end"]:
             return False
         if not self._pending_by_start:

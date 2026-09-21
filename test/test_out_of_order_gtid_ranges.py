@@ -16,7 +16,6 @@ from myhoard.restore_coordinator import PendingBinlogInfo, RestoreCoordinator
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from unittest.mock import Mock, patch
 
-import itertools
 import myhoard.restore_coordinator
 import myhoard.util as myhoard_util
 import os
@@ -59,7 +58,7 @@ def _bounds_and_ts(ranges: Iterable[myhoard_util.GtidRangeDict]) -> List[Tuple[i
 
 
 def _sorted_gno_bounds(gnos: Iterable[int]) -> List[Tuple[int, int]]:
-    """The GNOs sorted and collapsed into ranges, the most compact representation of one server's run"""
+    """The GNOs sorted and collapsed into ranges, the most compact representation of one server's GNOs"""
     bounds: List[Tuple[int, int]] = []
     for gno in sorted(set(gnos)):
         if bounds and bounds[-1][1] + 1 == gno:
@@ -70,11 +69,12 @@ def _sorted_gno_bounds(gnos: Iterable[int]) -> List[Tuple[int, int]]:
 
 
 def _model(events: List[myhoard_util.GtidRangeTuple]) -> List[myhoard_util.GtidRangeDict]:
-    """The expected output for runs without repeated GNOs: per run of one server the sorted GNOs collapsed
-    into ranges, start_ts and end_ts the earliest and latest timestamp of the events of the range"""
+    """The expected output for input without repeated GNOs: per server, in the order of their first event, the
+    sorted GNOs collapsed into ranges, start_ts and end_ts the earliest and latest timestamp of the events of
+    the range"""
     result: List[myhoard_util.GtidRangeDict] = []
-    for server_uuid, run_iter in itertools.groupby(events, key=lambda event: event[2]):
-        run = list(run_iter)
+    for server_uuid in dict.fromkeys(event[2] for event in events):
+        run = [event for event in events if event[2] == server_uuid]
         ts_by_gno = {event[3]: event[0] for event in run}
         for start, end in _sorted_gno_bounds(ts_by_gno):
             timestamps = [ts_by_gno[gno] for gno in range(start, end + 1)]
@@ -193,18 +193,15 @@ def test_builder_edge_cases(events, expected):
     assert _bounds_and_ts(myhoard_util.build_gtid_ranges(events)) == expected
 
 
-def test_folding_stays_within_a_run_of_one_server():
-    """A late GNO that arrives after another server's transactions starts its own range. The run boundary
-    is what keeps in-order output identical to the builder before folding."""
+def test_a_late_gno_folds_across_another_servers_transactions():
+    """A late GNO that arrives after another server's transactions joins the range of its own server, the way
+    the transactions a new primary writes during its replay of the old primary's binlogs interleave with them."""
     events = _events([1, 3], SERVER_UUID) + _events([1], OTHER_UUID, 2) + _events([2], SERVER_UUID)
     ranges = list(myhoard_util.build_gtid_ranges(events))
     assert [(rng["server_uuid"], rng["start"], rng["end"]) for rng in ranges] == [
-        (SERVER_UUID, 1, 1),
-        (SERVER_UUID, 3, 3),
+        (SERVER_UUID, 1, 3),
         (OTHER_UUID, 1, 1),
-        (SERVER_UUID, 2, 2),
     ]
-    assert myhoard_util.partition_sort_and_combine_gtid_ranges(ranges) == {SERVER_UUID: [[1, 3]], OTHER_UUID: [[1, 1]]}
 
 
 def test_swap_across_a_file_boundary_folds_per_file_and_combines_across_files():

@@ -1197,8 +1197,8 @@ class RestoreCoordinator(threading.Thread):
                     if binlog["server_id"] in target_time_reached_by_server:
                         continue
                     if self.target_time and binlog["gtid_ranges"]:
-                        # A file holds one range per real gap and per run of a server, in GNO order, so the earliest
-                        # and the latest commit time of the file can sit in any of them
+                        # A file holds one range per server and per real gap, in GNO order per server, so the
+                        # earliest and the latest commit time of the file can sit in any of them
                         first_ts = min(rng["start_ts"] for rng in binlog["gtid_ranges"])
                         last_ts = max(rng["end_ts"] for rng in binlog["gtid_ranges"])
                         if first_ts >= self.target_time:

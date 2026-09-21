@@ -3,12 +3,11 @@ from . import generate_rsa_key_pair
 from datetime import datetime
 from hypothesis import given, settings, strategies as st
 from time import sleep
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 from unittest.mock import Mock, patch
 
 import collections
 import copy
-import itertools
 import logging
 import myhoard.util as myhoard_util
 import os
@@ -233,8 +232,8 @@ def test_build_gtid_ranges():
 
 
 def _build_gtid_ranges_in_file_order(events: Iterable[myhoard_util.GtidRangeTuple]) -> List[myhoard_util.GtidRangeDict]:
-    """The range builder before out of order GNOs were folded. Kept as the reference for in-order input
-    and for the set of GTIDs the new builder must cover."""
+    """The range builder before out of order GNOs were folded. Kept as the reference for in-order input of
+    servers that each appear once and for the set of GTIDs the new builder must cover."""
     ranges: List[myhoard_util.GtidRangeDict] = []
     for timestamp, server_id, server_uuid, gno, _file_position in events:
         if ranges and ranges[-1]["server_uuid"] == server_uuid and ranges[-1]["end"] + 1 == gno:
@@ -255,12 +254,12 @@ def _build_gtid_ranges_in_file_order(events: Iterable[myhoard_util.GtidRangeTupl
 
 
 def _model_gtid_ranges(events: List[myhoard_util.GtidRangeTuple]) -> List[myhoard_util.GtidRangeDict]:
-    """What the builder must produce for runs without repeated GNOs: for each run of events from one
-    server the sorted GNOs collapsed into ranges, start_ts and end_ts the earliest and the latest
+    """What the builder must produce for input without repeated GNOs: per server, in the order of their
+    first event, the sorted GNOs collapsed into ranges, start_ts and end_ts the earliest and the latest
     timestamp of the events in the range."""
     result: List[myhoard_util.GtidRangeDict] = []
-    for server_uuid, run_iter in itertools.groupby(events, key=lambda event: event[2]):
-        run = list(run_iter)
+    for server_uuid in dict.fromkeys(event[2] for event in events):
+        run = [event for event in events if event[2] == server_uuid]
         ts_by_gno = {event[3]: event[0] for event in run}
         gnos = sorted(ts_by_gno)
         # Split the sorted GNOs where consecutive numbers stop
@@ -339,9 +338,17 @@ def test_build_gtid_ranges_folds_disorder_of_any_size():
     assert list(myhoard_util.build_gtid_ranges(many_gaps_descending)) == _model_gtid_ranges(many_gaps_descending)
 
 
-def test_build_gtid_ranges_starts_new_range_when_server_changes():
-    events = _events([1, 2], server_uuid="a") + _events([1, 2], server_uuid="b", server_id=2) + _events([3, 4], "a")
-    assert list(myhoard_util.build_gtid_ranges(events)) == _build_gtid_ranges_in_file_order(events)
+def test_build_gtid_ranges_folds_a_server_that_comes_back():
+    """A node that replays the binlogs of its predecessor while it writes transactions of its own alternates
+    between two servers in one file. Each server gets one range, with the timestamps of its own events."""
+    file_order = [("a", 1), ("a", 2), ("b", 1), ("b", 2), ("a", 3), ("a", 4)]
+    events = [(1000 + i, 1 if uuid == "a" else 2, uuid, gno, 100 * i) for i, (uuid, gno) in enumerate(file_order)]
+    assert len(_build_gtid_ranges_in_file_order(events)) == 3
+
+    assert list(myhoard_util.build_gtid_ranges(events)) == [
+        {"end": 4, "end_ts": 1005, "server_id": 1, "server_uuid": "a", "start": 1, "start_ts": 1000},
+        {"end": 2, "end_ts": 1003, "server_id": 2, "server_uuid": "b", "start": 1, "start_ts": 1002},
+    ]
 
 
 def test_build_gtid_ranges_many_servers_in_sequence():
@@ -358,19 +365,70 @@ def test_build_gtid_ranges_many_servers_in_sequence():
     assert [(rng["server_id"], rng["start"], rng["end"]) for rng in ranges] == [(i, 1, 10) for i in range(1, 41)]
 
 
-@st.composite
-def in_order_events(draw) -> List[myhoard_util.GtidRangeTuple]:
-    """Alternating runs of two servers, the GNOs of each server non-decreasing over the whole input, gaps and
-    duplicates allowed"""
+# The GTID order of binlog.000001 on the node that replaced the primary of a single node service on 2026-09-19.
+# While the new node replayed the old primary's binlogs from the backup stream it also wrote 147 transactions
+# of its own, and MySQL logged both into the same file. The GNOs of each server are contiguous and in order,
+# the servers only alternate. (server, first GNO, last GNO) per run, in file order.
+OLD_PRIMARY = ("4992c9d7-7063-11f1-90f6-9695ceb8b4df", 1583551890)
+NEW_PRIMARY = ("9456a196-b421-11f1-ad35-e28f2143b3fc", 3454484786)
+# fmt: off
+RUNS_OF_A_REPLACED_PRIMARY = [
+    (OLD_PRIMARY, 156700, 156710), (NEW_PRIMARY, 1, 34), (OLD_PRIMARY, 156711, 156731), (NEW_PRIMARY, 35, 36),
+    (OLD_PRIMARY, 156732, 156733), (NEW_PRIMARY, 37, 38), (OLD_PRIMARY, 156734, 156735), (NEW_PRIMARY, 39, 42),
+    (OLD_PRIMARY, 156736, 156741), (NEW_PRIMARY, 43, 45), (OLD_PRIMARY, 156742, 156742), (NEW_PRIMARY, 46, 49),
+    (OLD_PRIMARY, 156743, 156743), (NEW_PRIMARY, 50, 52), (OLD_PRIMARY, 156744, 156744), (NEW_PRIMARY, 53, 56),
+    (OLD_PRIMARY, 156745, 156746), (NEW_PRIMARY, 57, 57), (OLD_PRIMARY, 156747, 156747), (NEW_PRIMARY, 58, 58),
+    (OLD_PRIMARY, 156748, 156748), (NEW_PRIMARY, 59, 59), (OLD_PRIMARY, 156749, 156749), (NEW_PRIMARY, 60, 60),
+    (OLD_PRIMARY, 156750, 156751), (NEW_PRIMARY, 61, 62), (OLD_PRIMARY, 156752, 156757), (NEW_PRIMARY, 63, 67),
+    (OLD_PRIMARY, 156758, 156758), (NEW_PRIMARY, 68, 70), (OLD_PRIMARY, 156759, 156759), (NEW_PRIMARY, 71, 74),
+    (OLD_PRIMARY, 156760, 156760), (NEW_PRIMARY, 75, 75), (OLD_PRIMARY, 156761, 156761), (NEW_PRIMARY, 76, 77),
+    (OLD_PRIMARY, 156762, 156763), (NEW_PRIMARY, 78, 81), (OLD_PRIMARY, 156764, 156766), (NEW_PRIMARY, 82, 82),
+    (OLD_PRIMARY, 156767, 156768), (NEW_PRIMARY, 83, 83), (OLD_PRIMARY, 156769, 156769), (NEW_PRIMARY, 84, 84),
+    (OLD_PRIMARY, 156770, 156771), (NEW_PRIMARY, 85, 86), (OLD_PRIMARY, 156772, 156772), (NEW_PRIMARY, 87, 90),
+    (OLD_PRIMARY, 156773, 156773), (NEW_PRIMARY, 91, 91), (OLD_PRIMARY, 156774, 156775), (NEW_PRIMARY, 92, 99),
+    (OLD_PRIMARY, 156776, 156776), (NEW_PRIMARY, 100, 113), (OLD_PRIMARY, 156777, 156784), (NEW_PRIMARY, 114, 114),
+    (OLD_PRIMARY, 156785, 156786), (NEW_PRIMARY, 115, 115), (OLD_PRIMARY, 156787, 156787), (NEW_PRIMARY, 116, 116),
+    (OLD_PRIMARY, 156788, 156788), (NEW_PRIMARY, 117, 119), (OLD_PRIMARY, 156789, 156789), (NEW_PRIMARY, 120, 120),
+    (OLD_PRIMARY, 156790, 156790), (NEW_PRIMARY, 121, 124), (OLD_PRIMARY, 156791, 156791), (NEW_PRIMARY, 125, 127),
+    (OLD_PRIMARY, 156792, 156793), (NEW_PRIMARY, 128, 131), (OLD_PRIMARY, 156794, 156796), (NEW_PRIMARY, 132, 132),
+    (OLD_PRIMARY, 156797, 156797), (NEW_PRIMARY, 133, 134), (OLD_PRIMARY, 156798, 156803), (NEW_PRIMARY, 135, 135),
+    (OLD_PRIMARY, 156804, 156804), (NEW_PRIMARY, 136, 137), (OLD_PRIMARY, 156805, 156805), (NEW_PRIMARY, 138, 141),
+    (OLD_PRIMARY, 156806, 156807), (NEW_PRIMARY, 142, 142), (OLD_PRIMARY, 156808, 156808), (NEW_PRIMARY, 143, 144),
+    (OLD_PRIMARY, 156809, 156809), (NEW_PRIMARY, 145, 147), (OLD_PRIMARY, 156810, 156811),
+]
+# fmt: on
+
+
+def test_build_gtid_ranges_two_servers_alternating_in_one_file():
+    """The 87 runs of the replaced primary's first binlog made 87 ranges, 13 KB of upload metadata against a
+    2 KB limit, and the upload failed forever. One range per server is the only bounded summary of that file."""
     events: List[myhoard_util.GtidRangeTuple] = []
-    highest = {"a": 0, "b": 0}
-    server_uuid = "a"
-    for _ in range(draw(st.integers(min_value=1, max_value=4))):
-        gnos = sorted(draw(st.lists(st.integers(min_value=0, max_value=200), min_size=1, max_size=200)))
+    for (server_uuid, server_id), first, last in RUNS_OF_A_REPLACED_PRIMARY:
+        for gno in range(first, last + 1):
+            events.append((1000 + len(events), server_id, server_uuid, gno, 100 * len(events)))
+    assert len(events) == 259
+    assert len(_build_gtid_ranges_in_file_order(events)) == 87
+
+    ranges = list(myhoard_util.build_gtid_ranges(events))
+
+    assert [(rng["server_uuid"], rng["start"], rng["end"], rng["start_ts"], rng["end_ts"]) for rng in ranges] == [
+        (OLD_PRIMARY[0], 156700, 156811, 1000, 1000 + 258),
+        (NEW_PRIMARY[0], 1, 147, 1000 + 11, 1000 + 256),
+    ]
+
+
+@st.composite
+def in_order_events(draw, alternate: bool) -> List[myhoard_util.GtidRangeTuple]:
+    """Up to four runs, the GNOs of each server increasing over the whole input, gaps allowed. Two servers
+    taking turns when `alternate`, else a server of its own for every run"""
+    events: List[myhoard_util.GtidRangeTuple] = []
+    highest: Dict[str, int] = collections.defaultdict(int)
+    for index in range(draw(st.integers(min_value=1, max_value=4))):
+        server_uuid = "ab"[index % 2] if alternate else "abcd"[index]
+        gnos = sorted(draw(st.lists(st.integers(min_value=1, max_value=200), min_size=1, max_size=200, unique=True)))
         gnos = [highest[server_uuid] + gno for gno in gnos]
         highest[server_uuid] = gnos[-1]
         events.extend(_events(gnos, server_uuid=server_uuid))
-        server_uuid = "b" if server_uuid == "a" else "a"
     return events
 
 
@@ -403,10 +461,17 @@ def arbitrary_events(draw) -> List[myhoard_util.GtidRangeTuple]:
     return events
 
 
-@given(in_order_events())
+@given(in_order_events(alternate=False))
 @settings(max_examples=300, deadline=None)
 def test_build_gtid_ranges_in_order_output_is_unchanged(events):
+    """Servers that each appear once, the node replacement chain, get the ranges of the builder before folding"""
     assert list(myhoard_util.build_gtid_ranges(events)) == _build_gtid_ranges_in_file_order(events)
+
+
+@given(in_order_events(alternate=True))
+@settings(max_examples=300, deadline=None)
+def test_build_gtid_ranges_folds_alternating_servers(events):
+    assert list(myhoard_util.build_gtid_ranges(events)) == _model_gtid_ranges(events)
 
 
 @given(locally_disordered_events())
