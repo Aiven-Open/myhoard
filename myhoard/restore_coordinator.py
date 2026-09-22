@@ -1198,9 +1198,16 @@ class RestoreCoordinator(threading.Thread):
                         continue
                     if self.target_time and binlog["gtid_ranges"]:
                         # A file holds one range per server and per real gap, in GNO order per server, so the
-                        # earliest and the latest commit time of the file can sit in any of them
+                        # earliest commit time of the file can sit in any of them. The latest is taken per server
+                        # and the earliest of those counts: a node that replaces a primary logs the transactions it
+                        # replays with the clock of the source and its own with the current clock, and later files
+                        # can still hold replayed transactions from before the target time.
                         first_ts = min(rng["start_ts"] for rng in binlog["gtid_ranges"])
-                        last_ts = max(rng["end_ts"] for rng in binlog["gtid_ranges"])
+                        last_ts_by_server: Dict[str, int] = {}
+                        for rng in binlog["gtid_ranges"]:
+                            server_uuid = rng["server_uuid"]
+                            last_ts_by_server[server_uuid] = max(last_ts_by_server.get(server_uuid, 0), rng["end_ts"])
+                        last_ts = min(last_ts_by_server.values())
                         if first_ts >= self.target_time:
                             # We exclude entries whose time matches recovery target time so any file whose start_ts
                             # is equal or higher than target time is certain not to contain data we're going to apply

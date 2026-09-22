@@ -142,22 +142,16 @@ def test_range_timestamps_envelope_every_event_in_any_order(gnos):
 
 
 @pytest.mark.parametrize(
-    "gnos,open_range_cap",
+    "gnos",
     [
-        pytest.param([1, 3, 5, 7, 4], 3, id="closing ranges at the cap must not split or reorder them"),
-        pytest.param([1, 2, 1030, 3], None, id="a jump past the window must not keep a late GNO from its neighbours"),
+        pytest.param([1, 3, 5, 7, 4], id="a late GNO joins the ranges on both sides of it into one"),
+        pytest.param([1, 2, 1030, 3], id="a jump far ahead must not keep a late GNO from its neighbours"),
     ],
 )
-def test_ranges_are_as_compact_as_the_sorted_gnos_and_in_gno_order(gnos, open_range_cap):
+def test_ranges_are_as_compact_as_the_sorted_gnos_and_in_gno_order(gnos):
     """build_gtid_ranges promises ranges in GNO order and folds GNOs written out of order into one range.
-    The output must be the sorted GNOs of the run collapsed into ranges, no matter how the builder bounds
-    its memory. The cap is lowered here so that a five event input hits it."""
-    if open_range_cap is None:
-        ranges = _ranges(gnos)
-    else:
-        with patch.object(myhoard_util, "GTID_REORDER_WINDOW", open_range_cap, create=True):
-            ranges = _ranges(gnos)
-    assert _bounds(ranges) == _sorted_gno_bounds(gnos)
+    The output must be the sorted GNOs of the run collapsed into ranges, whatever the file order."""
+    assert _bounds(_ranges(gnos)) == _sorted_gno_bounds(gnos)
 
 
 # Edge cases of the builder
@@ -431,6 +425,34 @@ def test_pitr_listing_skips_every_file_of_a_server_once_one_starts_at_the_target
     ]
     kept, target_time_reached = _list_binlogs(rc, listing)
     assert kept == [1]
+    assert target_time_reached
+
+
+def _two_clock_file(replayed: List[Tuple[int, int]], own: List[Tuple[int, int]]) -> List[myhoard_util.GtidRangeDict]:
+    """The ranges of a binlog written by a node that replaces a primary: the transactions it replays from the old
+    primary (OTHER_UUID) keep the old primary's commit times, its own (SERVER_UUID) carry the current time, and
+    MySQL logs both into the same file, alternating"""
+    events: List[myhoard_util.GtidRangeTuple] = []
+    for index, ((replayed_ts, replayed_gno), (own_ts, own_gno)) in enumerate(zip(replayed, own)):
+        events.append((replayed_ts, SERVER_ID, OTHER_UUID, replayed_gno, 200 * index))
+        events.append((own_ts, SERVER_ID, SERVER_UUID, own_gno, 200 * index + 100))
+    return _ranges(events)
+
+
+def test_pitr_listing_keeps_fetching_while_a_replayed_server_of_a_two_clock_file_is_before_the_target(session_tmpdir):
+    """The replayed history runs at 1000 to 1005 over three files while the node's own transactions run at 1200
+    and up in the same files. A restore to 1003 needs the first two files. The latest time of the first file,
+    1201, must not mark the target time reached, or the second file is dropped and the restore silently ends
+    at 1001. Only when every server of a file has passed the target is nothing after it needed, so the second
+    file marks it and the third is skipped."""
+    rc = _coordinator(session_tmpdir, target_time=1003)
+    listing = [
+        _listed_binlog(1, _two_clock_file(replayed=[(1000, 1), (1001, 2)], own=[(1200, 1), (1201, 2)])),
+        _listed_binlog(2, _two_clock_file(replayed=[(1002, 3), (1003, 4)], own=[(1202, 3), (1203, 4)])),
+        _listed_binlog(3, _two_clock_file(replayed=[(1004, 5), (1005, 6)], own=[(1204, 5), (1205, 6)])),
+    ]
+    kept, target_time_reached = _list_binlogs(rc, listing)
+    assert kept == [1, 2]
     assert target_time_reached
 
 
