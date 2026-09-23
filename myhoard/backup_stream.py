@@ -186,7 +186,7 @@ class BackupStream(threading.Thread):
         stats: "StatsClient",
         stream_id: Optional[str] = None,
         temp_dir: str,
-        xtrabackup_settings: Optional[Dict[str, int]] = None,
+        xtrabackup_settings: Optional[Dict[str, Any]] = None,
         split_size: Optional[int] = 0,
         incremental_backup_info: IncrementalBackupInfo | None = None,
     ) -> None:
@@ -1046,6 +1046,7 @@ class BackupStream(threading.Thread):
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             estimate_memory=self.xtrabackup_settings["estimate_memory"],
+            lock_ddl=self.xtrabackup_settings["lock_ddl"],
             mysql_client_params=self.mysql_client_params,
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,

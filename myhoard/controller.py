@@ -185,7 +185,7 @@ class Controller(threading.Thread):
         restore_download_workers_count: int,
         restore_free_memory_percentage=None,
         restore_use_memory: Optional[int] = None,
-        xtrabackup_settings: Dict[str, int],
+        xtrabackup_settings: Dict[str, Any],
         auto_mark_backups_broken: bool = False,
     ):
         super().__init__()
