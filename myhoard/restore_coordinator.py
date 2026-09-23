@@ -151,7 +151,8 @@ class RestoreCoordinator(threading.Thread):
         completed_info: Optional[Dict]
         current_binlog_bucket: int
         current_binlog_stream_index: int
-        current_executed_gtid_target: Optional[GtidRangeDict]
+        # All GTID ranges of the last binlog of the batch being applied
+        current_executed_gtid_target: Optional[List[GtidRangeDict]]
         current_relay_log_target: Optional[int]
         # This is required so that we can correctly update pending_binlogs state file if updating that
         # fails after the main state has already been updated
@@ -775,10 +776,12 @@ class RestoreCoordinator(threading.Thread):
             for binlog in binlogs
         ]
 
-        last_range = None
+        # The GTIDs whose application means the batch is done. Ranges are in GNO order, not in file order, and a
+        # replica can write a transaction after one with a higher GNO, so no single range marks the end of a file.
+        target_ranges: Optional[List[GtidRangeDict]] = None
         for binlog in binlogs:
             if binlog["gtid_ranges"]:
-                last_range = binlog["gtid_ranges"][-1]
+                target_ranges = binlog["gtid_ranges"]
         last_remote_index = binlogs[-1]["adjusted_remote_index"]
         relay_log_target: Optional[int] = last_remote_index + self.state["binlog_name_offset"] + 1
 
@@ -809,8 +812,10 @@ class RestoreCoordinator(threading.Thread):
                 file_name = self._relay_log_prefetch_name(index=last_remote_index)
             ranges = list(build_gtid_ranges(read_gtids_from_log(file_name, read_until_time=self.target_time)))
             if ranges:
-                last_range = ranges[-1]
-                until_after_gtids = f'{last_range["server_uuid"]}:{last_range["end"]}'
+                target_ranges = ranges
+                # Stop once every GTID in the file is applied. The end of the last range would not be enough
+                # because a replica can write a transaction into its binlog after a transaction with a higher GNO.
+                until_after_gtids = make_gtid_range_string(ranges)
                 # Don't expect any specific file because if the GTID we're including is the very last entry
                 # in the file the SQL thread might switch to next file and if it is earlier then it won't
                 # so we'd need to be watching for two file names. Because execution is always single threaded
@@ -921,7 +926,7 @@ class RestoreCoordinator(threading.Thread):
             self.update_state(
                 applying_binlogs=applying_binlogs,
                 binlogs_picked_for_apply=0,
-                current_executed_gtid_target=last_range,
+                current_executed_gtid_target=target_ranges,
                 current_relay_log_target=relay_log_target,
                 expected_first_pending_binlog_remote_index=expected_first_pending_binlog_remote_index,
                 phase=self.Phase.finalizing if all_gtids_applied else self.Phase.waiting_for_apply_to_finish,
@@ -1192,19 +1197,30 @@ class RestoreCoordinator(threading.Thread):
                     if binlog["server_id"] in target_time_reached_by_server:
                         continue
                     if self.target_time and binlog["gtid_ranges"]:
-                        if binlog["gtid_ranges"][0]["start_ts"] >= self.target_time:
+                        # A file holds one range per server and per real gap, in GNO order per server, so the
+                        # earliest commit time of the file can sit in any of them. The latest is taken per server
+                        # and the earliest of those counts: a node that replaces a primary logs the transactions it
+                        # replays with the clock of the source and its own with the current clock, and later files
+                        # can still hold replayed transactions from before the target time.
+                        first_ts = min(rng["start_ts"] for rng in binlog["gtid_ranges"])
+                        last_ts_by_server: Dict[str, int] = {}
+                        for rng in binlog["gtid_ranges"]:
+                            server_uuid = rng["server_uuid"]
+                            last_ts_by_server[server_uuid] = max(last_ts_by_server.get(server_uuid, 0), rng["end_ts"])
+                        last_ts = min(last_ts_by_server.values())
+                        if first_ts >= self.target_time:
                             # We exclude entries whose time matches recovery target time so any file whose start_ts
                             # is equal or higher than target time is certain not to contain data we're going to apply
                             self.log.info(
                                 "Start time %s of binlog %s from server %s is after our target time %s, skipping",
-                                binlog["gtid_ranges"][0]["start_ts"],
+                                first_ts,
                                 binlog["remote_index"],
                                 binlog["server_id"],
                                 self.target_time,
                             )
                             target_time_reached_by_server.add(binlog["server_id"])
                             continue
-                        if binlog["gtid_ranges"][0]["end_ts"] >= self.target_time:
+                        if last_ts >= self.target_time:
                             # Log and mark target time reached but include binlog and continue processing results. We may
                             # get binlogs from multiple servers in some race conditions and we don't yet know if this binlog
                             # was from a server that was actually valid at that point in time and some other server may have
@@ -1212,7 +1228,7 @@ class RestoreCoordinator(threading.Thread):
                             self.log.info(
                                 "End time %s of binlog %s from server %s is at or after our target time %s,"
                                 " target time reached",
-                                binlog["gtid_ranges"][0]["end_ts"],
+                                last_ts,
                                 binlog["remote_index"],
                                 binlog["server_id"],
                                 self.target_time,
@@ -1610,7 +1626,7 @@ class RestoreCoordinator(threading.Thread):
             restart_unexpected_dead_sql_thread(cursor, replica_status, self.stats, self.log)
 
     def _check_sql_replica_status(self) -> tuple[bool, int]:
-        expected_range = self.state["current_executed_gtid_target"]
+        expected_ranges = self.state["current_executed_gtid_target"]
         expected_index = self.state["current_relay_log_target"]
 
         with self._mysql_cursor() as cursor:
@@ -1632,7 +1648,7 @@ class RestoreCoordinator(threading.Thread):
                     # Sometimes if the next file is empty MySQL SQL thread does not update the relay log
                     # file to match the last one. Because the thread has finished doing anything we need
                     # to react to the situation or else restoration will stall indefinitely.
-                    if expected_range:
+                    if expected_ranges:
                         self.log.info(
                             "SQL thread has finished executing even though target file has not been reached (%r < %r), "
                             "target GTID range has been set. Continuing with GTID check",
@@ -1655,13 +1671,13 @@ class RestoreCoordinator(threading.Thread):
                     return False, current_index
 
             # The batch we're applying might not have contained any GTIDs
-            if not expected_range:
+            if not expected_ranges:
                 self.log.info(
                     "No expected GTID range available, assuming complete because Relay_Log_File (%r) matches", current_file
                 )
                 found = True
             else:
-                range_str = make_gtid_range_string([expected_range])
+                range_str = make_gtid_range_string(expected_ranges)
                 cursor.execute(
                     "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed, @@GLOBAL.gtid_executed AS gtid_executed",
                     [range_str],
@@ -1670,9 +1686,9 @@ class RestoreCoordinator(threading.Thread):
                 found = result["executed"]
                 if found:
                     self.log.info(
-                        "Expected log file %r reached and GTID range %r has been applied: %s",
+                        "Expected log file %r reached and GTID set %r has been applied: %s",
                         current_file,
-                        expected_range,
+                        range_str,
                         result["gtid_executed"],
                     )
                     # In some cases SQL thread doesn't change Relay_Log_File value appropriately. Update
