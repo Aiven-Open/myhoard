@@ -54,6 +54,7 @@
         "relay_log_index_file": "/var/lib/mysql/relay.index",
         "relay_log_prefix": "/var/lib/mysql/relay"
     },
+    "recovery_window_audit_interval": null,
     "restore_auto_mark_backups_broken": false,
     "restore_free_memory_percentage": null,
     "restore_max_binlog_bytes": 4294967296,
