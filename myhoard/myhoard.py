@@ -249,6 +249,7 @@ class MyHoard:
             temp_dir=self.config["temporary_directory"],
             xtrabackup_settings=self.config.get("xtrabackup", DEFAULT_XTRABACKUP_SETTINGS),
             auto_mark_backups_broken=self.config.get("restore_auto_mark_backups_broken", False),
+            recovery_window_audit_interval=self.config.get("recovery_window_audit_interval"),
         )
         self.controller.start()
         self.web_server = WebServer(
