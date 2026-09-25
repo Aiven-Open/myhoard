@@ -1,22 +1,33 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from __future__ import annotations
 
-from . import build_controller, DataGenerator, get_mysql_config_options, MySQLConfig, wait_for_condition, while_asserts
+from . import (
+    build_controller,
+    DataGenerator,
+    get_mysql_config_options,
+    MySQLConfig,
+    restart_mysql,
+    wait_for_condition,
+    while_asserts,
+)
 from .helpers.version import xtrabackup_version_to_string
 from myhoard.backup_stream import BackupStream
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
 from myhoard.controller import Backup, BaseBackup, Controller, ERR_BACKUP_IN_PROGRESS, sort_completed_backups
 from myhoard.restore_coordinator import RestoreCoordinator
 from myhoard.util import (
+    build_gtid_ranges,
     change_replication_source_to,
     get_replica_status,
     get_xtrabackup_version,
     GtidExecuted,
     make_fs_metadata,
+    make_gtid_range_string,
     mysql_cursor,
     parse_gtid_range_string,
     parse_version,
     partition_sort_and_combine_gtid_ranges,
+    read_gtids_from_log,
 )
 from rohmu import get_transfer
 from types import SimpleNamespace
@@ -25,6 +36,7 @@ from unittest.mock import call, MagicMock, patch
 
 import contextlib
 import datetime
+import logging
 import os
 import pymysql
 import pytest
@@ -148,6 +160,216 @@ def test_old_master_has_failed(default_backup_site, master_controller, mysql_emp
     finally:
         mcontroller.stop()
         master_dg.stop()
+        if new_master_controller:
+            new_master_controller.stop()
+
+
+def test_promote_after_restore_stalls_after_last_relay_log_gtids_are_applied(
+    caplog, default_backup_site, master_controller, mysql_empty, session_tmpdir
+):
+    """Restore normally, then reproduce promotion waiting forever after all missing GTIDs have been applied."""
+    mcontroller, master = master_controller
+    mysql_empty.connect_options["password"] = master.connect_options["password"]
+    new_master_controller: Optional[Controller] = None
+
+    def flush_and_wait_for_upload() -> None:
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("SHOW BINARY LOGS")
+            wait_for_index = max(int(binlog["Log_name"].split(".")[-1]) for binlog in cursor.fetchall())
+            cursor.execute("FLUSH BINARY LOGS")
+        wait_for_condition(
+            lambda: mcontroller.is_log_backed_up(log_index=wait_for_index),
+            timeout=30,
+            description=f"Source binlog {wait_for_index} was not uploaded",
+        )
+
+    try:
+        caplog.set_level(logging.INFO)
+        mcontroller.switch_to_active_mode()
+        mcontroller.start()
+
+        def master_streaming_binlogs():
+            if not mcontroller.backup_streams:
+                return False
+            complete_backups = [backup for backup in mcontroller.state["backups"] if backup["completed_at"]]
+            return mcontroller.backup_streams[0].active_phase == BackupStream.ActivePhase.binlog and bool(complete_backups)
+
+        wait_for_condition(master_streaming_binlogs, timeout=30, description="Source backup did not complete")
+
+        # Create the table after the basebackup and upload the binlog, forcing the restore to replay it normally.
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute("CREATE DATABASE promotion_stall")
+            cursor.execute("CREATE TABLE promotion_stall.test_data (id INTEGER PRIMARY KEY)")
+            cursor.execute("COMMIT")
+        flush_and_wait_for_upload()
+
+        new_master_controller = build_controller(
+            Controller,
+            default_backup_site=default_backup_site,
+            mysql_config=mysql_empty,
+            session_tmpdir=session_tmpdir,
+        )
+        new_master_controller.start()
+
+        wait_for_condition(
+            lambda: bool(new_master_controller and new_master_controller.state["backups_fetched_at"]),
+            timeout=5,
+            description="Restored controller did not discover the backup",
+        )
+        backup = new_master_controller.state["backups"][0]
+        new_master_controller.restore_backup(site=backup["site"], stream_id=backup["stream_id"])
+
+        wait_for_condition(
+            lambda: bool(
+                new_master_controller
+                and new_master_controller.restore_coordinator
+                and new_master_controller.restore_coordinator.is_complete()
+            ),
+            timeout=60,
+            description="Backup restoration did not complete",
+        )
+
+        # RestoreCoordinator.finalize_restoration() performs the RESET REPLICA that production promotion observes.
+        with mysql_cursor(**mysql_empty.connect_options) as cursor:
+            restored_replica_status = get_replica_status(cursor)
+            assert restored_replica_status is None or (
+                not restored_replica_status["Relay_Source_Log_File"]
+                and not restored_replica_status["Exec_Source_Log_Pos"]
+                and not restored_replica_status["Retrieved_Gtid_Set"]
+            )
+            cursor.execute(
+                "SELECT COUNT(*) AS table_count FROM information_schema.tables "
+                "WHERE table_schema = 'promotion_stall' AND table_name = 'test_data'"
+            )
+            assert cursor.fetchone()["table_count"] == 1
+
+        # Add transactions to the current source binlog after restoration. An abrupt mysqld restart closes this
+        # binlog without a Rotate event and creates the following file, so the real scanner treats it as complete.
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute(master.show_binary_logs_status_cmd)
+            source_binlog_name = cursor.fetchone()["File"]
+            for row_id in range(1, 556):
+                cursor.execute("INSERT INTO promotion_stall.test_data VALUES (%s)", [row_id])
+                cursor.execute("COMMIT")
+            cursor.execute(master.show_binary_logs_status_cmd)
+            assert cursor.fetchone()["File"] == source_binlog_name
+
+        source_binlog_path = os.path.join(os.path.dirname(master.config_options.binlog_file_prefix), source_binlog_name)
+        source_binlog_index = int(source_binlog_name.rsplit(".", 1)[-1])
+        gtid_ranges = list(build_gtid_ranges(read_gtids_from_log(source_binlog_path)))
+        assert sum(gtid_range["end"] - gtid_range["start"] + 1 for gtid_range in gtid_ranges) == 555
+        expected_ranges = make_gtid_range_string(gtid_ranges)
+        source_binlog_size = os.path.getsize(source_binlog_path)
+
+        restart_mysql(master)
+
+        assert os.path.getsize(source_binlog_path) == source_binlog_size
+        with mysql_cursor(**master.connect_options) as cursor:
+            cursor.execute(master.show_binary_logs_status_cmd)
+            assert cursor.fetchone()["File"] != source_binlog_name
+            cursor.execute("SELECT COUNT(*) AS row_count FROM promotion_stall.test_data")
+            assert cursor.fetchone()["row_count"] == 555
+
+        wait_for_condition(
+            lambda: mcontroller.is_log_backed_up(log_index=source_binlog_index),
+            timeout=30,
+            description=f"Crash-closed source binlog {source_binlog_index} was not uploaded",
+        )
+        remote_binlog = next(
+            binlog
+            for stream in mcontroller.backup_streams
+            for binlog in stream.remote_binlogs
+            if binlog["local_index"] == source_binlog_index
+        )
+        assert remote_binlog["gtid_ranges"] == gtid_ranges
+        remote_index = remote_binlog["remote_index"]
+
+        # The old primary is now unavailable. Promotion must discover and download its last uploaded binlog.
+        mcontroller.stop()
+        caplog.clear()
+        new_master_controller.switch_to_active_mode()
+
+        wait_for_condition(
+            lambda: bool(new_master_controller.state["promote_details"].get("binlogs_applying")),
+            timeout=30,
+            description="Promotion did not start applying the final source binlog",
+        )
+        assert new_master_controller.state["promote_details"]["expected_file"] == "relay.000002"
+        assert new_master_controller.state["promote_details"]["expected_ranges"] == expected_ranges
+
+        replica_status: Dict[str, Any] = {}
+
+        def target_has_finished_replay():
+            with mysql_cursor(**mysql_empty.connect_options) as cursor:
+                cursor.execute("SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_executed) AS executed", [expected_ranges])
+                target_gtids_applied = bool(cursor.fetchone()["executed"])
+                current_status = get_replica_status(cursor)
+            if (
+                target_gtids_applied
+                and current_status
+                and re.match(
+                    r"(Slave|Replica) has read all relay log; waiting for more updates",
+                    current_status["Replica_SQL_Running_State"],
+                )
+            ):
+                replica_status.update(current_status)
+                return True
+            return False
+
+        wait_for_condition(
+            target_has_finished_replay,
+            timeout=15,
+            description=f"Target GTID range {expected_ranges!r} was not applied and the SQL thread did not become idle",
+        )
+
+        assert replica_status["Relay_Log_File"] == "relay.000001"
+        assert replica_status["Replica_SQL_Running"] == "Yes"
+
+        # Multiple normal controller iterations still cannot finish promotion even though every GTID was applied.
+        time.sleep(1)
+        assert new_master_controller.mode == Controller.Mode.promote
+        assert new_master_controller.state["promote_details"]["binlogs_applying"]
+
+        expected_log_patterns = [
+            rf"^'.*/binlogs/\d+/{remote_index}_{master.server_id}' successfully saved as "
+            rf"'.*/relay_logs/relay\.{remote_index:06}\.prefetch' in \d+\.\d+ seconds$",
+            r"^Replica status is empty, assuming RESET REPLICA has been executed and writing relay index manually$",
+            r"^Wrote names: \['relay\.000001'\]$",
+            rf"^Renamed '.*/relay_logs/relay\.{remote_index:06}\.prefetch' to " r"'.*/relay_logs/relay\.000001'$",
+            rf"^Started SQL thread, waiting for file 'relay\.000002' and GTID range "
+            rf"'{re.escape(expected_ranges)}' to be reached$",
+        ]
+        controller_info_messages = iter(
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "Controller" and record.levelno == logging.INFO
+        )
+        for pattern in expected_log_patterns:
+            assert any(
+                re.match(pattern, message) for message in controller_info_messages
+            ), f"No ordered Controller INFO log line matching {pattern!r}"
+
+        # Force promotion is the only way out with the current completion check.
+        new_master_controller.switch_to_active_mode(force=True)
+        wait_for_condition(
+            lambda: new_master_controller.mode == Controller.Mode.active,
+            timeout=15,
+            description="Forced promotion did not recover",
+        )
+        assert any(
+            record.getMessage() == "Promotion target state not reached but forced promotion requested"
+            for record in caplog.records
+        )
+        assert any(record.getMessage() == "Switching controller to active mode (2)" for record in caplog.records)
+
+        with mysql_cursor(**mysql_empty.connect_options) as cursor:
+            forced_replica_status = get_replica_status(cursor)
+            cursor.execute("SELECT COUNT(*) AS row_count FROM promotion_stall.test_data")
+            assert cursor.fetchone()["row_count"] == 555
+        assert forced_replica_status is not None
+        assert forced_replica_status["Replica_SQL_Running"] == "No"
+    finally:
+        mcontroller.stop()
         if new_master_controller:
             new_master_controller.stop()
 
@@ -3004,7 +3226,6 @@ class TestIsSafeToReload:
     with only the attributes the method touches."""
 
     def _make_controller(self, *, phase=None, basebackup_stream=False):
-        import logging
         import threading
 
         controller = Controller.__new__(Controller)
