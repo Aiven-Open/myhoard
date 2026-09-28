@@ -1,10 +1,12 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import generate_rsa_key_pair
 from datetime import datetime
+from hypothesis import given, settings, strategies as st
 from time import sleep
-from typing import List
+from typing import Dict, Iterable, List
 from unittest.mock import Mock, patch
 
+import collections
 import copy
 import logging
 import myhoard.util as myhoard_util
@@ -227,6 +229,277 @@ def test_build_gtid_ranges():
         },
     ]
     assert ranges == expected_ranges
+
+
+def _build_gtid_ranges_in_file_order(events: Iterable[myhoard_util.GtidRangeTuple]) -> List[myhoard_util.GtidRangeDict]:
+    """The range builder before out of order GNOs were folded. Kept as the reference for in-order input of
+    servers that each appear once and for the set of GTIDs the new builder must cover."""
+    ranges: List[myhoard_util.GtidRangeDict] = []
+    for timestamp, server_id, server_uuid, gno, _file_position in events:
+        if ranges and ranges[-1]["server_uuid"] == server_uuid and ranges[-1]["end"] + 1 == gno:
+            ranges[-1]["end"] = gno
+            ranges[-1]["end_ts"] = timestamp
+        else:
+            ranges.append(
+                {
+                    "end": gno,
+                    "end_ts": timestamp,
+                    "server_id": server_id,
+                    "server_uuid": server_uuid,
+                    "start": gno,
+                    "start_ts": timestamp,
+                }
+            )
+    return ranges
+
+
+def _model_gtid_ranges(events: List[myhoard_util.GtidRangeTuple]) -> List[myhoard_util.GtidRangeDict]:
+    """What the builder must produce for input without repeated GNOs: per server, in the order of their
+    first event, the sorted GNOs collapsed into ranges, start_ts and end_ts the earliest and the latest
+    timestamp of the events in the range."""
+    result: List[myhoard_util.GtidRangeDict] = []
+    for server_uuid in dict.fromkeys(event[2] for event in events):
+        run = [event for event in events if event[2] == server_uuid]
+        ts_by_gno = {event[3]: event[0] for event in run}
+        gnos = sorted(ts_by_gno)
+        # Split the sorted GNOs where consecutive numbers stop
+        ends = [previous for previous, gno in zip(gnos, gnos[1:]) if gno != previous + 1] + [gnos[-1]]
+        starts = [gnos[0]] + [gno for previous, gno in zip(gnos, gnos[1:]) if gno != previous + 1]
+        for start, end in zip(starts, ends):
+            timestamps = [ts_by_gno[gno] for gno in range(start, end + 1)]
+            result.append(
+                {
+                    "end": end,
+                    "end_ts": max(timestamps),
+                    "server_id": run[0][1],
+                    "server_uuid": server_uuid,
+                    "start": start,
+                    "start_ts": min(timestamps),
+                }
+            )
+    return result
+
+
+def _events(gnos: Iterable[int], server_uuid: str = "a", server_id: int = 1) -> List[myhoard_util.GtidRangeTuple]:
+    """One event per GNO, in the given order, with timestamps and positions increasing in file order"""
+    return [(1000 + index, server_id, server_uuid, gno, 100 * index) for index, gno in enumerate(gnos)]
+
+
+@pytest.mark.parametrize(
+    "gnos,expected",
+    [
+        pytest.param([1, 2, 4, 3, 5], [(1, 5, 1000, 1004)], id="adjacent swap"),
+        pytest.param([2, 1, 3], [(1, 3, 1000, 1002)], id="swap at file start"),
+        pytest.param([1, 2, 3, 5, 6, 7], [(1, 3, 1000, 1002), (5, 7, 1003, 1005)], id="swap across file end"),
+        pytest.param([1, 2, 3, 7, 4, 5, 6, 8], [(1, 8, 1000, 1007)], id="transaction written three positions late"),
+        pytest.param(
+            [1, 2, 4, 5, 3], [(1, 5, 1000, 1004)], id="late transaction ends the file, its timestamp is the end_ts"
+        ),
+        pytest.param([1, 2, 500, 501], [(1, 2, 1000, 1001), (500, 501, 1002, 1003)], id="real gap"),
+        pytest.param([1, 2000] + list(range(2, 2000)), [(1, 2000, 1000, 2999)], id="the skipped block arrives after a jump"),
+        pytest.param(
+            [1, 2000, 2], [(1, 2, 1000, 1002), (2000, 2000, 1001, 1001)], id="late arrival after a real gap joins its range"
+        ),
+        pytest.param([3, 1, 2], [(1, 3, 1000, 1002)], id="pending range below the current one joins it"),
+        pytest.param([1, 5, 3, 4, 2], [(1, 5, 1000, 1004)], id="pending ranges join each other before the current one"),
+        pytest.param([1, 2, 2, 3], [(1, 2, 1000, 1001), (2, 3, 1002, 1003)], id="duplicate GNO"),
+        pytest.param([1, 3, 3, 2], [(1, 1, 1000, 1000), (3, 3, 1001, 1001), (2, 3, 1002, 1003)], id="duplicate pending GNO"),
+    ],
+)
+def test_build_gtid_ranges_folds_out_of_order_gnos(gnos, expected):
+    ranges = list(myhoard_util.build_gtid_ranges(_events(gnos)))
+    assert [(rng["start"], rng["end"], rng["start_ts"], rng["end_ts"]) for rng in ranges] == expected
+    assert all(rng["server_uuid"] == "a" and rng["server_id"] == 1 for rng in ranges)
+
+
+def test_build_gtid_ranges_swapped_pairs_produce_one_range():
+    gnos = list(range(1, 20001))
+    for index in range(500, 20000, 500):
+        gnos[index], gnos[index + 1] = gnos[index + 1], gnos[index]
+    events = _events(gnos)
+    # 39 swapped pairs, each costs three extra ranges when ranges follow file order
+    assert len(_build_gtid_ranges_in_file_order(events)) == 118
+    assert list(myhoard_util.build_gtid_ranges(events)) == _model_gtid_ranges(events)
+
+
+def test_build_gtid_ranges_folds_disorder_of_any_size():
+    # 1..99, then a jump of a few thousand, then the block that was skipped
+    block_moved_far = _events(list(range(1, 100)) + list(range(5000, 5100)) + list(range(100, 200)))
+    assert [(rng["start"], rng["end"]) for rng in myhoard_util.build_gtid_ranges(block_moved_far)] == [
+        (1, 199),
+        (5000, 5099),
+    ]
+    assert list(myhoard_util.build_gtid_ranges(block_moved_far)) == _model_gtid_ranges(block_moved_far)
+    # Every other GNO missing, as with filtered transactions: one pending range per gap, none of them ever joins
+    many_gaps = _events(range(1, 5000, 2))
+    assert list(myhoard_util.build_gtid_ranges(many_gaps)) == _build_gtid_ranges_in_file_order(many_gaps)
+    # The same in reverse, every GNO opens a pending range below the current one
+    many_gaps_descending = _events(range(4999, 0, -2))
+    assert list(myhoard_util.build_gtid_ranges(many_gaps_descending)) == _model_gtid_ranges(many_gaps_descending)
+
+
+def test_build_gtid_ranges_folds_a_server_that_comes_back():
+    """A node that replays the binlogs of its predecessor while it writes transactions of its own alternates
+    between two servers in one file. Each server gets one range, with the timestamps of its own events."""
+    file_order = [("a", 1), ("a", 2), ("b", 1), ("b", 2), ("a", 3), ("a", 4)]
+    events = [(1000 + i, 1 if uuid == "a" else 2, uuid, gno, 100 * i) for i, (uuid, gno) in enumerate(file_order)]
+    assert len(_build_gtid_ranges_in_file_order(events)) == 3
+
+    assert list(myhoard_util.build_gtid_ranges(events)) == [
+        {"end": 4, "end_ts": 1005, "server_id": 1, "server_uuid": "a", "start": 1, "start_ts": 1000},
+        {"end": 2, "end_ts": 1003, "server_id": 2, "server_uuid": "b", "start": 1, "start_ts": 1002},
+    ]
+
+
+def test_build_gtid_ranges_many_servers_in_sequence():
+    """A long chain of node replacements leaves the transactions of many servers in one file, one run each"""
+    in_order: List[myhoard_util.GtidRangeTuple] = []
+    with_swaps: List[myhoard_util.GtidRangeTuple] = []
+    for server_id in range(1, 41):
+        server_uuid = f"server-{server_id}"
+        in_order += _events(range(1, 101), server_uuid=server_uuid, server_id=server_id)
+        with_swaps += _events([1, 2, 4, 3, 5, 6, 8, 7, 9, 10], server_uuid=server_uuid, server_id=server_id)
+    assert list(myhoard_util.build_gtid_ranges(in_order)) == _build_gtid_ranges_in_file_order(in_order)
+    ranges = list(myhoard_util.build_gtid_ranges(with_swaps))
+    assert len(_build_gtid_ranges_in_file_order(with_swaps)) == 40 * 7
+    assert [(rng["server_id"], rng["start"], rng["end"]) for rng in ranges] == [(i, 1, 10) for i in range(1, 41)]
+
+
+# The GTID order of binlog.000001 on the node that replaced the primary of a single node service on 2026-09-19.
+# While the new node replayed the old primary's binlogs from the backup stream it also wrote 147 transactions
+# of its own, and MySQL logged both into the same file. The GNOs of each server are contiguous and in order,
+# the servers only alternate. (server, first GNO, last GNO) per run, in file order.
+OLD_PRIMARY = ("4992c9d7-7063-11f1-90f6-9695ceb8b4df", 1583551890)
+NEW_PRIMARY = ("9456a196-b421-11f1-ad35-e28f2143b3fc", 3454484786)
+# fmt: off
+RUNS_OF_A_REPLACED_PRIMARY = [
+    (OLD_PRIMARY, 156700, 156710), (NEW_PRIMARY, 1, 34), (OLD_PRIMARY, 156711, 156731), (NEW_PRIMARY, 35, 36),
+    (OLD_PRIMARY, 156732, 156733), (NEW_PRIMARY, 37, 38), (OLD_PRIMARY, 156734, 156735), (NEW_PRIMARY, 39, 42),
+    (OLD_PRIMARY, 156736, 156741), (NEW_PRIMARY, 43, 45), (OLD_PRIMARY, 156742, 156742), (NEW_PRIMARY, 46, 49),
+    (OLD_PRIMARY, 156743, 156743), (NEW_PRIMARY, 50, 52), (OLD_PRIMARY, 156744, 156744), (NEW_PRIMARY, 53, 56),
+    (OLD_PRIMARY, 156745, 156746), (NEW_PRIMARY, 57, 57), (OLD_PRIMARY, 156747, 156747), (NEW_PRIMARY, 58, 58),
+    (OLD_PRIMARY, 156748, 156748), (NEW_PRIMARY, 59, 59), (OLD_PRIMARY, 156749, 156749), (NEW_PRIMARY, 60, 60),
+    (OLD_PRIMARY, 156750, 156751), (NEW_PRIMARY, 61, 62), (OLD_PRIMARY, 156752, 156757), (NEW_PRIMARY, 63, 67),
+    (OLD_PRIMARY, 156758, 156758), (NEW_PRIMARY, 68, 70), (OLD_PRIMARY, 156759, 156759), (NEW_PRIMARY, 71, 74),
+    (OLD_PRIMARY, 156760, 156760), (NEW_PRIMARY, 75, 75), (OLD_PRIMARY, 156761, 156761), (NEW_PRIMARY, 76, 77),
+    (OLD_PRIMARY, 156762, 156763), (NEW_PRIMARY, 78, 81), (OLD_PRIMARY, 156764, 156766), (NEW_PRIMARY, 82, 82),
+    (OLD_PRIMARY, 156767, 156768), (NEW_PRIMARY, 83, 83), (OLD_PRIMARY, 156769, 156769), (NEW_PRIMARY, 84, 84),
+    (OLD_PRIMARY, 156770, 156771), (NEW_PRIMARY, 85, 86), (OLD_PRIMARY, 156772, 156772), (NEW_PRIMARY, 87, 90),
+    (OLD_PRIMARY, 156773, 156773), (NEW_PRIMARY, 91, 91), (OLD_PRIMARY, 156774, 156775), (NEW_PRIMARY, 92, 99),
+    (OLD_PRIMARY, 156776, 156776), (NEW_PRIMARY, 100, 113), (OLD_PRIMARY, 156777, 156784), (NEW_PRIMARY, 114, 114),
+    (OLD_PRIMARY, 156785, 156786), (NEW_PRIMARY, 115, 115), (OLD_PRIMARY, 156787, 156787), (NEW_PRIMARY, 116, 116),
+    (OLD_PRIMARY, 156788, 156788), (NEW_PRIMARY, 117, 119), (OLD_PRIMARY, 156789, 156789), (NEW_PRIMARY, 120, 120),
+    (OLD_PRIMARY, 156790, 156790), (NEW_PRIMARY, 121, 124), (OLD_PRIMARY, 156791, 156791), (NEW_PRIMARY, 125, 127),
+    (OLD_PRIMARY, 156792, 156793), (NEW_PRIMARY, 128, 131), (OLD_PRIMARY, 156794, 156796), (NEW_PRIMARY, 132, 132),
+    (OLD_PRIMARY, 156797, 156797), (NEW_PRIMARY, 133, 134), (OLD_PRIMARY, 156798, 156803), (NEW_PRIMARY, 135, 135),
+    (OLD_PRIMARY, 156804, 156804), (NEW_PRIMARY, 136, 137), (OLD_PRIMARY, 156805, 156805), (NEW_PRIMARY, 138, 141),
+    (OLD_PRIMARY, 156806, 156807), (NEW_PRIMARY, 142, 142), (OLD_PRIMARY, 156808, 156808), (NEW_PRIMARY, 143, 144),
+    (OLD_PRIMARY, 156809, 156809), (NEW_PRIMARY, 145, 147), (OLD_PRIMARY, 156810, 156811),
+]
+# fmt: on
+
+
+def test_build_gtid_ranges_two_servers_alternating_in_one_file():
+    """The 87 runs of the replaced primary's first binlog made 87 ranges, 13 KB of upload metadata against a
+    2 KB limit, and the upload failed forever. One range per server is the only bounded summary of that file."""
+    events: List[myhoard_util.GtidRangeTuple] = []
+    for (server_uuid, server_id), first, last in RUNS_OF_A_REPLACED_PRIMARY:
+        for gno in range(first, last + 1):
+            events.append((1000 + len(events), server_id, server_uuid, gno, 100 * len(events)))
+    assert len(events) == 259
+    assert len(_build_gtid_ranges_in_file_order(events)) == 87
+
+    ranges = list(myhoard_util.build_gtid_ranges(events))
+
+    assert [(rng["server_uuid"], rng["start"], rng["end"], rng["start_ts"], rng["end_ts"]) for rng in ranges] == [
+        (OLD_PRIMARY[0], 156700, 156811, 1000, 1000 + 258),
+        (NEW_PRIMARY[0], 1, 147, 1000 + 11, 1000 + 256),
+    ]
+
+
+@st.composite
+def in_order_events(draw, alternate: bool) -> List[myhoard_util.GtidRangeTuple]:
+    """Up to four runs, the GNOs of each server increasing over the whole input, gaps allowed. Two servers
+    taking turns when `alternate`, else a server of its own for every run"""
+    events: List[myhoard_util.GtidRangeTuple] = []
+    highest: Dict[str, int] = collections.defaultdict(int)
+    for index in range(draw(st.integers(min_value=1, max_value=4))):
+        server_uuid = "ab"[index % 2] if alternate else "abcd"[index]
+        gnos = sorted(draw(st.lists(st.integers(min_value=1, max_value=200), min_size=1, max_size=200, unique=True)))
+        gnos = [highest[server_uuid] + gno for gno in gnos]
+        highest[server_uuid] = gnos[-1]
+        events.extend(_events(gnos, server_uuid=server_uuid))
+    return events
+
+
+@st.composite
+def locally_disordered_events(draw) -> List[myhoard_util.GtidRangeTuple]:
+    """Consecutive GNOs with up to 10 missing and up to 15 written up to 8 positions late or early, the kind of
+    disorder a parallel applier produces. Each GNO moves once."""
+    gnos = list(range(1, draw(st.integers(min_value=12, max_value=300)) + 1))
+    for gno in draw(st.lists(st.sampled_from(gnos), max_size=10, unique=True)):
+        gnos.remove(gno)
+    moved = set()
+    for index, distance in draw(
+        st.lists(st.tuples(st.integers(min_value=0, max_value=len(gnos) - 1), st.integers(-8, 8)), max_size=15)
+    ):
+        if gnos[index] in moved:
+            continue
+        moved.add(gnos[index])
+        target = max(0, min(len(gnos) - 1, index + distance))
+        gnos.insert(target, gnos.pop(index))
+    return _events(gnos)
+
+
+@st.composite
+def arbitrary_events(draw) -> List[myhoard_util.GtidRangeTuple]:
+    """Any order of unique GNOs, in runs from two servers"""
+    events: List[myhoard_util.GtidRangeTuple] = []
+    for server_uuid in draw(st.lists(st.sampled_from(["a", "b"]), min_size=1, max_size=3)):
+        gnos = draw(st.permutations(draw(st.lists(st.integers(1, 500), min_size=1, max_size=150, unique=True))))
+        events.extend(_events(gnos, server_uuid=server_uuid))
+    return events
+
+
+@given(in_order_events(alternate=False))
+@settings(max_examples=300, deadline=None)
+def test_build_gtid_ranges_in_order_output_is_unchanged(events):
+    """Servers that each appear once, the node replacement chain, get the ranges of the builder before folding"""
+    assert list(myhoard_util.build_gtid_ranges(events)) == _build_gtid_ranges_in_file_order(events)
+
+
+@given(in_order_events(alternate=True))
+@settings(max_examples=300, deadline=None)
+def test_build_gtid_ranges_folds_alternating_servers(events):
+    assert list(myhoard_util.build_gtid_ranges(events)) == _model_gtid_ranges(events)
+
+
+@given(locally_disordered_events())
+@settings(max_examples=500, deadline=None)
+def test_build_gtid_ranges_folds_local_disorder(events):
+    assert list(myhoard_util.build_gtid_ranges(events)) == _model_gtid_ranges(events)
+
+
+@given(arbitrary_events())
+@settings(max_examples=500, deadline=None)
+def test_build_gtid_ranges_covers_exactly_the_input_gtids(events):
+    ranges = list(myhoard_util.build_gtid_ranges(events))
+    reference = _build_gtid_ranges_in_file_order(events)
+    assert myhoard_util.partition_sort_and_combine_gtid_ranges(
+        ranges
+    ) == myhoard_util.partition_sort_and_combine_gtid_ranges(reference)
+    # The same GTID can appear in two runs of one server, so a GTID may have more than one timestamp
+    timestamps_by_gtid = collections.defaultdict(set)
+    for event in events:
+        timestamps_by_gtid[(event[2], event[3])].add(event[0])
+    for rng in ranges:
+        assert rng["start"] <= rng["end"]
+        # The timestamps of a range belong to events of the range and cover all of them
+        timestamps = set.union(
+            *(timestamps_by_gtid[(rng["server_uuid"], gno)] for gno in range(rng["start"], rng["end"] + 1))
+        )
+        assert rng["start_ts"] in timestamps and rng["end_ts"] in timestamps
+        assert rng["start_ts"] <= rng["end_ts"]
 
 
 def build_range_dict(uuid: str, start: int, end: int) -> myhoard_util.GtidRangeDict:
