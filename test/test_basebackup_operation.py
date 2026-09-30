@@ -2,7 +2,7 @@
 from . import build_statsd_client, MySQLConfig, restart_mysql
 from myhoard.basebackup_operation import BasebackupOperation
 from packaging.version import Version
-from typing import IO
+from typing import Any, IO
 from unittest import SkipTest
 from unittest.mock import mock_open, patch
 
@@ -286,9 +286,12 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
     }
 
 
-def _make_backup_op(*, estimate_memory: bool = False, lock_ddl: str | None = None) -> BasebackupOperation:
+def _make_backup_op(
+    *, copy_threads: int = 1, estimate_memory: bool = False, lock_ddl: str | None = None, throttle: Any = None
+) -> BasebackupOperation:
     # /dev/null is read for the mysql config at construction time; no live server or subprocess is needed.
     op = BasebackupOperation(
+        copy_threads=copy_threads,
         encryption_algorithm="AES256",
         encryption_key=b"0" * 24,
         estimate_memory=estimate_memory,
@@ -299,6 +302,7 @@ def _make_backup_op(*, estimate_memory: bool = False, lock_ddl: str | None = Non
         stats=build_statsd_client(),
         stream_handler=None,
         temp_dir="/tmp",
+        throttle=throttle,
     )
     op.temp_dir = "/tmp/xtrabackup"
     op.lsn_dir = "/tmp/xtrabackupmeta"
@@ -352,3 +356,40 @@ def test_build_backup_command_line_lock_ddl(
 
     lock_ddl_options = [option for option in command_line if option.startswith("--lock-ddl")]
     assert lock_ddl_options == ([expected_option] if expected_option else [])
+
+
+@pytest.mark.parametrize(
+    ("throttle", "expected_option"),
+    [
+        # not set: the option is left out, so the command line stays what MyHoard has always produced
+        (None, None),
+        # 0 is unlimited for xtrabackup as well
+        (0, None),
+        (1, "--throttle=1"),
+        (20, "--throttle=20"),
+        # values that are not a non-negative integer must not be passed through to xtrabackup
+        (-1, None),
+        ("5", None),
+        (2.5, None),
+        (True, None),
+    ],
+)
+def test_build_backup_command_line_throttle(throttle: Any, expected_option: str | None) -> None:
+    op = _make_backup_op(throttle=throttle)
+    command_line = op._build_backup_command_line(  # pylint: disable=protected-access
+        mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
+    )
+
+    throttle_options = [option for option in command_line if option.startswith("--throttle")]
+    assert throttle_options == ([expected_option] if expected_option else [])
+
+
+def test_build_backup_command_line_throttle_with_parallel_copy() -> None:
+    # xtrabackup shares one throttle limit between all copy threads, so both options are passed as they are
+    op = _make_backup_op(copy_threads=4, throttle=5)
+    command_line = op._build_backup_command_line(  # pylint: disable=protected-access
+        mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
+    )
+
+    assert "--parallel=4" in command_line
+    assert "--throttle=5" in command_line

@@ -1056,6 +1056,7 @@ class BackupStream(threading.Thread):
             stats=self.stats,
             stream_handler=self._basebackup_stream_handler,
             temp_dir=self.temp_dir,
+            throttle=self.xtrabackup_settings.get("throttle"),
             incremental_since_checkpoint=(
                 self.incremental_backup_info.get("last_checkpoint") if self.incremental_backup_info else None
             ),

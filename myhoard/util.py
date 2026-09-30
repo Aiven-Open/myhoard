@@ -48,6 +48,7 @@ DEFAULT_XTRABACKUP_SETTINGS: dict[str, Any] = {
     "estimate_memory": False,
     "lock_ddl": None,
     "register_redo_log_consumer": False,
+    "throttle": None,
 }
 
 # Indexes of this array are used for mapping the days (0..6), order is important
