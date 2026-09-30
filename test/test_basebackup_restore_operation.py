@@ -454,7 +454,16 @@ def test_backup_and_restore_with_lock_ddl(mysql_master, mysql_empty, lock_ddl: s
         assert gtid_subset["is_subset"] == 1
 
 
-def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
+@pytest.mark.parametrize(
+    ("copy_threads", "throttle"),
+    [
+        (1, None),
+        # xtrabackup shares the throttle limit between all copy threads, so the two are combined here. Every
+        # data file costs at least one read so even this tiny dataset takes several seconds at 10.
+        (2, 10),
+    ],
+)
+def test_incremental_backup_restore(mysql_master, mysql_empty, copy_threads: int, throttle: int | None) -> None:
     with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
         for db_index in range(5):
             cursor.execute(f"CREATE DATABASE test{db_index}")
@@ -474,6 +483,7 @@ def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
             return output_stream_handler
 
         backup_op = BasebackupOperation(
+            copy_threads=copy_threads,
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             mysql_client_params=mysql_master.connect_options,
@@ -482,6 +492,7 @@ def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
             stats=build_statsd_client(),
             stream_handler=build_stream_handler(backup_file1),
             temp_dir=mysql_empty.base_dir,
+            throttle=throttle,
         )
         backup_op.create_backup()
 
@@ -497,6 +508,7 @@ def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
             assert old_master_status
 
         backup_op_inc = BasebackupOperation(
+            copy_threads=copy_threads,
             encryption_algorithm="AES256",
             encryption_key=encryption_key,
             mysql_client_params=mysql_master.connect_options,
@@ -505,6 +517,7 @@ def test_incremental_backup_restore(mysql_master, mysql_empty) -> None:
             stats=build_statsd_client(),
             stream_handler=build_stream_handler(backup_file2),
             temp_dir=mysql_empty.base_dir,
+            throttle=throttle,
             incremental_since_checkpoint=backup_op.checkpoints_file_content,
         )
         backup_op_inc.create_backup()

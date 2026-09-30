@@ -78,6 +78,7 @@ class BasebackupOperation:
         stats,
         stream_handler,
         temp_dir,
+        throttle: int | None = None,
         incremental_since_checkpoint: str | None = None,
     ):
         self.abort_reason = None
@@ -115,6 +116,7 @@ class BasebackupOperation:
         self.stream_handler = stream_handler
         self.temp_dir: Optional[str] = None
         self.temp_dir_base = temp_dir
+        self.throttle = throttle
         self.tool_version: str | None = None
 
     def abort(self, reason):
@@ -203,6 +205,9 @@ class BasebackupOperation:
         if lock_ddl := self._resolve_lock_ddl():
             command_line.append(f"--lock-ddl={lock_ddl}")
 
+        if throttle := self._resolve_throttle():
+            command_line.append(f"--throttle={throttle}")
+
         return command_line
 
     def _resolve_lock_ddl(self) -> str | None:
@@ -243,6 +248,37 @@ class BasebackupOperation:
             return None
 
         return LOCK_DDL_REDUCED
+
+    def _resolve_throttle(self) -> int | None:
+        """Resolves the `--throttle` value to put on the command line, or None to leave the option out.
+
+        xtrabackup counts one IO per data file read of `--read-buffer-size` (10 MB by default), so N caps
+        the copy at roughly N * 10 MB/s. A file smaller than that still costs a whole read, so with many
+        small tables the number of files limits the backup as much as the size of the data does, at N=1
+        even an empty server takes about a minute.
+
+        For incremental backups only reads are limited, which is where the IO goes anyway: without page
+        tracking every page of every tablespace is read to find the changed ones. The limit is global and
+        shared by all `--parallel` copy threads, so the two can be combined and adding threads does not
+        raise throughput past the throttle.
+
+        Redo log copying is not throttled and keeps running at full speed. If the data copy is slowed
+        down too much on a write-heavy server the redo log can wrap around before the backup is done,
+        `register_redo_log_consumer` prevents that. See
+        https://docs.percona.com/percona-xtrabackup/8.4/throttling-backups.html
+        """
+        if self.throttle is None:
+            return None
+
+        # bool is an int subclass, but True as "1 chunk per second" is surely not what was meant
+        if isinstance(self.throttle, bool) or not isinstance(self.throttle, int) or self.throttle < 0:
+            self.log.warning(
+                "Unsupported throttle value %r, not passing --throttle so the backup is not throttled", self.throttle
+            )
+            return None
+
+        # 0 means unlimited for xtrabackup too, leave the option out
+        return self.throttle or None
 
     def is_incremental(self) -> bool:
         return self.incremental_since_checkpoint is not None

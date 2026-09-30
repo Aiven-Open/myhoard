@@ -529,6 +529,32 @@ The consumer reads the redo log and manually advances the log sequence number (L
 The server blocks the writes during the process. Based on the redo log consumption,
 the server determines when it can purge the log. It is disabled by default.
 
+**xtrabackup.throttle**
+
+Limits how fast XtraBackup copies data files when taking a backup, to lower the
+IO pressure on the server. The value is the number of 10 MB chunks read per
+second, so ``1`` is roughly 10 MB/s and ``10`` roughly 100 MB/s. When not set
+(the default) or ``0``, ``--throttle`` is not passed and the backup runs as fast
+as the disk allows. For a value that is not a non-negative integer a warning is
+logged and ``--throttle`` is not passed.
+
+Every data file read counts as one chunk even when the file is much smaller than
+10 MB, so on a server with many small tables the number of files slows the
+backup down as much as the size of the data does. At ``1`` even a nearly empty
+server takes about a minute to back up.
+
+For full backups both reads and writes are limited, for incremental backups only
+reads. An incremental backup still reads every page of every tablespace to find
+the ones that changed, so its read IO is about the size of the whole dataset and
+this is what the throttle limits.
+
+The limit is shared by all ``copy_threads``, so both can be set together; more
+threads do not raise the throughput past the throttle. The redo log is copied
+without a limit. If the data copy is slowed down too much on a write-heavy
+server the redo log can wrap around before the backup is done, which fails the
+backup. Enabling ``register_redo_log_consumer`` or increasing
+``innodb_redo_log_capacity`` protects against that.
+
 # HTTP API
 
 MyHoard provides an HTTP API for managing the service. The various entry points
