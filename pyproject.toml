@@ -42,6 +42,7 @@ dev = [
     "coverage",
     "coveralls",
     "flake8",
+    "hypothesis",
     "isort==5.12.0",
     "mock",
     "mypy",
