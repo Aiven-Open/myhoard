@@ -165,7 +165,8 @@ def read_gtids_from_log(
     Running this for a 64 MiB binlog which has pathological data (only very small inserts) takes 2.0 seconds on an
     i7-7500U CPU @ 2.70GHz. There aren't any obvious optimizations (in Python) that make it considerably faster but
     since full files only need to be scanned once this should be acceptable overhead (also, processing the same file
-    with mysqlbinlog takes almost exactly the same amount of time)."""
+    with mysqlbinlog takes almost exactly the same amount of time).
+    With read_until_time, stops at the first GTID event whose timestamp is at or after that time."""
     header_size = 19
     gtid_event_code = 33
     # Full GTID event header is more than 25 bytes but we're only interested in the first 25 bytes
@@ -198,8 +199,6 @@ def read_gtids_from_log(
 
             # There's one more uint32 and uint16 in the header but we don't need them so skip unpack for them
             timestamp, event_code, server_id, event_length = struct.unpack_from("<IBII", header)
-            if read_until_time and timestamp >= read_until_time:
-                return
 
             # Event length is supposed to include header size so zero should be impossible value yet sometimes
             # the value is zero and data that follows is valid
@@ -210,6 +209,11 @@ def read_gtids_from_log(
             if event_code != gtid_event_code:
                 stream.seek(event_length - header_size, io.SEEK_CUR)
                 continue
+
+            # Compare the time of GTID events only. The events that open a file carry the file creation time, which
+            # on a replica that is catching up is later than the replayed transactions in the file.
+            if read_until_time and timestamp >= read_until_time:
+                return
 
             bytes_read = stream.readinto(gtid_header)
             if not bytes_read or bytes_read < gtid_header_size:

@@ -2,7 +2,7 @@
 from . import generate_rsa_key_pair
 from datetime import datetime
 from time import sleep
-from typing import List
+from typing import List, Optional, Tuple
 from unittest.mock import Mock, patch
 
 import copy
@@ -13,6 +13,7 @@ import pymysql
 import pytest
 import random
 import shutil
+import struct
 import subprocess
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -189,6 +190,37 @@ def test_read_gtids_from_log():
     ]
     expected_events.pop()
     assert events == expected_events
+
+
+def _write_binlog(path: str, *, header_ts: int, gtids: List[Tuple[int, str, int]]) -> None:
+    """Writes a binlog that opens with Format_description and Previous_gtids events at header_ts, followed by a GTID
+    and an Xid event for each (timestamp, server_uuid, gno)."""
+
+    def event(timestamp: int, event_code: int, body: bytes) -> bytes:
+        return struct.pack("<IBIIIH", timestamp, event_code, 1, 19 + len(body), 0, 0) + body
+
+    with open(path, "wb") as f:
+        f.write(b"\xfebin")
+        f.write(event(header_ts, 15, bytes(100)))
+        f.write(event(header_ts, 35, bytes(8)))
+        for timestamp, server_uuid, gno in gtids:
+            gtid_body = struct.pack("<B16sQ", 1, bytes.fromhex(server_uuid.replace("-", "")), gno) + bytes(17)
+            f.write(event(timestamp, 33, gtid_body))
+            f.write(event(timestamp, 16, bytes(8)))
+
+
+def test_read_gtids_from_log_until_time_ignores_the_file_creation_time(tmp_path) -> None:
+    # A replica that is catching up creates its binlog after the commit times of the transactions it replays into it
+    server_uuid = "b974ed6e-bcb0-11f1-8eb4-a23b4f67d26d"
+    fn = str(tmp_path / "binlog.000001")
+    _write_binlog(fn, header_ts=2000, gtids=[(1000 + gno, server_uuid, gno) for gno in range(1, 6)])
+
+    def gnos(read_until_time: Optional[int]) -> List[int]:
+        return [event[3] for event in myhoard_util.read_gtids_from_log(fn, read_until_time=read_until_time)]
+
+    assert gnos(None) == [1, 2, 3, 4, 5]
+    assert gnos(1004) == [1, 2, 3]
+    assert gnos(1999) == [1, 2, 3, 4, 5]
 
 
 def test_build_gtid_ranges():
