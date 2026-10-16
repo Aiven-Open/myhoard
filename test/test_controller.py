@@ -24,6 +24,7 @@ from typing import Any, Callable, cast, Dict, List, Optional, Set, TypedDict
 from unittest.mock import call, MagicMock, patch
 
 import contextlib
+import copy
 import datetime
 import os
 import pymysql
@@ -2287,6 +2288,7 @@ def add_fake_backup(
     closed_at: float | None = time.time() - 3 * 60,
     broken_at: float | None = None,
     preserve_until: str | None = None,
+    recovery_site: bool = False,
 ) -> Backup:
     now = time.time()
     backup = Backup(
@@ -2300,7 +2302,7 @@ def add_fake_backup(
         completed_at=completed_at,
         broken_at=broken_at,
         preserve_until=preserve_until,
-        recovery_site=False,
+        recovery_site=recovery_site,
         stream_id=stream_id,
         resumable=True,
         site="default",
@@ -2662,7 +2664,6 @@ def test_get_incremental_backup_info(default_backup_site, mysql_empty, session_t
         mysql_config=mysql_empty,
         session_tmpdir=session_tmpdir,
     )
-    import copy
 
     backup2 = copy.deepcopy(backup1)
     backup2["basebackup_info"]["incremental"] = True
@@ -2707,6 +2708,46 @@ def test_get_incremental_backup_info(default_backup_site, mysql_empty, session_t
     info = controller.get_incremental_backup_info()
     assert info["required_streams"] == ["1000"]
     assert info["last_checkpoint"] == "backup_type = full-backuped..."
+
+
+def test_get_incremental_backup_info_ignores_recovery_site_backups(default_backup_site, mysql_empty, session_tmpdir):
+    recovery_site_backup = Backup(
+        basebackup_info=BaseBackup(
+            incremental=False,
+            end_ts=1.0,
+            checkpoints_file_content="backup_type = full-backuped...",
+            tool_version=xtrabackup_version_to_string(get_xtrabackup_version()),
+        ),
+        closed_at=1,
+        completed_at=1,
+        recovery_site=True,
+        stream_id="1000",
+        resumable=False,
+        site="recovery_site",
+        broken_at=None,
+        preserve_until=None,
+    )
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+
+    # A fork or restored service only has the source's backups, its first backup must be full
+    controller.state["backups"] = [recovery_site_backup]
+    assert controller.get_incremental_backup_info() is None
+
+    own_backup = copy.deepcopy(recovery_site_backup)
+    own_backup["completed_at"] = 2
+    own_backup["closed_at"] = 2
+    own_backup["recovery_site"] = False
+    own_backup["site"] = "not_default_site"
+    own_backup["stream_id"] = "1001"
+    controller.state["backups"] = [recovery_site_backup, own_backup]
+    info = controller.get_incremental_backup_info()
+    assert info
+    assert info["required_streams"] == ["1001"]
 
 
 @pytest.mark.parametrize(
@@ -2811,6 +2852,23 @@ PRESERVE_UNTIL = (datetime.datetime.now(datetime.timezone.utc) + datetime.timede
             None,
             None,
             id="Drop leading incremental backup",
+        ),
+        pytest.param(
+            [{"stream_id": "stream1", "incremental": True, "closed_at": None}],
+            Controller.NoPurgeReason.non_closed_backup,
+            None,
+            None,
+            id="Non closed leading incremental backup should not be purged",
+        ),
+        pytest.param(
+            [
+                {"stream_id": "stream1", "recovery_site": True},
+                {"stream_id": "stream2", "incremental": True, "closed_at": None},
+            ],
+            Controller.NoPurgeReason.non_closed_backup,
+            None,
+            None,
+            id="Non closed incremental backup on top of recovery site backup should not be purged",
         ),
         pytest.param(
             [

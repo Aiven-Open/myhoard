@@ -277,7 +277,8 @@ settings.
 **backup_sites.{name}.recovery_only**
 
 This site is not considered for new backups, it can only be used for recovering
-an existing backup.
+an existing backup. Its backups are never used as the base of an incremental
+backup, so the first backup after restoring from it is always a full one.
 
 **binlog_purge_settings.enabled**
 
