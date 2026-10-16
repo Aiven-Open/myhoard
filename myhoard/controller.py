@@ -1485,7 +1485,10 @@ class Controller(threading.Thread):
         """
         self.log.warning("Determining if incremental backup is possible")
 
-        backups = sort_completed_backups(self.state["backups"], reverse=True)
+        # Recovery site backups belong to another service (the source of a fork or restore), never build on them
+        backups = sort_completed_backups(
+            [backup for backup in self.state["backups"] if not backup["recovery_site"]], reverse=True
+        )
         if not backups:
             self.log.warning("Incremental is not possible - no previous backups found")
             return None
@@ -1646,6 +1649,10 @@ class Controller(threading.Thread):
         # is called repeatedly so if there are for any reason more backups
         # to drop they will be dropped soon enough
         backup = completed_backups[0]
+
+        # A backup that is not closed is still streaming binlogs, never drop it
+        if not backup["closed_at"]:
+            return Controller.NoPurgeReason.non_closed_backup
 
         def is_backup_incremental(b: Backup) -> bool:
             return b["basebackup_info"].get("incremental", False)
