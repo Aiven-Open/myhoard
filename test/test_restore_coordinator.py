@@ -2,13 +2,15 @@
 from . import build_statsd_client, DataGenerator, generate_rsa_key_pair, restart_mysql, while_asserts
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
-from myhoard.restore_coordinator import RestoreCoordinator
+from myhoard.restore_coordinator import extend_gtid_executed, RestoreCoordinator
 from myhoard.state_manager import StateManager
-from myhoard.util import get_xtrabackup_version
+from myhoard.util import get_xtrabackup_version, GtidRangeDict
+from packaging.version import Version
 from rohmu.object_storage.local import LocalTransfer
 from typing import Any, cast, Generic, List, Mapping, TypeVar
 from unittest.mock import Mock, patch
 
+import logging
 import myhoard.util as myhoard_util
 import os
 import pytest
@@ -768,3 +770,39 @@ def test_on_prepare_progress_flips_phase_and_persists_pct(session_tmpdir):
     assert rc.state["basebackup_prepare_progress"] == 37
     rc._on_prepare_progress(pct=88)
     assert rc.state["basebackup_prepare_progress"] == 88
+
+
+def _build_range(server_uuid: str, start: int, end: int) -> GtidRangeDict:
+    return {"server_uuid": server_uuid, "start": start, "end": end, "server_id": 0, "start_ts": 0, "end_ts": 0}
+
+
+def test_extend_gtid_executed_leaves_tagged_gtids_alone(mysql_master) -> None:
+    server_uuid = "7468f1f0-ce00-11f1-9636-a6ac48e2c22e"
+    new_uuid = "11111111-1111-1111-1111-111111111111"
+    # Tagged GTIDs exist since MySQL 8.3
+    tagged = mysql_master.version >= Version("8.3.0")
+    purged = f"{server_uuid}:1-10:mysqlsh:1,{server_uuid}:mysqlsh:5-7" if tagged else f"{server_uuid}:1-10"
+    columns = (
+        "source_uuid, interval_start, interval_end, gtid_tag" if tagged else "source_uuid, interval_start, interval_end"
+    )
+    log = logging.getLogger("test")
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        cursor.execute("SET @@GLOBAL.gtid_purged = %s", ["+" + purged])
+
+        extend_gtid_executed(cursor, _build_range(server_uuid, 11, 15), log=log)
+        extend_gtid_executed(cursor, _build_range(new_uuid, 1, 5), log=log)
+
+        cursor.execute(
+            f"SELECT {columns} FROM mysql.gtid_executed WHERE source_uuid IN (%s, %s) ORDER BY {columns}",
+            [server_uuid, new_uuid],
+        )
+        rows = [tuple(row.values()) for row in cursor.fetchall()]
+    if tagged:
+        assert rows == [
+            (new_uuid, 1, 5, ""),
+            (server_uuid, 1, 1, "mysqlsh"),
+            (server_uuid, 1, 15, ""),
+            (server_uuid, 5, 7, "mysqlsh"),
+        ]
+    else:
+        assert rows == [(new_uuid, 1, 5), (server_uuid, 1, 15)]

@@ -86,6 +86,64 @@ class RestoreChainProgress(NamedTuple):
     chain_total: int
 
 
+def extend_gtid_executed(cursor, gtid_range: GtidRangeDict, *, log: logging.Logger) -> None:
+    """Extends the last untagged row of the server of `gtid_range` in mysql.gtid_executed to the end of the range, or
+    inserts the range when the server has no untagged row yet.
+
+    MySQL 8.4 keys the table on (source_uuid, gtid_tag, interval_start) and the rows of tagged GTIDs share the
+    source_uuid of their server, often with the same interval_start as the untagged row. Tagged rows are left as they
+    are. MySQL 8.0 has no gtid_tag column."""
+    cursor.execute(
+        "SELECT COUNT(*) AS has_gtid_tag FROM information_schema.columns "
+        "  WHERE table_schema = 'mysql' AND table_name = 'gtid_executed' AND column_name = 'gtid_tag'"
+    )
+    untagged = " AND gtid_tag = ''" if cursor.fetchone()["has_gtid_tag"] else ""
+    cursor.execute(
+        (
+            "SELECT interval_start, interval_end FROM mysql.gtid_executed "
+            f"  WHERE source_uuid = %s{untagged} ORDER BY interval_start DESC LIMIT 1"
+        ),
+        [gtid_range["server_uuid"]],
+    )
+    existing_range = cursor.fetchone()
+    if not existing_range:
+        # Range doesn't exist if there were no entries with GTID by the time basebackup creation
+        # completed
+        if gtid_range["start"] == 1:
+            # gtid_tag has no default value
+            tag_column, tag_value = (", gtid_tag", ", ''") if untagged else ("", "")
+            cursor.execute(
+                (
+                    f"INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end{tag_column}) "
+                    f" VALUES (%s, %s, %s{tag_value})"
+                ),
+                (gtid_range["server_uuid"], gtid_range["start"], gtid_range["end"]),
+            )
+            cursor.execute("COMMIT")
+        else:
+            # This is not expected to happen. We cannot ensure gtid_executed is in sane state if it
+            # happens but applying old binlog is not dependent on this so allow continuing regardless
+            log.error("Could not find existing gtid_executed info for range %r", gtid_range)
+        return
+
+    if existing_range["interval_end"] == gtid_range["end"]:
+        log.info("Existing gtid_executed info already up-to-date, no need to apply %r", gtid_range)
+        return
+
+    if existing_range["interval_end"] != gtid_range["start"] - 1:
+        # This usually shouldn't happen because gtid_executed is updated whenever binlog is
+        # rotated so all missing values should've been found from the binlog we parsed. There
+        # seem to be some corner cases where the backup still ends up containing older GTID
+        # executed value so that there's a gap in the sequence.
+        log.info("Existing gtid_executed %r does not end just before new range %r", existing_range, gtid_range)
+
+    cursor.execute(
+        f"UPDATE mysql.gtid_executed SET interval_end = %s WHERE source_uuid = %s{untagged} AND interval_start = %s",
+        (gtid_range["end"], gtid_range["server_uuid"], existing_range["interval_start"]),
+    )
+    cursor.execute("COMMIT")
+
+
 class RestoreCoordinator(threading.Thread):
     """Restores an existing backup. Starts by restoring the basebackup and then applies
     necessary binlogs on top of that.
@@ -1740,53 +1798,7 @@ class RestoreCoordinator(threading.Thread):
 
         with self._mysql_cursor() as cursor:
             for gtid_range in expected_gtid_executed_ranges:
-                cursor.execute(
-                    (
-                        "SELECT interval_start, interval_end FROM mysql.gtid_executed "
-                        "  WHERE (source_uuid, interval_start) IN ("
-                        "    SELECT source_uuid, MAX(interval_start) FROM mysql.gtid_executed "
-                        "      WHERE source_uuid = %s GROUP BY source_uuid"
-                        "  )"
-                    ),
-                    [gtid_range["server_uuid"]],
-                )
-                existing_range = cursor.fetchone()
-                if not existing_range:
-                    # Range doesn't exist if there were no entries with GTID by the time basebackup creation
-                    # completed
-                    if gtid_range["start"] == 1:
-                        cursor.execute(
-                            (
-                                "INSERT INTO mysql.gtid_executed (source_uuid, interval_start, interval_end) "
-                                " VALUES (%s, %s, %s)"
-                            ),
-                            (gtid_range["server_uuid"], gtid_range["start"], gtid_range["end"]),
-                        )
-                        cursor.execute("COMMIT")
-                    else:
-                        # This is not expected to happen. We cannot ensure gtid_executed is in sane state if it
-                        # happens but applying old binlog is not dependent on this so allow continuing regardless
-                        self.log.error("Could not find existing gtid_executed info for range %r", gtid_range)
-                    continue
-
-                if existing_range["interval_end"] == gtid_range["end"]:
-                    self.log.info("Existing gtid_executed info already up-to-date, no need to apply %r", gtid_range)
-                    continue
-
-                if existing_range["interval_end"] != gtid_range["start"] - 1:
-                    # This usually shouldn't happen because gtid_executed is updated whenever binlog is
-                    # rotated so all missing values should've been found from the binlog we parsed. There
-                    # seem to be some corner cases where the backup still ends up containing older GTID
-                    # executed value so that there's a gap in the sequence.
-                    self.log.info(
-                        "Existing gtid_executed %r does not end just before new range %r", existing_range, gtid_range
-                    )
-
-                cursor.execute(
-                    ("UPDATE mysql.gtid_executed SET interval_end = %s WHERE source_uuid = %s AND interval_start = %s"),
-                    (gtid_range["end"], gtid_range["server_uuid"], existing_range["interval_start"]),
-                )
-                cursor.execute("COMMIT")
+                extend_gtid_executed(cursor, gtid_range, log=self.log)
 
         self.state.update({"gtids_patched": True})
 
