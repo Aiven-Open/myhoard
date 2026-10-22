@@ -413,11 +413,15 @@ class WebServer:
         for gtids in state.values():
             if not isinstance(gtids, dict):
                 raise BadRequest("Replication state objects must be uuid => object mappings")
-            for maybe_uuid, ranges in gtids.items():
+            for key, ranges in gtids.items():
+                # The ranges of tagged GTIDs go under "uuid:tag"
+                maybe_uuid, *tag = key.split(":", 1)
                 try:
                     uuid.UUID(maybe_uuid)
                 except Exception:  # pylint: disable=broad-except
                     raise BadRequest("Replication state objects must be uuid => object mappings")
+                if tag and not tag[0]:
+                    raise BadRequest(f"Tagged GTID key {key!r} has an empty tag, expected uuid:tag")
                 if not isinstance(ranges, list):
                     raise BadRequest("Individual values must be uuid => [[start1, end1], ...] mappings")
                 for rng in ranges:

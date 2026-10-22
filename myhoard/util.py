@@ -74,7 +74,7 @@ class GtidRangeDict(TypedDict):
 
 
 # Ideally the contents should be Tuple[int, int] rather than List[int],
-# but that clashes with json deserialization
+# but that clashes with json deserialization. Keys are server UUIDs, or "uuid:tag" for tagged GTIDs
 GtidExecuted = Dict[str, List[List[int]]]
 
 
@@ -446,7 +446,11 @@ def make_gtid_range_string(ranges: Iterable[GtidRangeDict]) -> str:
 def parse_gtid_range_string(input_range: Union[dict, str]) -> GtidExecuted:
     """Converts a string like "uuid1:id1-id2:id3:id4-id5, uuid2:id6" into a dict like
     {"uuid1": [[id1, id2], [id3, id3], [id4, id5]], "uuid2": [[id6, id6]]}. ID ranges are
-    sorted from lowest to highest"""
+    sorted from lowest to highest.
+
+    The ranges that follow a tag of MySQL 8.4 tagged GTIDs, as in "uuid1:id1-id2:tag:id3", go under
+    the key "uuid1:tag", which make_gtid_range_string writes back as a valid tagged GTID set. A tag
+    cannot start with a digit, so any other part of the string is a range."""
     # This might be called again for a value that has already been processed
     if isinstance(input_range, dict):
         return input_range
@@ -455,14 +459,18 @@ def parse_gtid_range_string(input_range: Union[dict, str]) -> GtidExecuted:
 
     by_uuid: GtidExecuted = collections.defaultdict(list)
     for uuid_and_ranges in input_range.split(","):
-        server_uuid, *ranges = uuid_and_ranges.strip().split(":")
-        all_ranges = by_uuid[server_uuid.lower()]
-        for rng in ranges:
+        server_uuid, *ranges = uuid_and_ranges.strip().lower().split(":")
+        key = server_uuid
+        for part in ranges:
+            rng = part.strip()
+            if not rng[:1].isdigit():
+                key = f"{server_uuid}:{rng}"
+                continue
             if "-" in rng:
                 low, high = rng.split("-")
             else:
                 low, high = rng, rng
-            all_ranges.append([int(low), int(high)])
+            by_uuid[key].append([int(low), int(high)])
     return {server_uuid: sorted(ranges, key=lambda rng: rng[0]) for server_uuid, ranges in by_uuid.items()}
 
 

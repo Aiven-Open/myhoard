@@ -627,6 +627,54 @@ def test_are_gtids_in_executed_set():
     )
 
 
+TAGGED_GTID_EXECUTED = """17769A4D-44C2-422A-96D6-DD4507569E95:1-143208581:mysqlsh:1-100,
+8c9dcf67-b9e5-11f1-aea1-7ad864d240c3:1-5085232,
+a6517caf-ccf7-11f1-8cdc-7cd30ae703f0:1-15"""
+
+
+def test_parse_gtid_range_string_tagged() -> None:
+    assert myhoard_util.parse_gtid_range_string(TAGGED_GTID_EXECUTED) == {
+        "17769a4d-44c2-422a-96d6-dd4507569e95": [[1, 143208581]],
+        "17769a4d-44c2-422a-96d6-dd4507569e95:mysqlsh": [[1, 100]],
+        "8c9dcf67-b9e5-11f1-aea1-7ad864d240c3": [[1, 5085232]],
+        "a6517caf-ccf7-11f1-8cdc-7cd30ae703f0": [[1, 15]],
+    }
+
+
+@pytest.mark.parametrize(
+    "gtid_string,expected",
+    [
+        ("uuid1:tag_1:1-5:7", {"uuid1:tag_1": [[1, 5], [7, 7]]}),
+        ("uuid1:1-3:a:1-2:b:4", {"uuid1": [[1, 3]], "uuid1:a": [[1, 2]], "uuid1:b": [[4, 4]]}),
+        ("uuid1:1-3:Tag:5,uuid1:tag:1-2", {"uuid1": [[1, 3]], "uuid1:tag": [[1, 2], [5, 5]]}),
+    ],
+)
+def test_parse_gtid_range_string_tag_placement(gtid_string: str, expected: myhoard_util.GtidExecuted) -> None:
+    assert myhoard_util.parse_gtid_range_string(gtid_string) == expected
+
+
+def test_make_gtid_range_string_round_trips_tagged_gtids() -> None:
+    gtid_executed = myhoard_util.parse_gtid_range_string(TAGGED_GTID_EXECUTED)
+    gtid_string = myhoard_util.make_gtid_range_string(
+        build_range_dict(key, start, end) for key, ranges in gtid_executed.items() for start, end in ranges
+    )
+    assert gtid_string == (
+        "17769a4d-44c2-422a-96d6-dd4507569e95:1-143208581,"
+        "17769a4d-44c2-422a-96d6-dd4507569e95:mysqlsh:1-100,"
+        "8c9dcf67-b9e5-11f1-aea1-7ad864d240c3:1-5085232,"
+        "a6517caf-ccf7-11f1-8cdc-7cd30ae703f0:1-15"
+    )
+    assert myhoard_util.parse_gtid_range_string(gtid_string) == gtid_executed
+
+
+def test_truncate_and_check_tagged_gtid_executed() -> None:
+    gtid_executed = myhoard_util.parse_gtid_range_string("uuid1:1-20:tag:1-10")
+    assert myhoard_util.are_gtids_in_executed_set(gtid_executed, [{"server_uuid": "uuid1:tag", "start": 5, "end": 10}])
+    assert not myhoard_util.are_gtids_in_executed_set(gtid_executed, [{"server_uuid": "uuid1:tag", "start": 5, "end": 11}])
+    myhoard_util.truncate_gtid_executed(gtid_executed, "uuid1:tag:4")
+    assert gtid_executed == {"uuid1": [[1, 20]], "uuid1:tag": [[1, 4]]}
+
+
 def test_encrypt_decrypt():
     private_key_pem, public_key_pem = generate_rsa_key_pair()
     for size in range(100):

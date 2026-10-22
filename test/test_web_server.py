@@ -5,6 +5,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
+from myhoard.util import parse_gtid_range_string
 from myhoard.web_server import WebServer
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -304,6 +305,16 @@ def test_validate_replication_state():
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}})
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}, "zob": {}})
     WebServer.validate_replication_state({"foo": {uuid1: [[1, 2], [3, 4]]}, "zob": {uuid2: []}})
+    WebServer.validate_replication_state({"foo": {uuid1: [[1, 2]], f"{uuid1}:mysqlsh": [[1, 100]]}})
+    with pytest.raises(BadRequest, match="has an empty tag"):
+        WebServer.validate_replication_state({"foo": {f"{uuid1}:": [[1, 2]]}})
+    with pytest.raises(BadRequest):
+        WebServer.validate_replication_state({"foo": {"bar:mysqlsh": [[1, 2]]}})
+
+
+def test_validate_replication_state_accepts_parsed_tagged_gtids() -> None:
+    gtid_executed = "75f1a562-cdfa-11f1-ab51-42010a840003:1-139:mysqlsh:1-100,\n81116436-cdfa-11f1-9ff3-42010a840057:1-48"
+    WebServer.validate_replication_state({"n1250": parse_gtid_range_string(gtid_executed)})
 
 
 async def test_backup_settings_paused_until(master_controller, web_client):
