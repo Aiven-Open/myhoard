@@ -1,5 +1,6 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .backup_stream import BackupStream, IncrementalBackupInfo, RemoteBinlogInfo
+from .basebackup_monitor import BasebackupMonitor
 from .binlog_scanner import BinlogScanner
 from .errors import BadRequest, UnknownBackupSite
 from .restore_coordinator import BinlogStream, RestoreCoordinator
@@ -262,6 +263,9 @@ class Controller(threading.Thread):
         state_file = os.path.join(state_dir, "myhoard_controller_state.json")
         self.state_manager = StateManager[Controller.State](lock=self.lock, state=self.state, state_file=state_file)
         self.stats = stats
+        self.basebackup_monitor = BasebackupMonitor(
+            state_file=os.path.join(state_dir, "basebackup_monitor.json"), stats=stats
+        )
         self.temp_dir = temp_dir
         self.wakeup_event = threading.Event()
         self.xtrabackup_settings = xtrabackup_settings
@@ -437,6 +441,7 @@ class Controller(threading.Thread):
     def run(self) -> None:
         self.log.info("Controller running")
         consecutive_unexpected_errors = 0
+        self.basebackup_monitor.start()
         if self.binlog_progress_tracker:
             self.binlog_progress_tracker.start()
         while self.is_running:
@@ -491,6 +496,7 @@ class Controller(threading.Thread):
             self.restore_coordinator.stop()
         for stream in self.backup_streams:
             stream.stop()
+        self.basebackup_monitor.stop()
         if self.binlog_progress_tracker:
             self.binlog_progress_tracker.stop()
         self.log.info("Controller stopped")
@@ -890,6 +896,7 @@ class Controller(threading.Thread):
         # data stored in local state file if available or in backup file storage if local state is not available
         return BackupStream(
             backup_reason=None,
+            basebackup_monitor=self.basebackup_monitor,
             binlog_progress_tracker=self.binlog_progress_tracker,
             compression=backup_site.get("compression"),
             file_storage_setup_fn=lambda: get_transfer(backup_site["object_storage"]),
@@ -1901,11 +1908,18 @@ class Controller(threading.Thread):
         if self.mode == self.Mode.active:
             interval *= self.BACKUP_REFRESH_ACTIVE_MULTIPLIER
 
-        if force_refresh is False and time.time() - self.state["backups_fetched_at"] < interval:
+        if (
+            not force_refresh
+            and not self.basebackup_monitor.needs_recovery
+            and (time.time() - self.state["backups_fetched_at"] < interval)
+        ):
             return None
 
         backups = self.get_backup_list(
             self.backup_sites, seen_basebackup_infos=self.seen_basebackup_infos, site_transfers=self.site_transfers
+        )
+        self.basebackup_monitor.reconcile(
+            [backup for backup in backups if not self.backup_sites[backup["site"]].get("recovery_only")]
         )
         new_backups_ids = {backup["stream_id"] for backup in backups}
         for backup in self.state["backups"]:
@@ -2161,6 +2175,7 @@ class Controller(threading.Thread):
         site_id, backup_site = self._get_upload_backup_site()
         stream = BackupStream(
             backup_reason=backup_reason,
+            basebackup_monitor=self.basebackup_monitor,
             binlog_progress_tracker=self.binlog_progress_tracker,
             binlogs=self.binlog_scanner.binlogs,
             compression=backup_site.get("compression"),

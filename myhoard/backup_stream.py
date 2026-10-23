@@ -1,6 +1,7 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from .append_only_state_manager import AppendOnlyStateManager
-from .basebackup_operation import BasebackupOperation
+from .basebackup_monitor import BasebackupMonitor, BasebackupProgress
+from .basebackup_operation import AbortRequested, BasebackupOperation
 from .binary_io_slice import BinaryIOSlice
 from .binlog_scanner import BinlogInfo
 from .errors import BlockMismatchError, XtraBackupError
@@ -166,6 +167,7 @@ class BackupStream(threading.Thread):
         self,
         *,
         backup_reason: Optional["BackupStream.BackupReason"],
+        basebackup_monitor: Optional[BasebackupMonitor] = None,
         binlog_progress_tracker: Optional[RateTracker] = None,
         binlogs: Optional[List[BinlogInfo]] = None,
         compression: Optional[Compression] = None,
@@ -199,6 +201,8 @@ class BackupStream(threading.Thread):
             else min(split_size, file_storage_setup_fn().calculate_max_unknown_file_size())
         )
         self.basebackup_operation: Optional[BasebackupOperation] = None
+        self.basebackup_monitor = basebackup_monitor
+        self.basebackup_attempt_progress: Optional[BasebackupProgress] = None
         self.basebackup_progress: Optional[Dict[str, Any]] = None
         self.compression = compression
         self.current_upload_index: Optional[int] = None
@@ -682,6 +686,8 @@ class BackupStream(threading.Thread):
 
     def _basebackup_progress_callback(self, **kwargs):
         self.basebackup_progress = kwargs
+        if self.basebackup_attempt_progress:
+            self.basebackup_attempt_progress.update(source="files", value=kwargs["processed_original_bytes"])
 
     def _basebackup_stream_handler(self, stream):
         file_storage = self.file_storage_setup_fn()
@@ -695,14 +701,18 @@ class BackupStream(threading.Thread):
         last_time = [time.monotonic()]
         last_value = [0]
         self.basebackup_bytes_uploaded = 0
+        attempt_progress = self.basebackup_attempt_progress
 
         def upload_progress(bytes_sent):
+            uploaded_bytes = self.basebackup_bytes_uploaded + bytes_sent
+            if attempt_progress:
+                attempt_progress.update(source="upload", value=uploaded_bytes)
             # Track both absolute number and explicitly calculated rate. The rate can be useful as
             # a separate measurement because uploads are not ongoing all the time and calculating
             # rate based on raw byte counter requires knowing when the operation started and ended
             self.stats.gauge_int(
                 "myhoard.backup_stream.basebackup_bytes_uploaded",
-                self.basebackup_bytes_uploaded + bytes_sent,
+                uploaded_bytes,
                 tags={"incremental": self.is_incremental},
             )
             last_value[0], last_time[0] = track_rate(
@@ -737,6 +747,8 @@ class BackupStream(threading.Thread):
             # changes in rohmu.
             uploaded_size = file_storage.get_file_size(storage_file_name)
             self.basebackup_bytes_uploaded += uploaded_size
+            if attempt_progress:
+                attempt_progress.update(source="upload", value=self.basebackup_bytes_uploaded)
 
             self.stats.gauge_int(
                 "myhoard.backup_stream.basebackup_bytes_uploaded",
@@ -1039,29 +1051,33 @@ class BackupStream(threading.Thread):
 
         start_time = time.time()
         encryption_key = os.urandom(24)
-        self.basebackup_operation = BasebackupOperation(
-            copy_threads=self.xtrabackup_settings["copy_threads"],
-            compress_threads=self.xtrabackup_settings["compress_threads"],
-            encrypt_threads=self.xtrabackup_settings["encrypt_threads"],
-            encryption_algorithm="AES256",
-            encryption_key=encryption_key,
-            estimate_memory=self.xtrabackup_settings["estimate_memory"],
-            lock_ddl=self.xtrabackup_settings["lock_ddl"],
-            mysql_client_params=self.mysql_client_params,
-            mysql_config_file_name=self.mysql_config_file_name,
-            mysql_data_directory=self.mysql_data_directory,
-            optimize_tables_before_backup=self.optimize_tables_before_backup,
-            progress_callback=self._basebackup_progress_callback,
-            register_redo_log_consumer=self.xtrabackup_settings["register_redo_log_consumer"],
-            stats=self.stats,
-            stream_handler=self._basebackup_stream_handler,
-            temp_dir=self.temp_dir,
-            throttle=self.xtrabackup_settings.get("throttle"),
-            incremental_since_checkpoint=(
-                self.incremental_backup_info.get("last_checkpoint") if self.incremental_backup_info else None
-            ),
-        )
         try:
+            if self.basebackup_monitor:
+                self.basebackup_attempt_progress = self.basebackup_monitor.begin(
+                    site=self.site, stream_id=self.stream_id, incremental=self.is_incremental
+                )
+            self.basebackup_operation = BasebackupOperation(
+                copy_threads=self.xtrabackup_settings["copy_threads"],
+                compress_threads=self.xtrabackup_settings["compress_threads"],
+                encrypt_threads=self.xtrabackup_settings["encrypt_threads"],
+                encryption_algorithm="AES256",
+                encryption_key=encryption_key,
+                estimate_memory=self.xtrabackup_settings["estimate_memory"],
+                lock_ddl=self.xtrabackup_settings["lock_ddl"],
+                mysql_client_params=self.mysql_client_params,
+                mysql_config_file_name=self.mysql_config_file_name,
+                mysql_data_directory=self.mysql_data_directory,
+                optimize_tables_before_backup=self.optimize_tables_before_backup,
+                progress_callback=self._basebackup_progress_callback,
+                register_redo_log_consumer=self.xtrabackup_settings["register_redo_log_consumer"],
+                stats=self.stats,
+                stream_handler=self._basebackup_stream_handler,
+                temp_dir=self.temp_dir,
+                throttle=self.xtrabackup_settings.get("throttle"),
+                incremental_since_checkpoint=(
+                    self.incremental_backup_info.get("last_checkpoint") if self.incremental_backup_info else None
+                ),
+            )
             self.basebackup_operation.create_backup()
             # Must flush binlogs immediately after taking basebackup to ensure the last
             # binlog that was being written while basebackup was created is backed up.
@@ -1142,6 +1158,8 @@ class BackupStream(threading.Thread):
                 self._build_full_name("basebackup.json"),
                 json.dumps(info).encode("utf-8"),
             )
+            if self.basebackup_monitor:
+                self.basebackup_monitor.finish(site=self.site, stream_id=self.stream_id, outcome="success")
             self.state_manager.update_state(
                 active_details={"phase": self.ActivePhase.binlog_catchup},
                 basebackup_info=info,
@@ -1166,6 +1184,10 @@ class BackupStream(threading.Thread):
                     uncompressed_size / compressed_size,
                     tags={"incremental": self.is_incremental},
                 )
+        except AbortRequested:
+            if self.basebackup_monitor:
+                self.basebackup_monitor.finish(site=self.site, stream_id=self.stream_id, outcome="shutdown")
+            self.log.info("Basebackup interrupted by shutdown")
         except (
             gaierror,
             GeneralProxyError,
@@ -1205,6 +1227,13 @@ class BackupStream(threading.Thread):
             if not isinstance(ex, XtraBackupError):
                 self.stats.unexpected_exception(ex=ex, where="BackupStream._take_basebackup")
         finally:
+            if self.basebackup_monitor:
+                # Failed attempts retain their existing error metrics, without being
+                # counted again as interruptions when the process next starts.
+                self.basebackup_monitor.finish(
+                    site=self.site, stream_id=self.stream_id, outcome="failed" if self.is_running else "shutdown"
+                )
+            self.basebackup_attempt_progress = None
             self.basebackup_operation = None
 
     def _upload_binlogs(self) -> None:

@@ -1,0 +1,29 @@
+# Example Prometheus rules. Map the StatsD names documented in README.md to
+# these metric names first; collector-specific suffixes are not assumed here.
+# All gauges must retain matching node/service labels. Select active nodes.
+groups:
+  - name: myhoard-basebackup
+    rules:
+      - alert: MyHoardBasebackupStalled
+        expr: |
+          (myhoard_basebackup_in_progress{controller_mode="active"} == 1)
+          and
+          (myhoard_basebackup_progress_age_seconds{controller_mode="active"} > 15 * 60)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Basebackup has stopped progressing"
+      - alert: MyHoardBasebackupInterrupted
+        expr: myhoard_basebackup_aborts_since_last_success{controller_mode="active"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Basebackup interrupted before completion"
+      - alert: MyHoardBasebackupRepeatedlyInterrupted
+        expr: myhoard_basebackup_aborts_since_last_success{controller_mode="active"} >= 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Repeated basebackup interruptions without success"

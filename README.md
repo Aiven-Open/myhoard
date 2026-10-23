@@ -1093,19 +1093,93 @@ determined while backup metadata is being fetched, so during the
 
 # Metrics
 
+## Basebackup progress and interruptions
+
+MyHoard reports the following gauges every 15 seconds through the existing
+StatsD client, including while no basebackup is running:
+
+| StatsD metric | Meaning |
+| --- | --- |
+| `myhoard.basebackup.in_progress` | 1 while at least one local basebackup attempt is active, otherwise 0. |
+| `myhoard.basebackup.progress_age_seconds` | Largest number of seconds since progress among active attempts; 0 when idle. |
+| `myhoard.basebackup.aborts_since_last_success` | Persisted interruption count; starting a retry does not clear it. |
+| `myhoard.basebackup.last_success_timestamp` | Unix timestamp of the last successful basebackup publication; 0 if none is known. |
+| `myhoard.basebackup.monitor_timestamp` | Unix timestamp of the latest monitoring report, including while idle. |
+
+`myhoard.backup_aborted` is a StatsD counter tagged with `reason` (`shutdown`
+or `process_restart`) and `incremental`. It records an interrupted basebackup
+attempt, rather than a normal resume of a published backup's binlog stream.
+Ordinary failures continue to use `myhoard.basebackup.errors`; they do not also
+increment the interruption count. A retry delay is not an active attempt.
+
+Monitoring starts before creating the basebackup operation and ends immediately
+after `basebackup.json` is successfully published. It excludes binlog catchup,
+streaming, and restores. Both full and incremental basebackups are monitored.
+Increasing uploaded bytes or completed-file bytes count as progress. Duplicate
+or decreasing callback values and arbitrary log output do not. Tracking upload
+bytes allows large files to keep reporting progress before file completion.
+Initial directory sizing, optional table optimization, and final metadata
+publication are within the monitored operation, but may have no byte progress;
+choose the inactivity threshold with their normal duration in mind.
+
+Callbacks only update byte high-water marks under a short counter lock; they do
+not read the clock, calculate inactivity, emit monitoring metrics, or write state.
+The monitoring thread samples counters once per second and reports metrics every
+15 seconds, even when upload callbacks or the controller are blocked. With a
+normally scheduled monitor, sampling can delay recognition of a stall by up to
+one second. Duplicate and decreasing callbacks do not refresh the sampled age.
+`basebackup_monitor.json` in the state directory stores attempt transitions and
+interruption history; it is not rewritten for every callback or periodic report.
+A failed write is logged and retried on subsequent reports. Restart detection
+requires this local state to survive the restart. Power-loss durability follows
+the existing atomic state-file implementation; this is not a transactional event
+log, and the UDP event counter is best effort. Use the persisted, periodically
+reported gauge for interruption alerts.
+
+After a process restart, outstanding attempts are reconciled against a fresh
+backup listing before non-resumable backups are cleaned up. Published, resumable
+basebackups are recognized as successful even if the process died before it
+could record local success. Unpublished attempts count once as interruptions.
+This reuses the normal backup listing (forcing an immediate refresh if recovery
+is pending), without adding storage requests to the upload path. The last
+success timestamp is initialized from existing resumable, non-broken backups
+when deploying monitoring for the first time.
+
+The gauges share the node/service labels from the configured StatsD tags and
+`controller_mode`; no stream or attempt IDs are added as metric labels.
+
+### Testing the monitor
+
+Run the focused pytest suite with:
+
+```sh
+python -m pytest -q test/test_basebackup_monitor.py
+```
+
+These tests run without MySQL or XtraBackup binaries. They cover progress and
+stall reporting, retry delays, failures, graceful shutdown, restart recovery,
+publication boundaries, split uploads, and persistence failures. They are also
+collected by the normal project-wide pytest run.
+
 The following metrics are exported by myhoard:
 
+**myhoard.backup_aborted**
 **myhoard.backup_stream.basebackup_bytes_uploaded**
 **myhoard.backup_stream.basebackup_requested**
 **myhoard.backup_stream.basebackup_upload_rate**
 **myhoard.backup_stream.binlog_upload_rate**
 **myhoard.backup_stream.errors**
+**myhoard.basebackup.aborts_since_last_success**
 **myhoard.basebackup.bytes_compressed**
 **myhoard.basebackup.bytes_uncompressed**
 **myhoard.basebackup.compression_ratio**
 **myhoard.basebackup.errors**
 **myhoard.basebackup.estimated_progress**
+**myhoard.basebackup.in_progress**
+**myhoard.basebackup.last_success_timestamp**
+**myhoard.basebackup.monitor_timestamp**
 **myhoard.basebackup.optimize_table**
+**myhoard.basebackup.progress_age_seconds**
 **myhoard.basebackup.xtrabackup_backup**
 **myhoard.basebackup_broken**
 **myhoard.basebackup_restore.xbstream_extract**

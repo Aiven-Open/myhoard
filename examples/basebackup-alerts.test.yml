@@ -1,0 +1,82 @@
+rule_files:
+  - basebackup-alerts.yml
+evaluation_interval: 1m
+tests:
+  - name: stalled backup fires after inactivity and confirmation; idle node is excluded
+    interval: 1m
+    input_series:
+      - series: 'myhoard_basebackup_in_progress{controller_mode="active", service_id="stalled"}'
+        values: '1x20'
+      - series: 'myhoard_basebackup_progress_age_seconds{controller_mode="active", service_id="stalled"}'
+        values: '0+60x20'
+      - series: 'myhoard_basebackup_in_progress{controller_mode="active", service_id="idle"}'
+        values: '0x20'
+      - series: 'myhoard_basebackup_progress_age_seconds{controller_mode="active", service_id="idle"}'
+        values: '0+60x20'
+      - series: 'myhoard_basebackup_in_progress{controller_mode="observe", service_id="standby"}'
+        values: '1x20'
+      - series: 'myhoard_basebackup_progress_age_seconds{controller_mode="observe", service_id="standby"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: MyHoardBasebackupStalled
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: MyHoardBasebackupStalled
+        exp_alerts:
+          - exp_labels:
+              controller_mode: active
+              service_id: stalled
+              severity: warning
+            exp_annotations:
+              summary: Basebackup has stopped progressing
+  - name: healthy long backup does not alert
+    interval: 1m
+    input_series:
+      - series: 'myhoard_basebackup_in_progress{controller_mode="active", service_id="healthy"}'
+        values: '1x1440'
+      - series: 'myhoard_basebackup_progress_age_seconds{controller_mode="active", service_id="healthy"}'
+        values: '10x1440'
+    alert_rule_test:
+      - eval_time: 24h
+        alertname: MyHoardBasebackupStalled
+        exp_alerts: []
+  - name: interruption remains visible across restart and clears on success
+    interval: 1m
+    input_series:
+      - series: 'myhoard_basebackup_aborts_since_last_success{controller_mode="active", service_id="interrupted"}'
+        values: '1x2 0x2'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MyHoardBasebackupInterrupted
+        exp_alerts:
+          - exp_labels:
+              controller_mode: active
+              service_id: interrupted
+              severity: warning
+            exp_annotations:
+              summary: Basebackup interrupted before completion
+      - eval_time: 3m
+        alertname: MyHoardBasebackupInterrupted
+        exp_alerts: []
+  - name: repeated interruptions escalate and resolve on success
+    interval: 1m
+    input_series:
+      - series: 'myhoard_basebackup_aborts_since_last_success{controller_mode="active", service_id="repeated"}'
+        values: '1 2 3x6 0x2'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MyHoardBasebackupRepeatedlyInterrupted
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: MyHoardBasebackupRepeatedlyInterrupted
+        exp_alerts:
+          - exp_labels:
+              controller_mode: active
+              service_id: repeated
+              severity: critical
+            exp_annotations:
+              summary: Repeated basebackup interruptions without success
+      - eval_time: 9m
+        alertname: MyHoardBasebackupRepeatedlyInterrupted
+        exp_alerts: []
