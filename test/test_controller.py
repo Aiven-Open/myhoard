@@ -1111,6 +1111,115 @@ def test_manual_backup_creation(master_controller):
     assert len(current_backups) == 5
 
 
+def test_backup_progress_reports_requested_backup_until_listed(master_controller) -> None:
+    mcontroller = master_controller[0]
+    mcontroller.switch_to_active_mode()
+    mcontroller.start()
+
+    def initial_backup_listed() -> None:
+        assert any(backup["completed_at"] for backup in mcontroller.state["backups"])
+        assert mcontroller.get_backup_progress() == {"backup_request": None, "backups_in_progress": []}
+
+    while_asserts(initial_backup_listed, timeout=15)
+    initial_stream_ids = {backup["stream_id"] for backup in mcontroller.state["backups"]}
+
+    mcontroller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested)
+    seen_phases = set()
+    created_at_by_stream_id = {}
+    start = time.monotonic()
+    while True:
+        with mcontroller.lock:
+            progress = mcontroller.get_backup_progress()
+            completed = [
+                backup
+                for backup in mcontroller.state["backups"]
+                if backup["completed_at"] and backup["stream_id"] not in initial_stream_ids
+            ]
+        in_progress = [backup for backup in progress["backups_in_progress"] if backup["stream_id"] not in initial_stream_ids]
+        # The request is in exactly one place at any time
+        assert [progress["backup_request"] is not None, bool(in_progress), bool(completed)].count(True) == 1, (
+            progress,
+            completed,
+        )
+        for backup in in_progress:
+            assert backup["backup_reason"] == BackupStream.BackupReason.requested
+            seen_phases.add(backup["phase"])
+            created_at_by_stream_id[backup["stream_id"]] = backup["created_at"]
+        if completed:
+            break
+        assert time.monotonic() - start < 30
+        time.sleep(0.01)
+
+    assert BackupStream.ActivePhase.basebackup in seen_phases
+    [backup] = completed
+    basebackup_info = cast(Dict[str, Any], backup["basebackup_info"])
+    assert created_at_by_stream_id[backup["stream_id"]] <= basebackup_info["start_ts"]
+
+
+def test_backup_progress_skips_inactive_closed_and_listed_streams(default_backup_site, mysql_empty, session_tmpdir) -> None:
+    controller = build_controller(
+        Controller,
+        default_backup_site=default_backup_site,
+        mysql_config=mysql_empty,
+        session_tmpdir=session_tmpdir,
+    )
+
+    def stream(stream_id: str, phase: BackupStream.ActivePhase | None, created_at: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            stream_id=stream_id,
+            active_phase=phase,
+            lock=contextlib.nullcontext(),
+            state={
+                "backup_reason": BackupStream.BackupReason.scheduled,
+                "normalized_backup_time": "2026-10-26T03:00:00+00:00",
+                "incremental": False,
+                "created_at": created_at,
+            },
+        )
+
+    controller.backup_streams = cast(
+        List[BackupStream],
+        [
+            stream("listed", BackupStream.ActivePhase.binlog, 1.0),
+            stream("observed", None, 2.0),
+            stream("closed", BackupStream.ActivePhase.none, 3.0),
+            stream("catching_up", BackupStream.ActivePhase.binlog_catchup, 6.0),
+            stream("taking_basebackup", BackupStream.ActivePhase.basebackup, 5.0),
+            stream("completed_not_listed", BackupStream.ActivePhase.binlog, 4.0),
+        ],
+    )
+    controller.state["backups"] = [
+        Backup(
+            basebackup_info=BaseBackup(end_ts=0.0, checkpoints_file_content=None, incremental=False, tool_version=None),
+            broken_at=None,
+            closed_at=None,
+            completed_at=1.5,
+            preserve_until=None,
+            recovery_site=False,
+            stream_id="listed",
+            resumable=True,
+            site="default",
+        )
+    ]
+
+    progress = controller.get_backup_progress()
+
+    assert progress["backup_request"] is None
+    assert [backup["stream_id"] for backup in progress["backups_in_progress"]] == [
+        "completed_not_listed",
+        "taking_basebackup",
+        "catching_up",
+    ]
+    assert progress["backups_in_progress"][1] == {
+        "stream_id": "taking_basebackup",
+        "backup_reason": BackupStream.BackupReason.scheduled,
+        "normalized_backup_time": "2026-10-26T03:00:00+00:00",
+        "incremental": False,
+        "created_at": 5.0,
+        "phase": BackupStream.ActivePhase.basebackup,
+    }
+
+
 def test_automatic_old_backup_recovery(default_backup_site, master_controller, mysql_empty, session_tmpdir):
     mcontroller, master = master_controller
 

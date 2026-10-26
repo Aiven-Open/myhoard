@@ -232,6 +232,7 @@ class WebServer:
                 {
                     "mode": self.controller.mode,
                     "latest_uploaded_binlog_index": self.controller.get_latest_uploaded_binlog_index(),
+                    **self.controller.get_backup_progress(),
                 }
             )
 

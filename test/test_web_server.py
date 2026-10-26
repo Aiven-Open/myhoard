@@ -123,6 +123,17 @@ async def test_status_show(master_controller, web_client):
     assert response["mode"] == Controller.Mode.idle
     # Nothing is backing up binlogs yet so there is no uploaded index to report
     assert response["latest_uploaded_binlog_index"] is None
+    assert response["backup_request"] is None
+    assert response["backups_in_progress"] == []
+    # The controller is not running, so the request stays pending
+    controller.mark_backup_requested(backup_reason=BackupStream.BackupReason.requested, incremental_requested=True)
+    response = await get_and_verify_json_body(web_client, "/status")
+    assert response["backup_request"] == {
+        "backup_reason": BackupStream.BackupReason.requested,
+        "incremental_requested": True,
+        "normalized_backup_time": controller.state["backup_request"]["normalized_backup_time"],
+    }
+    assert response["backups_in_progress"] == []
     controller.switch_to_active_mode()
     response = await get_and_verify_json_body(web_client, "/status")
     assert response["mode"] == Controller.Mode.promote
