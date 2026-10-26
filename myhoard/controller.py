@@ -76,6 +76,20 @@ class BackupRequest(TypedDict):
     incremental_requested: bool
 
 
+class BackupInProgress(TypedDict):
+    stream_id: str
+    backup_reason: BackupStream.BackupReason | None
+    normalized_backup_time: str | None
+    incremental: bool
+    created_at: float
+    phase: BackupStream.ActivePhase
+
+
+class BackupProgress(TypedDict):
+    backup_request: BackupRequest | None
+    backups_in_progress: List[BackupInProgress]
+
+
 class BackupSiteInfo(TypedDict):
     recovery_only: bool
     object_storage: Dict[str, str]
@@ -291,6 +305,40 @@ class Controller(threading.Thread):
             return None
         lowest = min(indexes)
         return lowest if lowest >= 0 else None
+
+    def get_backup_progress(self) -> BackupProgress:
+        """Basebackup request not yet taken by a stream and this node's backups that are not yet listed as completed.
+
+        Read under the controller lock, so an accepted request is in exactly one place: here as the pending request,
+        here as a backup in progress, or among the completed backups in the backup list. The stream takes over the
+        request in the same locked step that clears it, and a backup stays in progress until the list shows it
+        completed. A request that is in none of these places was dropped and is not on its way.
+        """
+        with self.lock:
+            backup_request = self.state["backup_request"]
+            completed_stream_ids = {backup["stream_id"] for backup in self.state["backups"] if backup["completed_at"]}
+            backups_in_progress: List[BackupInProgress] = []
+            for stream in self.backup_streams:
+                phase = stream.active_phase
+                # Not in active mode (None), closed, or already listed as completed
+                if phase is None or phase == BackupStream.ActivePhase.none or stream.stream_id in completed_stream_ids:
+                    continue
+                with stream.lock:
+                    backups_in_progress.append(
+                        {
+                            "stream_id": stream.stream_id,
+                            "backup_reason": stream.state["backup_reason"],
+                            "normalized_backup_time": stream.state["normalized_backup_time"],
+                            "incremental": stream.state["incremental"],
+                            "created_at": stream.state["created_at"],
+                            "phase": phase,
+                        }
+                    )
+        return {
+            # update_state() replaces the request rather than changing it in place, so no copy is needed
+            "backup_request": backup_request,
+            "backups_in_progress": sorted(backups_in_progress, key=lambda backup: backup["created_at"]),
+        }
 
     def is_safe_to_reload(self) -> bool:
         restore_coordinator = self.restore_coordinator

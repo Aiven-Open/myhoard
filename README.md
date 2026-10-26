@@ -842,13 +842,29 @@ Response on success echoes back the same data sent in the request.
 
 ## GET /status
 
-Returns current main mode of MyHoard and the binary log upload position.
-Response looks like this:
+Returns current main mode of MyHoard, the binary log upload position and the
+state of base backups that have been requested or started but are not yet
+listed as completed. Response looks like this:
 
 ```
 {
   "mode": "{active|idle|observe|promote|restore}",
-  "latest_uploaded_binlog_index": 123
+  "latest_uploaded_binlog_index": 123,
+  "backup_request": {
+    "backup_reason": "{requested|scheduled}",
+    "incremental_requested": false,
+    "normalized_backup_time": "2026-10-26T03:00:00+00:00"
+  },
+  "backups_in_progress": [
+    {
+      "backup_reason": "{requested|scheduled}",
+      "created_at": 1792998000.123,
+      "incremental": false,
+      "normalized_backup_time": "2026-10-26T03:00:00+00:00",
+      "phase": "{basebackup|binlog_catchup|binlog}",
+      "stream_id": "2026-10-26T10:00:00.123456+00:00_…"
+    }
+  ]
 }
 ```
 
@@ -877,6 +893,37 @@ does not move this value. On an idle server after a failover the value can
 therefore stay `null` until the next base backup. Treat `null` as "not
 confirmed", never as "nothing to back up". Poll it after `POST /backup` with
 `backup_type` `binlog` to learn when the returned `binlog_index` has landed.
+
+**backup_request** is the base backup request that MyHoard has accepted, from
+`POST /backup` or its own backup schedule, but has not started a backup for
+yet. It is `null` when there is none. MyHoard keeps a single request, so a new
+one either replaces the pending one or is folded into it. A node in `observe` mode keeps
+the request too and takes the backup if it is promoted.
+
+**backups_in_progress** lists the base backups this node is taking or finishing
+that are not yet listed as completed in `GET /backup`, oldest first. `phase` is
+`basebackup` while the base backup is being taken and uploaded,
+`binlog_catchup` while the new backup uploads the binary logs written since,
+and `binlog` for the moment between completion and the backup list refresh.
+`created_at` is when MyHoard started the backup for a request, so the
+completed backup's `basebackup_info.start_ts` is at or after it. Only `active`
+mode nodes take base backups, so the list is empty in other modes, except
+during promotion, when the new primary takes over the old primary's
+unfinished backups. It takes over only backups whose base backup is already
+uploaded, so these are listed in phase `binlog_catchup` and keep the old
+primary's `created_at`. A base backup the old primary was still taking is not
+continued.
+
+MyHoard moves a request from `backup_request` to `backups_in_progress`, and a
+backup from `backups_in_progress` to the completed backups in `GET /backup`,
+without a gap in between. A request that is in neither field and has no
+completed backup started at or after it in `GET /backup` is not on its way,
+for example because MyHoard was restarted while the base backup was being
+taken. Request it again.
+
+Read `GET /status` before `GET /backup`. A backup only moves forward, so one
+that completes between the two reads shows up in both, which is harmless. In
+the other order it can show up in neither and look lost.
 
 ## PUT /status
 
