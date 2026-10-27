@@ -1021,8 +1021,10 @@ class BackupStream(threading.Thread):
     def is_incremental(self) -> bool:
         return self.incremental_backup_info is not None
 
-    def _basebackup_tags(self, basebackup_operation: BasebackupOperation) -> dict[str, Any]:
-        return {"incremental": self.is_incremental, **lock_ddl_tags(basebackup_operation.lock_ddl_tag)}
+    def _basebackup_tags(self) -> dict[str, Any]:
+        # Only used inside _take_basebackup, which sets the operation before the backup starts
+        assert self.basebackup_operation is not None
+        return {"incremental": self.is_incremental, **lock_ddl_tags(self.basebackup_operation.lock_ddl_tag)}
 
     def _take_basebackup(self) -> None:
         assert self.file_storage is not None
@@ -1043,7 +1045,7 @@ class BackupStream(threading.Thread):
 
         start_time = time.time()
         encryption_key = os.urandom(24)
-        basebackup_operation = self.basebackup_operation = BasebackupOperation(
+        self.basebackup_operation = BasebackupOperation(
             copy_threads=self.xtrabackup_settings["copy_threads"],
             compress_threads=self.xtrabackup_settings["compress_threads"],
             encrypt_threads=self.xtrabackup_settings["encrypt_threads"],
@@ -1158,7 +1160,7 @@ class BackupStream(threading.Thread):
                 remote_gtid_executed=gtid_executed,
             )
             uncompressed_size = self.basebackup_operation.data_directory_size_end
-            size_tags = self._basebackup_tags(basebackup_operation)
+            size_tags = self._basebackup_tags()
             if uncompressed_size:
                 self.stats.gauge_int("myhoard.basebackup.bytes_uncompressed", uncompressed_size, tags=size_tags)
             if compressed_size:
@@ -1182,14 +1184,14 @@ class BackupStream(threading.Thread):
                 tags={
                     "ex": ex.__class__.__name__,
                     "reason": BaseBackupFailureReason.network_error,
-                    **self._basebackup_tags(basebackup_operation),
+                    **self._basebackup_tags(),
                 },
             )
             self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
 
-            tags = {"ex": ex.__class__.__name__, **self._basebackup_tags(basebackup_operation)}
+            tags = {"ex": ex.__class__.__name__, **self._basebackup_tags()}
             # explicitly tag block mismatch errors, this way we can relate high redo log activity to xtrabackup errors
             if isinstance(ex, BlockMismatchError):
                 tags["reason"] = BaseBackupFailureReason.block_mismatch_error
