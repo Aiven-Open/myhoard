@@ -435,7 +435,7 @@ class BasebackupRestoreOperation:
         self._last_emitted_prepare_pct = pct
         self._prepare_progress_callback(pct=pct)
         if pct is not None:
-            self.stats.gauge_int("myhoard.basebackup_restore.xtrabackup_prepare_progress", pct, tags=self.lock_ddl_tags)
+            self.stats.gauge_int("myhoard.basebackup_restore.xtrabackup_prepare_progress", pct)
 
     def _process_prepare_completed_line(self, line: str) -> Optional[int]:
         """Return the LSN from the shutdown line and record prepared_lsn, else None."""

@@ -151,8 +151,8 @@ class TestPrepareOutputParser:
             op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 700", "stderr")
             op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 703", "stderr")
         assert gauge.call_args_list == [
-            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0), {"tags": {}}),
-            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 40), {"tags": {}}),
+            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0), {}),
+            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 40), {}),
         ]
 
 
@@ -167,7 +167,7 @@ class TestPrepareOutputParser:
 )
 def test_restore_metrics_tagged_with_lock_ddl(tmp_path, lock_ddl: str | None, expected_tags: dict[str, str]) -> None:
     # pylint: disable=protected-access
-    op = _make_restore_op(prepare_progress_callback=lambda **kw: None, lock_ddl=lock_ddl)
+    op = _make_restore_op(lock_ddl=lock_ddl)
     # restore_backup deletes binlog.index and the binlogs it lists from target_dir, keep that out of the working directory
     op.target_dir = str(tmp_path)
     op.temp_dir = str(tmp_path)
@@ -178,13 +178,9 @@ def test_restore_metrics_tagged_with_lock_ddl(tmp_path, lock_ddl: str | None, ex
         patch.object(op, "_process_prepare_input_output"),
         patch.object(op, "_process_move_input_output"),
         patch.object(op.stats, "timing") as timing,
-        patch.object(op.stats, "gauge_int") as gauge_int,
     ):
         op.prepare_backup()
         op.restore_backup()
-        # prepare_backup resets the LSN bounds, set one so a scan line yields a progress gauge
-        op._prepare_last_lsn = 1000
-        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
 
     assert [(call.args[0], call.args[2]) for call in timing.call_args_list] == [
         ("myhoard.basebackup_restore.xbstream_extract", {"incremental": False, **expected_tags, "success": "1"}),
@@ -194,7 +190,6 @@ def test_restore_metrics_tagged_with_lock_ddl(tmp_path, lock_ddl: str | None, ex
         ),
         ("myhoard.basebackup_restore.xtrabackup_move", {**expected_tags, "success": "1"}),
     ]
-    gauge_int.assert_called_once_with("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0, tags=expected_tags)
 
 
 @pytest.mark.parametrize(
