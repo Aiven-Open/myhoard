@@ -4,6 +4,7 @@ from .util import (
     CHECKPOINT_FILENAME,
     find_extra_xtrabackup_executables,
     get_xtrabackup_version,
+    lock_ddl_tags,
     parse_version,
     parse_xtrabackup_info,
 )
@@ -52,6 +53,7 @@ class BasebackupRestoreOperation:
         target_dir: str,
         temp_dir: str,
         backup_tool_version: str | None = None,
+        lock_ddl: str | None = None,
         use_memory: Optional[int] = None,
         prepare_progress_callback: Optional[Callable[..., None]] = None,
     ):
@@ -74,6 +76,8 @@ class BasebackupRestoreOperation:
         self.use_memory = use_memory
         self.backup_xtrabackup_info: Dict[str, str] | None = None
         self.backup_tool_version = backup_tool_version
+        # The --lock-ddl mode the backup was taken with as recorded in basebackup.json, metrics are tagged with it if known
+        self.lock_ddl_tags = lock_ddl_tags(lock_ddl)
         # LSN bounds for prepare progress. Use last_lsn (redo stop LSN) over
         # to_lsn so the bar doesn't hit 100% before the redo tail is applied,
         # and scan_start (first observed scan-line LSN) over from_lsn so the
@@ -138,7 +142,8 @@ class BasebackupRestoreOperation:
                 ]
 
                 with self.stats.timing_manager(
-                    "myhoard.basebackup_restore.xbstream_extract", tags={"incremental": incremental}
+                    "myhoard.basebackup_restore.xbstream_extract",
+                    tags={"incremental": incremental, **self.lock_ddl_tags},
                 ):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -183,7 +188,12 @@ class BasebackupRestoreOperation:
                         )
                     command_line.extend(["--use-memory", str(self.use_memory)])
                 self._set_prepare_current_lsn(None)
-                with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_prepare"):
+                # apply_log_only skips the rollback of uncommitted transactions, so the prepares at the start of an
+                # incremental chain are cheaper than a full one and must not share a series with it
+                with self.stats.timing_manager(
+                    "myhoard.basebackup_restore.xtrabackup_prepare",
+                    tags={"incremental": incremental, "apply_log_only": apply_log_only, **self.lock_ddl_tags},
+                ):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                     ) as prepare:
@@ -222,7 +232,7 @@ class BasebackupRestoreOperation:
             "--target-dir",
             self.target_dir,
         ]
-        with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_move"):
+        with self.stats.timing_manager("myhoard.basebackup_restore.xtrabackup_move", tags=self.lock_ddl_tags):
             with subprocess.Popen(command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as move_back:
                 self.proc = move_back
                 self._process_move_input_output()
@@ -425,7 +435,7 @@ class BasebackupRestoreOperation:
         self._last_emitted_prepare_pct = pct
         self._prepare_progress_callback(pct=pct)
         if pct is not None:
-            self.stats.gauge_int("myhoard.basebackup_restore.xtrabackup_prepare_progress", pct)
+            self.stats.gauge_int("myhoard.basebackup_restore.xtrabackup_prepare_progress", pct, tags=self.lock_ddl_tags)
 
     def _process_prepare_completed_line(self, line: str) -> Optional[int]:
         """Return the LSN from the shutdown line and record prepared_lsn, else None."""

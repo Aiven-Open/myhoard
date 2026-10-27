@@ -1,12 +1,13 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 
 from . import build_statsd_client, generate_rsa_key_pair, MySQLConfig, wait_for_condition
-from myhoard.backup_stream import BackupStream
+from myhoard.backup_stream import BackupStream, BaseBackupFailureReason
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.controller import BackupSiteInfo, Controller
+from myhoard.errors import XtraBackupError
 from rohmu.object_storage.local import LocalTransfer
 from typing import cast, Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import datetime
 import json
@@ -165,6 +166,8 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         assert backup["resumable"]
         assert backup["site"] == "default"
         assert backup["basebackup_info"]["split_size"] == split_size
+        # lock_ddl is not configured, so xtrabackup ran with its default
+        assert backup["basebackup_info"]["lock_ddl"] == myhoard_util.LOCK_DDL_ON
         if split_size:
             expected_number_of_splits = math.ceil(backup["basebackup_info"]["compressed_size"] / float(split_size))
             assert backup["basebackup_info"]["number_of_splits"] == expected_number_of_splits
@@ -284,3 +287,53 @@ def test_old_format_stream_id_backward_compat():
     mixed = [old_id, new_id]
     mixed.sort()
     assert len(mixed) == 2
+
+
+@pytest.mark.parametrize(
+    ("lock_ddl_tag", "expected_lock_ddl_tags"),
+    [
+        (myhoard_util.LOCK_DDL_REDUCED, {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+        # the mode was not resolved, xtrabackup never ran
+        (None, {}),
+    ],
+)
+def test_basebackup_error_tagged_with_lock_ddl(session_tmpdir, lock_ddl_tag, expected_lock_ddl_tags):
+    # pylint: disable=protected-access
+    state_dir = session_tmpdir().strpath
+    _, public_key_pem = generate_rsa_key_pair()
+    bs = BackupStream(
+        backup_reason=BackupStream.BackupReason.requested,
+        file_storage_setup_fn=MagicMock,
+        mode=BackupStream.Mode.active,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory="",
+        normalized_backup_time="2019-02-25T08:20",
+        rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=os.path.join(state_dir, "backup_stream.remote_binlogs"),
+        server_id=1,
+        site="default",
+        state_file=os.path.join(state_dir, "backup_stream.json"),
+        stats=build_statsd_client(),
+        temp_dir=state_dir,
+        xtrabackup_settings={"lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+    )
+    bs.file_storage = MagicMock()
+    with (
+        patch("myhoard.backup_stream.BasebackupOperation") as basebackup_operation,
+        patch.object(bs.stats, "increase") as increase,
+    ):
+        basebackup_operation.return_value.lock_ddl_tag = lock_ddl_tag
+        basebackup_operation.return_value.create_backup.side_effect = XtraBackupError("xtrabackup failed with code 1")
+        bs._take_basebackup()
+
+    assert basebackup_operation.call_args.kwargs["lock_ddl"] == myhoard_util.LOCK_DDL_REDUCED
+    increase.assert_called_once_with(
+        "myhoard.basebackup.errors",
+        tags={
+            "ex": "XtraBackupError",
+            "incremental": False,
+            **expected_lock_ddl_tags,
+            "reason": BaseBackupFailureReason.xtrabackup_error,
+        },
+    )

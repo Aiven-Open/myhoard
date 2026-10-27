@@ -51,6 +51,17 @@ DEFAULT_XTRABACKUP_SETTINGS: dict[str, Any] = {
     "throttle": None,
 }
 
+
+def lock_ddl_tags(lock_ddl: str | None) -> dict[str, str]:
+    """The `lock_ddl` metric tag, left out when the mode is not known for sure.
+
+    On restore, backups taken before MyHoard recorded the mode in basebackup.json don't have it, and it can't be assumed:
+    they usually ran with xtrabackup's default ON, but MyHoard could already be configured to pass REDUCED. On backup,
+    the mode is not known if resolving it failed, xtrabackup never ran then
+    """
+    return {"lock_ddl": lock_ddl} if lock_ddl else {}
+
+
 # Indexes of this array are used for mapping the days (0..6), order is important
 DOW_ORDERED = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 CHECKPOINT_FILENAME = "xtrabackup_checkpoints"

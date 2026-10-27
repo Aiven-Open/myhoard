@@ -12,6 +12,7 @@ from myhoard.util import (
     get_replica_status,
     get_xtrabackup_version,
     GtidExecuted,
+    LOCK_DDL_ON,
     make_fs_metadata,
     mysql_cursor,
     parse_gtid_range_string,
@@ -1287,8 +1288,11 @@ def test_automatic_old_backup_recovery(default_backup_site, master_controller, m
             return new_controller.restore_coordinator and new_controller.restore_coordinator.is_complete()
 
         wait_for_condition(restore_complete, timeout=40)
-        new_controller.stats.increase.assert_any_call("myhoard.restore_errors", tags={"ex": "Exception"})
-        new_controller.stats.increase.assert_any_call("myhoard.basebackup_broken")
+        # lock_ddl is not configured, so the backup recorded xtrabackup's default and the restore is tagged with it
+        new_controller.stats.increase.assert_any_call(
+            "myhoard.restore_errors", tags={"ex": "Exception", "lock_ddl": LOCK_DDL_ON}
+        )
+        new_controller.stats.increase.assert_any_call("myhoard.basebackup_broken", tags={"lock_ddl": LOCK_DDL_ON})
     finally:
         new_controller.stop()
 

@@ -4,6 +4,7 @@ from .helpers.version import xtrabackup_version_to_string
 from myhoard.basebackup_operation import BasebackupOperation
 from myhoard.basebackup_restore_operation import BasebackupRestoreOperation
 from packaging.version import Version
+from typing import Any
 from unittest.mock import patch
 
 import myhoard.util as myhoard_util
@@ -18,7 +19,7 @@ import time
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
 
 
-def _make_restore_op(prepare_progress_callback=None):
+def _make_restore_op(prepare_progress_callback=None, **kwargs: Any):
     """Minimal BasebackupRestoreOperation for parser unit tests; no subprocess
     is launched."""
     return BasebackupRestoreOperation(
@@ -32,6 +33,7 @@ def _make_restore_op(prepare_progress_callback=None):
         target_dir="",
         temp_dir="",
         prepare_progress_callback=prepare_progress_callback,
+        **kwargs,
     )
 
 
@@ -149,9 +151,86 @@ class TestPrepareOutputParser:
             op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 700", "stderr")
             op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 703", "stderr")
         assert gauge.call_args_list == [
-            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0), {}),
-            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 40), {}),
+            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0), {"tags": {}}),
+            (("myhoard.basebackup_restore.xtrabackup_prepare_progress", 40), {"tags": {}}),
         ]
+
+
+@pytest.mark.parametrize(
+    ("lock_ddl", "expected_tags"),
+    [
+        (myhoard_util.LOCK_DDL_ON, {"lock_ddl": myhoard_util.LOCK_DDL_ON}),
+        (myhoard_util.LOCK_DDL_REDUCED, {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+        # a backup taken before MyHoard recorded the mode, which is not known for sure then
+        (None, {}),
+    ],
+)
+def test_restore_metrics_tagged_with_lock_ddl(tmp_path, lock_ddl: str | None, expected_tags: dict[str, str]) -> None:
+    # pylint: disable=protected-access
+    op = _make_restore_op(prepare_progress_callback=lambda **kw: None, lock_ddl=lock_ddl)
+    # restore_backup deletes binlog.index and the binlogs it lists from target_dir, keep that out of the working directory
+    op.target_dir = str(tmp_path)
+    op.temp_dir = str(tmp_path)
+    with (
+        patch("myhoard.basebackup_restore_operation.subprocess.Popen"),
+        patch("myhoard.basebackup_restore_operation.get_xtrabackup_version", return_value=(8, 4, 8, 1)),
+        patch.object(op, "_process_xbstream_input_output"),
+        patch.object(op, "_process_prepare_input_output"),
+        patch.object(op, "_process_move_input_output"),
+        patch.object(op.stats, "timing") as timing,
+        patch.object(op.stats, "gauge_int") as gauge_int,
+    ):
+        op.prepare_backup()
+        op.restore_backup()
+        # prepare_backup resets the LSN bounds, set one so a scan line yields a progress gauge
+        op._prepare_last_lsn = 1000
+        op._process_prepare_output_line(b"InnoDB: Doing recovery: scanned up to log sequence number 500", "stderr")
+
+    assert [(call.args[0], call.args[2]) for call in timing.call_args_list] == [
+        ("myhoard.basebackup_restore.xbstream_extract", {"incremental": False, **expected_tags, "success": "1"}),
+        (
+            "myhoard.basebackup_restore.xtrabackup_prepare",
+            {"incremental": False, "apply_log_only": False, **expected_tags, "success": "1"},
+        ),
+        ("myhoard.basebackup_restore.xtrabackup_move", {**expected_tags, "success": "1"}),
+    ]
+    gauge_int.assert_called_once_with("myhoard.basebackup_restore.xtrabackup_prepare_progress", 0, tags=expected_tags)
+
+
+@pytest.mark.parametrize(
+    ("incremental", "apply_log_only"),
+    [
+        # a single full restore
+        (False, False),
+        # the full backup at the start of a chain, prepared without the rollback phase
+        (False, True),
+        # an incremental in the middle of a chain
+        (True, True),
+        # the incremental restored last
+        (True, False),
+    ],
+)
+def test_prepare_timing_tagged_with_chain_position(tmp_path, incremental: bool, apply_log_only: bool) -> None:
+    op = _make_restore_op(lock_ddl=myhoard_util.LOCK_DDL_REDUCED)
+    op.temp_dir = str(tmp_path)
+    with (
+        patch("myhoard.basebackup_restore_operation.subprocess.Popen"),
+        patch("myhoard.basebackup_restore_operation.get_xtrabackup_version", return_value=(8, 4, 8, 1)),
+        patch.object(op, "_process_xbstream_input_output"),
+        patch.object(op, "_process_prepare_input_output"),
+        patch.object(op.stats, "timing") as timing,
+    ):
+        op.prepare_backup(incremental=incremental, apply_log_only=apply_log_only)
+
+    prepare_tags = [call.args[2] for call in timing.call_args_list if call.args[0].endswith(".xtrabackup_prepare")]
+    assert prepare_tags == [
+        {
+            "incremental": incremental,
+            "apply_log_only": apply_log_only,
+            "lock_ddl": myhoard_util.LOCK_DDL_REDUCED,
+            "success": "1",
+        }
+    ]
 
 
 def test_get_xtrabackup_cmd():

@@ -772,6 +772,126 @@ def test_on_prepare_progress_flips_phase_and_persists_pct(session_tmpdir):
     assert rc.state["basebackup_prepare_progress"] == 88
 
 
+@pytest.mark.parametrize(
+    ("basebackup_info", "required_backups", "expected_lock_ddl_tags"),
+    [
+        ({"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}, [], {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+        # a backup taken before MyHoard recorded the mode, which is not known for sure then
+        ({}, [], {}),
+        # an incremental chain taken with one mode is tagged with it
+        (
+            {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+            [
+                ("full", {"incremental": False, "lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+                ("inc1", {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+            ],
+            {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+        ),
+        (
+            {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_ON},
+            [("full", {"incremental": False, "lock_ddl": myhoard_util.LOCK_DDL_ON})],
+            {"lock_ddl": myhoard_util.LOCK_DDL_ON},
+        ),
+        # any REDUCED backup makes the chain REDUCED, e.g. the mode was switched after the full backup was taken with ON
+        (
+            {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+            [("full", {"incremental": False, "lock_ddl": myhoard_util.LOCK_DDL_ON})],
+            {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+        ),
+        (
+            {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_ON},
+            [
+                ("full", {"incremental": False, "lock_ddl": myhoard_util.LOCK_DDL_ON}),
+                ("inc1", {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+            ],
+            {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+        ),
+        # also when another backup of the chain has no recorded mode, the chain has a REDUCED backup for sure
+        (
+            {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+            [("full", {"incremental": False}), ("inc1", {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_ON})],
+            {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED},
+        ),
+        # without a REDUCED backup, one without a recorded mode leaves the chain untagged, it may have been REDUCED
+        (
+            {"incremental": True, "lock_ddl": myhoard_util.LOCK_DDL_ON},
+            [("full", {"incremental": False})],
+            {},
+        ),
+    ],
+)
+def test_restore_basebackup_tags_total_time_with_lock_ddl(
+    session_tmpdir,
+    basebackup_info: dict[str, Any],
+    required_backups: list[tuple[str, dict[str, Any]]],
+    expected_lock_ddl_tags: dict[str, str],
+) -> None:
+    rc = _make_minimal_coordinator(session_tmpdir)
+    rc.mysql_data_directory = os.path.join(session_tmpdir().strpath, "mysql-data")
+    rc.update_state(basebackup_info=basebackup_info, required_backups=required_backups)
+
+    with patch.object(rc, "_run_basebackup_restore_operation"), patch.object(rc.stats, "gauge_float") as gauge_float:
+        rc.restore_basebackup()
+
+    gauge_float.assert_called_once()
+    assert gauge_float.call_args.args[0] == "myhoard.basebackup_restore.total_time"
+    assert gauge_float.call_args.kwargs["tags"] == {"incremental": bool(required_backups), **expected_lock_ddl_tags}
+
+
+@pytest.mark.parametrize(
+    ("basebackup_info", "expected_lock_ddl_tags"),
+    [
+        ({"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}, {"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}),
+        ({}, {}),
+    ],
+)
+def test_restore_basebackup_errors_tagged_with_lock_ddl(
+    session_tmpdir, basebackup_info: dict[str, Any], expected_lock_ddl_tags: dict[str, str]
+) -> None:
+    rc = _make_minimal_coordinator(session_tmpdir)
+    rc.mysql_data_directory = os.path.join(session_tmpdir().strpath, "mysql-data")
+    rc.update_state(
+        basebackup_info=basebackup_info,
+        basebackup_restore_errors=RestoreCoordinator.MAX_BASEBACKUP_ERRORS - 1,
+    )
+
+    with (
+        patch.object(rc, "_run_basebackup_restore_operation", side_effect=InjectedError("prepare failed")),
+        patch.object(rc.stats, "increase") as increase,
+    ):
+        rc.restore_basebackup()
+
+    assert rc.state["phase"] == RestoreCoordinator.Phase.failed_basebackup
+    assert increase.call_args_list == [
+        (("myhoard.restore_errors",), {"tags": {"ex": "InjectedError", **expected_lock_ddl_tags}}),
+        (("myhoard.basebackup_broken",), {"tags": expected_lock_ddl_tags}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("backup_info", "expected_lock_ddl"),
+    [
+        ({"lock_ddl": myhoard_util.LOCK_DDL_REDUCED}, myhoard_util.LOCK_DDL_REDUCED),
+        # a backup taken before MyHoard recorded the mode
+        ({}, None),
+    ],
+)
+def test_run_basebackup_restore_operation_passes_lock_ddl(
+    session_tmpdir, backup_info: dict[str, Any], expected_lock_ddl: str | None
+) -> None:
+    # pylint: disable=protected-access
+    rc = _make_minimal_coordinator(session_tmpdir)
+    with (
+        patch("myhoard.restore_coordinator.rsa_decrypt_bytes", return_value=b"0" * 24),
+        patch("myhoard.restore_coordinator.BasebackupRestoreOperation") as restore_operation,
+    ):
+        rc._run_basebackup_restore_operation(
+            {"encryption_key": "00", **backup_info}, target_dir="", temp_dir="", stream_id="stream"
+        )
+
+    assert restore_operation.call_args.kwargs["lock_ddl"] == expected_lock_ddl
+
+
 def _build_range(server_uuid: str, start: int, end: int) -> GtidRangeDict:
     return {"server_uuid": server_uuid, "start": start, "end": end, "server_id": 0, "start_ts": 0, "end_ts": 0}
 

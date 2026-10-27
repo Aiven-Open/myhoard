@@ -8,6 +8,7 @@ from myhoard.util import (
     get_xtrabackup_version,
     LOCK_DDL_ON,
     LOCK_DDL_REDUCED,
+    lock_ddl_tags,
     mysql_cursor,
     parse_xtrabackup_info,
 )
@@ -97,6 +98,10 @@ class BasebackupOperation:
         self.has_block_mismatch = False
         # Case-insensitive like xtrabackup itself, so "reduced" doesn't silently fall back to xtrabackup's default
         self.lock_ddl = lock_ddl.upper() if lock_ddl is not None else None
+        # The `--lock-ddl` value passed to xtrabackup, see _resolve_lock_ddl. Resolved when the backup starts, None is
+        # also a resolved value so whether it was resolved is tracked separately
+        self.lock_ddl_option: str | None = None
+        self.lock_ddl_resolved = False
         self.log = logging.getLogger(self.__class__.__name__)
         self.incremental_since_checkpoint = incremental_since_checkpoint
         self.prev_checkpoint_dir = None
@@ -125,6 +130,9 @@ class BasebackupOperation:
 
     def create_backup(self):
         self.abort_reason = None
+        # Resolved before the first progress update so every metric of this backup is tagged with it
+        self.lock_ddl_option = self._resolve_lock_ddl()
+        self.lock_ddl_resolved = True
         self.data_directory_size_start, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress()
         if self.optimize_tables_before_backup:
@@ -161,7 +169,7 @@ class BasebackupOperation:
 
                 with self.stats.timing_manager(
                     "myhoard.basebackup.xtrabackup_backup",
-                    tags={"incremental": self.is_incremental()},
+                    tags={"incremental": self.is_incremental(), **lock_ddl_tags(self.lock_ddl_tag)},
                 ):
                     with subprocess.Popen(
                         command_line, bufsize=0, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -202,13 +210,21 @@ class BasebackupOperation:
         if self.estimate_memory:
             command_line.append("--estimate-memory=ON")
 
-        if lock_ddl := self._resolve_lock_ddl():
-            command_line.append(f"--lock-ddl={lock_ddl}")
+        if self.lock_ddl_option:
+            command_line.append(f"--lock-ddl={self.lock_ddl_option}")
 
         if throttle := self._resolve_throttle():
             command_line.append(f"--throttle={throttle}")
 
         return command_line
+
+    @property
+    def lock_ddl_tag(self) -> str | None:
+        """The mode xtrabackup runs with, its default ON when the option is left out, which includes REDUCED falling
+        back on an old xtrabackup. None if the mode was not resolved, xtrabackup is never started then"""
+        if not self.lock_ddl_resolved:
+            return None
+        return self.lock_ddl_option or LOCK_DDL_ON
 
     def _resolve_lock_ddl(self) -> str | None:
         """Resolves the `--lock-ddl` value to put on the command line, or None to leave the option out.
@@ -541,7 +557,9 @@ class BasebackupOperation:
             estimated_progress,
         )
         self.stats.gauge_float(
-            "myhoard.basebackup.estimated_progress", estimated_progress, tags={"incremental": self.is_incremental()}
+            "myhoard.basebackup.estimated_progress",
+            estimated_progress,
+            tags={"incremental": self.is_incremental(), **lock_ddl_tags(self.lock_ddl_tag)},
         )
 
         if self.progress_callback:

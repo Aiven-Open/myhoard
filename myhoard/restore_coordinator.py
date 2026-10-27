@@ -19,6 +19,9 @@ from .util import (
     get_xtrabackup_version,
     GtidExecuted,
     GtidRangeDict,
+    LOCK_DDL_ON,
+    LOCK_DDL_REDUCED,
+    lock_ddl_tags,
     make_gtid_range_string,
     mysql_cursor,
     parse_fs_metadata,
@@ -628,6 +631,7 @@ class RestoreCoordinator(threading.Thread):
             free_memory_percentage=self.free_memory_percentage,
             use_memory=self.use_memory,
             backup_tool_version=backup_info.get("tool_version"),
+            lock_ddl=backup_info.get("lock_ddl"),
             prepare_progress_callback=self._on_prepare_progress,
         )
         try:
@@ -662,6 +666,7 @@ class RestoreCoordinator(threading.Thread):
         start_time = time.monotonic()
         restore_basebackup_info = self.state["basebackup_info"]
         required_backups = self.state.get("required_backups", [])
+        chain_lock_ddl_tags = lock_ddl_tags(self._chain_lock_ddl(restore_basebackup_info, required_backups))
 
         last_tool_version: str | None = None
         self.basebackup_bytes_downloaded = 0
@@ -717,7 +722,9 @@ class RestoreCoordinator(threading.Thread):
 
                 self.log.info("Basebackup fully restored in %.2f seconds", duration)
                 self.stats.gauge_float(
-                    "myhoard.basebackup_restore.total_time", duration, tags={"incremental": len(required_backups) > 0}
+                    "myhoard.basebackup_restore.total_time",
+                    duration,
+                    tags={"incremental": len(required_backups) > 0, **chain_lock_ddl_tags},
                 )
 
                 next_phase = self.Phase.rebuilding_tables if self.should_rebuild_tables else self.Phase.refreshing_binlogs
@@ -732,19 +739,38 @@ class RestoreCoordinator(threading.Thread):
                 self.log.exception("Failed to restore basebackup: %r", ex)
                 self.state_manager.increment_counter(name="basebackup_restore_errors")
                 self.state_manager.increment_counter(name="restore_errors")
-                self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__})
+                self.stats.increase("myhoard.restore_errors", tags={"ex": ex.__class__.__name__, **chain_lock_ddl_tags})
                 if self.state["basebackup_restore_errors"] >= self.MAX_BASEBACKUP_ERRORS:
                     self.log.error(
                         "Restoring basebackup failed %s times, assuming the backup is broken", self.MAX_BASEBACKUP_ERRORS
                     )
                     self.update_state(phase=self.Phase.failed_basebackup)
-                    self.stats.increase("myhoard.basebackup_broken")
+                    self.stats.increase("myhoard.basebackup_broken", tags=chain_lock_ddl_tags)
             finally:
                 if self.basebackup_restore_operation:
                     self.update_state(
                         backup_xtrabackup_version=parse_version(last_tool_version) if last_tool_version else None
                     )
                     self.basebackup_restore_operation = None
+
+    @staticmethod
+    def _chain_lock_ddl(basebackup_info: Dict[str, Any], required_backups: List[Any]) -> str | None:
+        """The --lock-ddl mode of a whole restore, including the backups of an incremental chain before it.
+
+        REDUCED if any backup of the chain was taken with REDUCED, since what these metrics are for is seeing whether
+        REDUCED has an impact. A chain can span days, e.g. a weekly full backup with daily incrementals, so after the
+        mode is switched the full backup may still have been taken with ON. The per-step metrics of
+        BasebackupRestoreOperation carry each backup's own mode.
+
+        ON only if every backup of the chain is known to be ON. None if there is no REDUCED backup but one was taken
+        before MyHoard recorded the mode, which may have been REDUCED.
+        """
+        modes = [info.get("lock_ddl") for _, info in required_backups] + [basebackup_info.get("lock_ddl")]
+        if LOCK_DDL_REDUCED in modes:
+            return LOCK_DDL_REDUCED
+        if not all(modes):
+            return None
+        return LOCK_DDL_ON
 
     def rebuild_tables(self) -> None:
         excluded_tables = {
