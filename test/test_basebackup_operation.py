@@ -350,12 +350,69 @@ def test_build_backup_command_line_lock_ddl(
 ) -> None:
     op = _make_backup_op(lock_ddl=lock_ddl)
     with patch("myhoard.basebackup_operation.get_xtrabackup_version", return_value=xtrabackup_version):
+        # create_backup resolves it before building the command line
+        op.lock_ddl_option = op._resolve_lock_ddl()  # pylint: disable=protected-access
         command_line = op._build_backup_command_line(  # pylint: disable=protected-access
             mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
         )
 
     lock_ddl_options = [option for option in command_line if option.startswith("--lock-ddl")]
     assert lock_ddl_options == ([expected_option] if expected_option else [])
+
+
+@pytest.mark.parametrize(
+    ("lock_ddl", "xtrabackup_version", "expected_tag"),
+    [
+        # not set: no --lock-ddl is passed and xtrabackup's default applies, which is ON
+        (None, (8, 4, 8, 1), myhoard_util.LOCK_DDL_ON),
+        (myhoard_util.LOCK_DDL_ON, (8, 4, 8, 1), myhoard_util.LOCK_DDL_ON),
+        (myhoard_util.LOCK_DDL_REDUCED, (8, 4, 8, 1), myhoard_util.LOCK_DDL_REDUCED),
+        # REDUCED is not passed on 8.0 so the backup runs with xtrabackup's default, the tag must say so
+        (myhoard_util.LOCK_DDL_REDUCED, (8, 0, 35, 30), myhoard_util.LOCK_DDL_ON),
+    ],
+)
+def test_create_backup_tags_metrics_with_lock_ddl(
+    tmp_path, lock_ddl: str | None, xtrabackup_version: myhoard_util.BinVersion, expected_tag: str
+) -> None:
+    op = _make_backup_op(lock_ddl=lock_ddl)
+    op.temp_dir_base = str(tmp_path)
+    with (
+        patch("myhoard.basebackup_operation.get_xtrabackup_version", return_value=xtrabackup_version) as get_version,
+        patch("myhoard.basebackup_operation.subprocess.Popen"),
+        patch.object(op, "_get_data_directory_size", return_value=(0, 0)),
+        patch.object(op, "_process_input_output"),
+        patch.object(op.stats, "timing") as timing,
+        patch.object(op.stats, "gauge_float") as gauge_float,
+    ):
+        op.create_backup()
+
+    assert op.lock_ddl_tag == expected_tag
+    # the tag and the command line come from the same resolution, done once
+    assert get_version.call_count <= 1
+    metric, _duration, tags = timing.call_args.args
+    assert metric == "myhoard.basebackup.xtrabackup_backup"
+    assert tags["lock_ddl"] == expected_tag
+    # both the initial and the final progress update, so none goes out untagged
+    assert [call.args[:2] for call in gauge_float.call_args_list] == [
+        ("myhoard.basebackup.estimated_progress", 0),
+        ("myhoard.basebackup.estimated_progress", 100),
+    ]
+    assert all(call.kwargs["tags"]["lock_ddl"] == expected_tag for call in gauge_float.call_args_list)
+
+
+def test_create_backup_without_resolved_lock_ddl_has_no_tag(tmp_path) -> None:
+    op = _make_backup_op(lock_ddl=myhoard_util.LOCK_DDL_REDUCED)
+    op.temp_dir_base = str(tmp_path)
+    with (
+        patch("myhoard.basebackup_operation.get_xtrabackup_version", side_effect=FileNotFoundError("xtrabackup")),
+        patch("myhoard.basebackup_operation.subprocess.Popen") as popen,
+        pytest.raises(FileNotFoundError),
+    ):
+        op.create_backup()
+
+    # xtrabackup never ran, so there is no mode to report
+    popen.assert_not_called()
+    assert op.lock_ddl_tag is None
 
 
 @pytest.mark.parametrize(

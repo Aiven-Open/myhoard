@@ -14,6 +14,7 @@ from .util import (
     file_name_for_basebackup_split,
     first_contains_gtids_not_in_second,
     GtidExecuted,
+    lock_ddl_tags,
     make_fs_metadata,
     mysql_cursor,
     parse_fs_metadata,
@@ -1020,6 +1021,11 @@ class BackupStream(threading.Thread):
     def is_incremental(self) -> bool:
         return self.incremental_backup_info is not None
 
+    def _basebackup_tags(self) -> dict[str, Any]:
+        # Only used inside _take_basebackup, which sets the operation before the backup starts
+        assert self.basebackup_operation is not None
+        return {"incremental": self.is_incremental, **lock_ddl_tags(self.basebackup_operation.lock_ddl_tag)}
+
     def _take_basebackup(self) -> None:
         assert self.file_storage is not None
         if self.last_basebackup_attempt is not None:
@@ -1128,6 +1134,8 @@ class BackupStream(threading.Thread):
                     self.incremental_backup_info.get("required_streams") if self.incremental_backup_info else None
                 ),
                 "initiated_at": self.created_at,
+                # The --lock-ddl mode the backup ran with, so the restore metrics can be tagged with it
+                "lock_ddl": self.basebackup_operation.lock_ddl_tag,
                 "lsn_info": self.basebackup_operation.lsn_info,
                 "normalized_backup_time": self.state["normalized_backup_time"],
                 "number_of_files": self.basebackup_operation.number_of_files,
@@ -1152,19 +1160,14 @@ class BackupStream(threading.Thread):
                 remote_gtid_executed=gtid_executed,
             )
             uncompressed_size = self.basebackup_operation.data_directory_size_end
+            size_tags = self._basebackup_tags()
             if uncompressed_size:
-                self.stats.gauge_int(
-                    "myhoard.basebackup.bytes_uncompressed", uncompressed_size, tags={"incremental": self.is_incremental}
-                )
+                self.stats.gauge_int("myhoard.basebackup.bytes_uncompressed", uncompressed_size, tags=size_tags)
             if compressed_size:
-                self.stats.gauge_int(
-                    "myhoard.basebackup.bytes_compressed", compressed_size, tags={"incremental": self.is_incremental}
-                )
+                self.stats.gauge_int("myhoard.basebackup.bytes_compressed", compressed_size, tags=size_tags)
             if uncompressed_size and compressed_size:
                 self.stats.gauge_float(
-                    "myhoard.basebackup.compression_ratio",
-                    uncompressed_size / compressed_size,
-                    tags={"incremental": self.is_incremental},
+                    "myhoard.basebackup.compression_ratio", uncompressed_size / compressed_size, tags=size_tags
                 )
         except (
             gaierror,
@@ -1181,14 +1184,14 @@ class BackupStream(threading.Thread):
                 tags={
                     "ex": ex.__class__.__name__,
                     "reason": BaseBackupFailureReason.network_error,
-                    "incremental": self.is_incremental,
+                    **self._basebackup_tags(),
                 },
             )
             self.last_basebackup_attempt = time.monotonic()
         except Exception as ex:  # pylint: disable=broad-except
             self.log.exception("Failed to take basebackup")
 
-            tags = {"ex": ex.__class__.__name__, "incremental": self.is_incremental}
+            tags = {"ex": ex.__class__.__name__, **self._basebackup_tags()}
             # explicitly tag block mismatch errors, this way we can relate high redo log activity to xtrabackup errors
             if isinstance(ex, BlockMismatchError):
                 tags["reason"] = BaseBackupFailureReason.block_mismatch_error
