@@ -389,6 +389,14 @@ The full path and file name prefix of relay logs. This must be the same as the
 corresponding MySQL configuration option except full path is always required
 here.
 
+**recovery_window_audit_interval**
+
+Interval in seconds between automatic point-in-time recovery window audits,
+see `GET /status/pitr`. Each audit lists all remote binary log and metadata
+objects, so choose an interval that suits the amount of retained history, e.g.
+`3600`. Defaults to `null`, which disables automatic audits; an audit then only
+runs when `GET /status/pitr` is called.
+
 **restore_auto_mark_backups_broken**
 
 Boolean value. Enables a mechanism to automatically mark backups as broken if restoration fails for
@@ -557,16 +565,28 @@ format is as follows:
       "closed_at": "2019-05-23T06:29:10.041489Z",
       "completed_at": "2019-05-22T06:29:20.582302Z",
       "recovery_site": false,
+      "recovery_window": {
+        "start": 1558506560.582302,
+        "end": 1558592942
+      },
       "resumable": true,
       "site": "{backup_site_name}",
       "stream_id": "{backup_identifier}"
     }
-  ]
+  ],
+  "recovery_window_checked_at": 1558593000.123456
 }
 ```
 
 In case MyHoard has not yet finished fetching the list of backups the root
 level `"backups"` value will be `null`.
+
+**recovery_window_checked_at**
+
+Unix timestamp of the recovery window audit that the `recovery_window` values
+come from, or `null` if no audit has run yet. Listing backups never runs an
+audit; see `recovery_window_audit_interval` and `GET /status/pitr`. Check this
+value for staleness: if an audit fails, the previous result is kept.
 
 **basebackup_info**
 
@@ -583,6 +603,17 @@ active and new binary logs are still being uploaded to it.
 **recovery_site**
 
 Tells whether the backup site this backup is stored into is recovery only.
+
+**recovery_window**
+
+The verified point-in-time recovery interval of this backup from the latest
+audit, as Unix timestamps in UTC: a `PUT /status` restore of this
+`stream_id` can reach any `target_time` between `start` and `end`. `start` is the
+basebackup `end_ts` and `end` is the last binary log transaction timestamp
+reached before any gap. `null` when no audit has run, when the backup was
+created after the latest audit, or when the audit found no usable coverage for
+it (incomplete, broken or otherwise excluded backup, no binary logs, or a gap
+immediately after the basebackup). See `GET /status/pitr` for gap details.
 
 **resumable**
 
@@ -850,6 +881,108 @@ does not move this value. On an idle server after a failover the value can
 therefore stay `null` until the next base backup. Treat `null` as "not
 confirmed", never as "nothing to back up". Poll it after `POST /backup` with
 `backup_type` `binlog` to learn when the returned `binlog_index` has landed.
+
+## GET /status/pitr
+
+Audit PITR coverage directly in object storage, separately for each configured
+backup site. Returns the latest audit result; when there is none yet or when
+called with `?refresh=true` a new audit runs first. Audits also run in the
+background every `recovery_window_audit_interval` seconds when configured:
+
+```sh
+curl --fail http://localhost:16001/status/pitr
+curl --fail 'http://localhost:16001/status/pitr?refresh=true'
+```
+
+Example response (timestamps are Unix seconds in UTC):
+
+```json
+{
+  "checked_at": 1770000120,
+  "sites": {
+    "default": {
+      "window": {
+        "start": 1769900000,
+        "end": 1770000000,
+        "backups": [
+          {"stream_id": "older", "start": 1769900000, "end": 1769990000},
+          {"stream_id": "newer", "start": 1769980000, "end": 1770000000}
+        ]
+      },
+      "windows": [
+        {
+          "start": 1769900000,
+          "end": 1770000000,
+          "backups": [
+            {"stream_id": "older", "start": 1769900000, "end": 1769990000},
+            {"stream_id": "newer", "start": 1769980000, "end": 1770000000}
+          ]
+        }
+      ],
+      "backup_windows": {
+        "older": {"start": 1769900000, "end": 1769990000},
+        "newer": {"start": 1769980000, "end": 1770000000}
+      },
+      "latest_binlog_timestamp": 1770000000,
+      "time_since_latest_binlog": 120,
+      "gaps": [],
+      "excluded_backups": [],
+      "errors": []
+    }
+  }
+}
+```
+
+`window` is the longest continuous coverage ending at the latest observed
+uploaded binlog transaction timestamp. Its start is a completed basebackup's
+`end_ts`. Overlapping usable backup windows are combined; for a restore, select
+a backup from `backups` whose individual interval contains the target time.
+This does not mean that the oldest backup alone can restore the whole window.
+Incomplete or broken basebackups, missing split files, and incremental backups
+without their required base chain cannot provide coverage.
+
+The audit applies primary-promotion rules and checks remote binlog sequence
+numbers and GTID continuity from each basebackup. At a gap, coverage from that
+backup stops before the missing data. A later usable basebackup can establish
+a new window. `gaps` identifies affected streams and missing sequence or GTID
+ranges, including gaps outside the current window. `excluded_backups` lists
+completed streams with unusable basebackup data or dependencies.
+
+`windows` lists all continuous coverage intervals in chronological order,
+including older ones that end at a gap; restoring to a time between two
+windows is not possible. `backup_windows` gives the interval of each individual
+backup (`null` when it provides no coverage); these are also returned by
+`GET /backup`.
+
+`window: null` means no verified continuous coverage reaches the latest observed
+binlog, or no basebackup with uploaded binlogs is available. Treat an HTTP error
+as an unsuccessful audit, not as an empty or healthy recovery window.
+
+A stream whose metadata cannot be read (for example a missing initial
+promotion) is listed in `errors` and skipped, without failing the audit of the
+other streams. As such a stream may hide newer binlogs, `window` is `null`
+unless every failed stream was closed before the window ends.
+
+Each audit sends the `myhoard.pitr.window_available`, `myhoard.pitr.gaps`,
+`myhoard.pitr.errors` and `myhoard.pitr.time_since_latest_binlog` gauges tagged
+with `site`; failed background audits increment `myhoard.pitr.audit_errors`.
+
+The upper bound is **not now**: unrotated or unuploaded transactions are not
+protected. `time_since_latest_binlog` is the age of the latest observed binlog
+transaction, not upload delay; an idle database can have a large value. To
+establish a fresh upload checkpoint, use `POST /backup` with
+`backup_type: "binlog"` and poll `GET /status` until
+`latest_uploaded_binlog_index` covers the returned `binlog_index`, then audit.
+
+Every audit lists remote binlog buckets and metadata, so its cost grows with
+retained history. Audits run outside the HTTP event loop and never
+concurrently. This is a metadata
+audit, not a restore test or payload integrity check, and listings are not an
+atomic storage snapshot. Missing first/intermediate binlogs are detected from
+sequence numbers. Deleted tail binlogs can also be detected when the running
+MyHoard retains their upload records, but a tail never observed by this instance
+cannot be distinguished from a stream that stopped uploading. Timestamp bounds
+use binlog transaction timestamps and assume consistent source clocks.
 
 ## PUT /status
 

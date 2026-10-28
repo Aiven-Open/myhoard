@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import json
 import pytest
+import threading
 import uuid
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -65,7 +66,7 @@ async def test_backup_list(master_controller, web_client):
     controller = master_controller[0]
     response = await get_and_verify_json_body(web_client, "/backup")
     # backups is None when backend hasn't listed backups from file storage yet
-    assert response == {"backups": None}
+    assert response == {"backups": None, "recovery_window_checked_at": None}
 
     async def backup_list_not_none():
         assert (await get_and_verify_json_body(web_client, "/backup"))["backups"] is not None
@@ -94,6 +95,7 @@ async def test_backup_list(master_controller, web_client):
             "completed_at",
             "preserve_until",
             "recovery_site",
+            "recovery_window",
             "resumable",
             "site",
             "stream_id",
@@ -114,6 +116,55 @@ async def test_replication_state_set(master_controller, web_client):
     assert response == state
     assert controller.state["replication_state"] == state
     await put_and_verify_json_body(web_client, "/replication_state", {"foo": "bar"}, expected_status=400)
+
+
+async def test_pitr_status_show(aiohttp_client):
+    controller = Mock()
+    expected = {"checked_at": 100, "sites": {"default": {"window": None, "gaps": []}}}
+    event_loop_thread = threading.get_ident()
+
+    def audit(*, refresh):  # pylint: disable=unused-argument
+        assert threading.get_ident() != event_loop_thread
+        return expected
+
+    controller.get_recovery_window.side_effect = audit
+    server = WebServer(controller=controller, http_port=-1, stats=build_statsd_client())
+    client = await aiohttp_client(server.app)
+    assert await get_and_verify_json_body(client, "/status/pitr") == expected
+    controller.get_recovery_window.assert_called_once_with(refresh=False)
+    assert await get_and_verify_json_body(client, "/status/pitr?refresh=true") == expected
+    controller.get_recovery_window.assert_called_with(refresh=True)
+
+
+async def test_backup_list_includes_recovery_windows(aiohttp_client):
+    controller = Mock()
+    controller.lock = threading.RLock()
+    controller.state = {
+        "backups_fetched_at": 1,
+        "backups": [{"site": "default", "stream_id": "a"}, {"site": "default", "stream_id": "b"}],
+    }
+    controller.get_backup_recovery_windows.return_value = (100, {("default", "a"): {"start": 10, "end": 20}})
+    server = WebServer(controller=controller, http_port=-1, stats=build_statsd_client())
+    client = await aiohttp_client(server.app)
+    response = await get_and_verify_json_body(client, "/backup?order=asc")
+    assert response == {
+        "backups": [
+            {"site": "default", "stream_id": "a", "recovery_window": {"start": 10, "end": 20}},
+            {"site": "default", "stream_id": "b", "recovery_window": None},
+        ],
+        "recovery_window_checked_at": 100,
+    }
+    # Cached controller state must not be modified
+    assert "recovery_window" not in controller.state["backups"][0]
+
+
+async def test_pitr_status_storage_error(aiohttp_client):
+    controller = Mock()
+    controller.get_recovery_window.side_effect = RuntimeError("Remote listing failed")
+    server = WebServer(controller=controller, http_port=-1, stats=build_statsd_client())
+    client = await aiohttp_client(server.app)
+    response = await get_and_verify_json_body(client, "/status/pitr", expected_status=500)
+    assert response["message"] == "Remote listing failed"
 
 
 async def test_status_show(master_controller, web_client):

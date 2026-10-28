@@ -81,19 +81,29 @@ class WebServer:
     async def backup_list(self, _request):
         with self._handle_request(name="backup_list"):
             order = _request.rel_url.query.get("order")
+            checked_at, recovery_windows = self.controller.get_backup_recovery_windows()
             response = {
                 "backups": None,
+                "recovery_window_checked_at": checked_at,
             }
             with self.controller.lock:
                 if self.controller.state["backups_fetched_at"]:
+                    backups = [
+                        dict(backup, recovery_window=recovery_windows.get((backup["site"], backup["stream_id"])))
+                        for backup in self.controller.state["backups"]
+                    ]
                     if order is None:
-                        response["backups"] = self.controller.state["backups"]
+                        response["backups"] = backups
                     else:
-                        response["backups"] = sorted(
-                            self.controller.state["backups"], key=lambda b: b["stream_id"], reverse=order.lower() != "asc"
-                        )
+                        response["backups"] = sorted(backups, key=lambda b: b["stream_id"], reverse=order.lower() != "asc")
 
                 return json_response(response)
+
+    async def pitr_status_show(self, request):
+        with self._handle_request(name="pitr_status_show"):
+            refresh = request.rel_url.query.get("refresh", "").lower() in {"1", "true", "yes"}
+            response = await asyncio.to_thread(self.controller.get_recovery_window, refresh=refresh)
+            return json_response(response)
 
     async def backup_settings(self, request):
         actions = {"paused_until": self._set_paused_until}
@@ -400,6 +410,7 @@ class WebServer:
                 web.put("/backup/{stream_id}/preserve", self.backup_preserve),
                 web.put("/replication_state", self.replication_state_set),
                 web.get("/status", self.status_show),
+                web.get("/status/pitr", self.pitr_status_show),
                 web.put("/status", self.status_update),
                 web.get("/status/restore", self.restore_status_show),
             ]

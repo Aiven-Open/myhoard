@@ -2,6 +2,7 @@
 from .backup_stream import BackupStream, IncrementalBackupInfo, RemoteBinlogInfo
 from .binlog_scanner import BinlogScanner
 from .errors import BadRequest, UnknownBackupSite
+from .recovery_window import build_recovery_windows
 from .restore_coordinator import BinlogStream, RestoreCoordinator
 from .state_manager import StateManager
 from .util import (
@@ -187,6 +188,7 @@ class Controller(threading.Thread):
         restore_use_memory: Optional[int] = None,
         xtrabackup_settings: Dict[str, Any],
         auto_mark_backups_broken: bool = False,
+        recovery_window_audit_interval: Optional[float] = None,
     ):
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -230,6 +232,11 @@ class Controller(threading.Thread):
         self.restore_download_workers_count = restore_download_workers_count
         self.restore_free_memory_percentage: Optional[int] = restore_free_memory_percentage
         self.restore_use_memory = restore_use_memory
+        self.recovery_window_audit: Optional[Dict[str, Any]] = None
+        self.recovery_window_audit_interval = recovery_window_audit_interval
+        self._recovery_window_audit_lock = threading.Lock()
+        self._recovery_window_audit_stop = threading.Event()
+        self._recovery_window_audit_thread: Optional[threading.Thread] = None
         self.restore_coordinator: Optional[RestoreCoordinator] = None
         self.seen_basebackup_infos: Dict[str, BaseBackup] = {}
         self.server_id = server_id
@@ -439,6 +446,11 @@ class Controller(threading.Thread):
         consecutive_unexpected_errors = 0
         if self.binlog_progress_tracker:
             self.binlog_progress_tracker.start()
+        if self.recovery_window_audit_interval:
+            self._recovery_window_audit_thread = threading.Thread(
+                target=self._recovery_window_audit_loop, name="RecoveryWindowAudit", daemon=True
+            )
+            self._recovery_window_audit_thread.start()
         while self.is_running:
             try:
                 if self.mode == self.Mode.idle:
@@ -485,8 +497,12 @@ class Controller(threading.Thread):
         self.log.info("Stopping controller")
         self.is_running = False
         self.wakeup_event.set()
+        self._recovery_window_audit_stop.set()
         with contextlib.suppress(Exception):
             self.join()
+        if self._recovery_window_audit_thread:
+            # An audit in progress can take a while to list storage, don't hold up shutdown for it
+            self._recovery_window_audit_thread.join(timeout=5)
         if self.restore_coordinator:
             self.restore_coordinator.stop()
         for stream in self.backup_streams:
@@ -777,6 +793,72 @@ class Controller(threading.Thread):
                     }
                 )
         return backups
+
+    def get_recovery_window(self, *, refresh: bool = False):
+        """Returns the latest recovery window audit, running a new one if requested or none is available yet"""
+        with self.lock:
+            cached = self.recovery_window_audit
+        if cached is not None and not refresh:
+            return cached
+        return self.audit_recovery_window()
+
+    def get_backup_recovery_windows(self):
+        """Returns (checked_at, {(site, stream_id): window}) from the latest audit without running a new one"""
+        with self.lock:
+            audit = self.recovery_window_audit
+        if audit is None:
+            return None, {}
+        windows = {
+            (site, stream_id): window
+            for site, result in audit["sites"].items()
+            for stream_id, window in result["backup_windows"].items()
+        }
+        return audit["checked_at"], windows
+
+    def audit_recovery_window(self):
+        with self._recovery_window_audit_lock:
+            result = self._run_recovery_window_audit()
+            with self.lock:
+                self.recovery_window_audit = result
+        for site, site_result in result["sites"].items():
+            tags = {"site": site}
+            self.stats.gauge_int("myhoard.pitr.window_available", int(site_result["window"] is not None), tags=tags)
+            self.stats.gauge_int("myhoard.pitr.gaps", len(site_result["gaps"]), tags=tags)
+            self.stats.gauge_int("myhoard.pitr.errors", len(site_result["errors"]), tags=tags)
+            if site_result["time_since_latest_binlog"] is not None:
+                self.stats.gauge_float(
+                    "myhoard.pitr.time_since_latest_binlog", site_result["time_since_latest_binlog"], tags=tags
+                )
+        return result
+
+    def _run_recovery_window_audit(self):
+        with self.lock:
+            backup_sites = dict(self.backup_sites)
+            streams = list(self.backup_streams)
+        known_binlogs = {}
+        for stream in streams:
+            with stream.lock:
+                known_binlogs[(stream.site, stream.stream_id)] = list(stream.remote_binlogs)
+        site_transfers = {}
+        backups = self.get_backup_list(backup_sites, site_transfers=site_transfers)
+        sites = build_recovery_windows(backups, site_transfers, known_binlogs)
+        checked_at = time.time()
+        for result in sites.values():
+            latest = result["latest_binlog_timestamp"]
+            result["time_since_latest_binlog"] = max(0, checked_at - latest) if latest is not None else None
+        return {"checked_at": checked_at, "sites": sites}
+
+    def _recovery_window_audit_loop(self) -> None:
+        interval = self.recovery_window_audit_interval
+        assert interval
+        while not self._recovery_window_audit_stop.is_set():
+            try:
+                self.audit_recovery_window()
+            except Exception as ex:  # pylint: disable=broad-except
+                self.log.exception("Failed to audit recovery window")
+                self.stats.unexpected_exception(ex=ex, where="Controller._recovery_window_audit_loop")
+                self.stats.increase("myhoard.pitr.audit_errors")
+            self._recovery_window_audit_stop.wait(interval)
 
     def _apply_downloaded_remote_binlogs(self) -> None:
         to_apply = self.state["promote_details"].get("binlogs_to_apply")
