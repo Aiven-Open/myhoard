@@ -4,20 +4,63 @@ from rohmu.errors import FileNotFoundFromStorageError
 import logging
 
 
-def inspect_binlogs(binlogs, promotions):
+def build_recovery_windows(backups, site_transfers, known_binlogs):
     log = logging.getLogger(__name__)
-    valid_binlogs = []
-    gaps = []
-    expected_index = 1
-    for binlog in sorted(binlogs, key=lambda entry: (entry["remote_index"], entry["server_id"])):
-        remote_index = binlog["remote_index"]
-        if not sort_and_filter_binlogs(binlogs=[binlog], last_index=remote_index - 1, log=log, promotions=promotions):
-            continue
-        if remote_index != expected_index:
-            gaps.append({"expected_index": expected_index, "found_index": remote_index})
-        valid_binlogs.append(binlog)
-        expected_index = remote_index + 1
-    return valid_binlogs, gaps
+    sites = {}
+    for site, file_storage in site_transfers.items():
+        site_backups = {backup["stream_id"]: backup for backup in backups if backup["site"] == site}
+        windows = []
+        backup_windows = {stream_id: None for stream_id in site_backups}
+        latest = None
+        gaps = []
+        excluded = []
+        errors = []
+        complete_ends = set()
+        for stream_id, backup in site_backups.items():
+            if not backup["completed_at"] or not backup["resumable"]:
+                continue
+            try:
+                window, stream_latest, stream_gaps = inspect_backup(
+                    file_storage, backup, known_binlogs.get((site, stream_id), [])
+                )
+                usable = basebackup_is_usable(backup, site_backups, file_storage)
+            except Exception as ex:  # pylint: disable=broad-except
+                log.warning("Failed to audit recovery window of %s/%s", site, stream_id, exc_info=True)
+                errors.append({"stream_id": stream_id, "closed_at": backup["closed_at"], "error": str(ex)})
+                continue
+            if stream_latest is not None:
+                latest = max(latest, stream_latest) if latest is not None else stream_latest
+            gaps.extend(dict(gap, stream_id=stream_id) for gap in stream_gaps)
+            if not usable:
+                excluded.append(stream_id)
+            elif window:
+                windows.append(window)
+                backup_windows[stream_id] = {"start": window["start"], "end": window["end"]}
+                if not stream_gaps:
+                    complete_ends.add(window["end"])
+
+        merged = []
+        for window in sorted(windows, key=lambda entry: (entry["start"], entry["end"])):
+            if merged and window["start"] <= merged[-1]["end"]:
+                merged[-1]["end"] = max(merged[-1]["end"], window["end"])
+                merged[-1]["backups"].append(window)
+            else:
+                merged.append({"start": window["start"], "end": window["end"], "backups": [window]})
+        current = merged[-1] if merged and merged[-1]["end"] == latest and latest in complete_ends else None
+        # A stream that could not be audited may hold binlogs newer than the current window, unless it was
+        # closed before the window ends.
+        if current and any(error["closed_at"] is None or error["closed_at"] > current["end"] for error in errors):
+            current = None
+        sites[site] = {
+            "window": current,
+            "windows": merged,
+            "backup_windows": backup_windows,
+            "latest_binlog_timestamp": latest,
+            "gaps": gaps,
+            "excluded_backups": excluded,
+            "errors": [{"stream_id": error["stream_id"], "error": error["error"]} for error in errors],
+        }
+    return sites
 
 
 def inspect_backup(file_storage, backup, known_binlogs):
@@ -84,6 +127,22 @@ def inspect_backup(file_storage, backup, known_binlogs):
     return window, latest, gaps
 
 
+def inspect_binlogs(binlogs, promotions):
+    log = logging.getLogger(__name__)
+    valid_binlogs = []
+    gaps = []
+    expected_index = 1
+    for binlog in sorted(binlogs, key=lambda entry: (entry["remote_index"], entry["server_id"])):
+        remote_index = binlog["remote_index"]
+        if not sort_and_filter_binlogs(binlogs=[binlog], last_index=remote_index - 1, log=log, promotions=promotions):
+            continue
+        if remote_index != expected_index:
+            gaps.append({"expected_index": expected_index, "found_index": remote_index})
+        valid_binlogs.append(binlog)
+        expected_index = remote_index + 1
+    return valid_binlogs, gaps
+
+
 def basebackup_is_usable(backup, backups_by_id, file_storage):
     basebackup = backup["basebackup_info"]
     required = basebackup.get("required_streams") or []
@@ -108,62 +167,3 @@ def basebackup_is_usable(backup, backups_by_id, file_storage):
         except FileNotFoundFromStorageError:
             return False
     return True
-
-
-def build_recovery_windows(backups, site_transfers, known_binlogs):
-    log = logging.getLogger(__name__)
-    sites = {}
-    for site, file_storage in site_transfers.items():
-        site_backups = {backup["stream_id"]: backup for backup in backups if backup["site"] == site}
-        windows = []
-        backup_windows = {stream_id: None for stream_id in site_backups}
-        latest = None
-        gaps = []
-        excluded = []
-        errors = []
-        complete_ends = set()
-        for stream_id, backup in site_backups.items():
-            if not backup["completed_at"] or not backup["resumable"]:
-                continue
-            try:
-                window, stream_latest, stream_gaps = inspect_backup(
-                    file_storage, backup, known_binlogs.get((site, stream_id), [])
-                )
-                usable = basebackup_is_usable(backup, site_backups, file_storage)
-            except Exception as ex:  # pylint: disable=broad-except
-                log.warning("Failed to audit recovery window of %s/%s", site, stream_id, exc_info=True)
-                errors.append({"stream_id": stream_id, "closed_at": backup["closed_at"], "error": str(ex)})
-                continue
-            if stream_latest is not None:
-                latest = max(latest, stream_latest) if latest is not None else stream_latest
-            gaps.extend(dict(gap, stream_id=stream_id) for gap in stream_gaps)
-            if not usable:
-                excluded.append(stream_id)
-            elif window:
-                windows.append(window)
-                backup_windows[stream_id] = {"start": window["start"], "end": window["end"]}
-                if not stream_gaps:
-                    complete_ends.add(window["end"])
-
-        merged = []
-        for window in sorted(windows, key=lambda entry: (entry["start"], entry["end"])):
-            if merged and window["start"] <= merged[-1]["end"]:
-                merged[-1]["end"] = max(merged[-1]["end"], window["end"])
-                merged[-1]["backups"].append(window)
-            else:
-                merged.append({"start": window["start"], "end": window["end"], "backups": [window]})
-        current = merged[-1] if merged and merged[-1]["end"] == latest and latest in complete_ends else None
-        # A stream that could not be audited may hold binlogs newer than the current window, unless it was
-        # closed before the window ends.
-        if current and any(error["closed_at"] is None or error["closed_at"] > current["end"] for error in errors):
-            current = None
-        sites[site] = {
-            "window": current,
-            "windows": merged,
-            "backup_windows": backup_windows,
-            "latest_binlog_timestamp": latest,
-            "gaps": gaps,
-            "excluded_backups": excluded,
-            "errors": [{"stream_id": error["stream_id"], "error": error["error"]} for error in errors],
-        }
-    return sites
