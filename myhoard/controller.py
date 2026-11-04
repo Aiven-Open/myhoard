@@ -864,6 +864,7 @@ class Controller(threading.Thread):
         return audit["checked_at"], windows
 
     def audit_recovery_window(self):
+        """Runs a recovery window audit, caches its result and reports per-site PITR metrics"""
         with self._recovery_window_audit_lock:
             result = self._run_recovery_window_audit()
             with self.lock:
@@ -880,6 +881,7 @@ class Controller(threading.Thread):
         return result
 
     def _run_recovery_window_audit(self):
+        """Lists backups from all sites and computes their recovery windows, including binlogs known to be uploaded"""
         with self.lock:
             backup_sites = dict(self.backup_sites)
             streams = list(self.backup_streams)
@@ -897,6 +899,7 @@ class Controller(threading.Thread):
         return {"checked_at": checked_at, "sites": sites}
 
     def _recovery_window_audit_loop(self) -> None:
+        """Audits the recovery window every recovery_window_audit_interval seconds until the controller stops"""
         interval = self.recovery_window_audit_interval
         assert interval
         while not self._recovery_window_audit_stop.is_set():

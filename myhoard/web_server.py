@@ -100,6 +100,7 @@ class WebServer:
                 return json_response(response)
 
     async def pitr_status_show(self, request):
+        """Returns the latest recovery window audit, ?refresh=true forces a new audit"""
         with self._handle_request(name="pitr_status_show"):
             refresh = request.rel_url.query.get("refresh", "").lower() in {"1", "true", "yes"}
             response = await asyncio.to_thread(self.controller.get_recovery_window, refresh=refresh)

@@ -5,6 +5,12 @@ import logging
 
 
 def build_recovery_windows(backups, site_transfers, known_binlogs):
+    """Computes the point-in-time recovery windows of each backup site from remote storage.
+
+    Per-backup windows are merged when they overlap. The current window is the last merged one if it reaches the
+    latest uploaded binlog without gaps and no failed stream may hold newer binlogs. Also reports per-backup windows,
+    gaps, unusable backups and streams that could not be audited.
+    """
     log = logging.getLogger(__name__)
     sites = {}
     for site, file_storage in site_transfers.items():
@@ -64,6 +70,11 @@ def build_recovery_windows(backups, site_transfers, known_binlogs):
 
 
 def inspect_backup(file_storage, backup, known_binlogs):
+    """Returns (window, latest_binlog_timestamp, gaps) for a single backup stream.
+
+    The window starts at the basebackup end and extends through binlogs until the first index or GTID gap, capped
+    at the stream closing time. Binlogs this node knows it uploaded but are missing from storage count as a gap.
+    """
     prefix = f"{backup['site']}/{backup['stream_id']}"
     promotions = {}
     for entry in file_storage.list_iter(f"{prefix}/promotions"):
@@ -128,6 +139,7 @@ def inspect_backup(file_storage, backup, known_binlogs):
 
 
 def inspect_binlogs(binlogs, promotions):
+    """Returns (binlogs, gaps): binlogs from the valid server per promotions, sorted by remote index, and index gaps"""
     log = logging.getLogger(__name__)
     valid_binlogs = []
     gaps = []
@@ -144,6 +156,7 @@ def inspect_binlogs(binlogs, promotions):
 
 
 def basebackup_is_usable(backup, backups_by_id, file_storage):
+    """Whether the basebackup, and for incremental ones its whole base chain, is complete, unbroken and in storage"""
     basebackup = backup["basebackup_info"]
     required = basebackup.get("required_streams") or []
     if basebackup.get("incremental") and not required:
