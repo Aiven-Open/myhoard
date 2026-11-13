@@ -219,6 +219,28 @@ by an external scheduler rather than MyHoard itself. Note that this only
 affects new base backup scheduling; binary log uploads and existing backup
 streams continue as usual.
 
+**paused_incremental_behavior**
+
+Optional, `skip` (default) or `run`. What a scheduled incremental backup does
+while backups are paused (see `paused_until` in `PATCH /backup/settings`).
+`skip` does not create it, `run` creates it as usual. If the incremental backup
+turns out to be impossible (no usable base backup, broken backup, xtrabackup
+version change), the request is dropped instead of falling back to a full
+backup. Can also be changed at runtime with `PATCH /backup/settings`, `null`
+resets it to the default.
+
+**paused_full_behavior**
+
+Optional, `skip` (default) or `incremental`. What a scheduled full backup does
+while backups are paused. `skip` does not create it, `incremental` creates an
+incremental backup in its place, which requires `incremental.enabled` and a
+possible incremental backup, otherwise the backup is skipped. Can also be
+changed at runtime with `PATCH /backup/settings`, `null` resets it to the
+default.
+
+Backups requested manually via `POST /backup` ignore the pause and these two
+settings.
+
 **upload_site**
 
 Name of the backup site to which new backups should be created to. See

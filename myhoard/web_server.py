@@ -6,6 +6,7 @@ from myhoard.backup_stream import BackupStream
 from myhoard.controller import Controller
 from myhoard.errors import BadRequest
 from myhoard.restore_coordinator import RestoreCoordinator
+from myhoard.util import parse_paused_behavior, PausedFullBehavior, PausedIncrementalBehavior
 from os import path
 from typing import Any, Callable
 
@@ -96,7 +97,11 @@ class WebServer:
                 return json_response(response)
 
     async def backup_settings(self, request):
-        actions = {"paused_until": self._set_paused_until}
+        actions = {
+            "paused_until": self._set_paused_until,
+            "paused_incremental_behavior": self._set_paused_incremental_behavior,
+            "paused_full_behavior": self._set_paused_full_behavior,
+        }
         return await self._update_resource(name="backup_settings", request=request, actions=actions)
 
     def _set_paused_until(self, body: dict[str, Any]):
@@ -117,6 +122,28 @@ class WebServer:
             raise BadRequest("`paused_until` is not a valid date: date is in the past")
 
         self.controller.pause_backups(paused_until=paused_until_date)
+
+    def _set_paused_incremental_behavior(self, body: dict[str, Any]):
+        self.controller.update_paused_behavior(
+            incremental=self._parse_paused_behavior(
+                body, name="paused_incremental_behavior", behavior_type=PausedIncrementalBehavior
+            )
+        )
+
+    def _set_paused_full_behavior(self, body: dict[str, Any]):
+        self.controller.update_paused_behavior(
+            full=self._parse_paused_behavior(body, name="paused_full_behavior", behavior_type=PausedFullBehavior)
+        )
+
+    @staticmethod
+    def _parse_paused_behavior(body: dict[str, Any], *, name: str, behavior_type: Any) -> Any:
+        value = body.get(name)
+        if value is None:
+            return None
+        try:
+            return parse_paused_behavior(name=name, value=value, behavior_type=behavior_type)
+        except ValueError as ex:
+            raise BadRequest(str(ex)) from ex
 
     async def backup_preserve(self, request):
         with self._handle_request(name="backup_preserve"):

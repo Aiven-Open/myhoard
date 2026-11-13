@@ -9,10 +9,25 @@ from math import log10
 from pathlib import Path
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
-from typing import Any, Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Tuple,
+    TypedDict,
+    TypeVar,
+    Union,
+)
 
 import collections
 import contextlib
+import enum
 import io
 import json
 import os
@@ -100,6 +115,49 @@ def parse_dow_schedule(dow_schedule: str) -> set[int]:
             f"\"{', '.join(DOW_ORDERED)}\""
         )
     return res
+
+
+class PausedIncrementalBehavior(str, enum.Enum):
+    """What a scheduled incremental backup does while backups are paused (`paused_incremental_behavior`)"""
+
+    SKIP = "skip"
+    RUN = "run"
+
+
+class PausedFullBehavior(str, enum.Enum):
+    """What a scheduled full backup does while backups are paused (`paused_full_behavior`)"""
+
+    SKIP = "skip"
+    INCREMENTAL = "incremental"
+
+
+DEFAULT_PAUSED_INCREMENTAL_BEHAVIOR = PausedIncrementalBehavior.SKIP
+DEFAULT_PAUSED_FULL_BEHAVIOR = PausedFullBehavior.SKIP
+
+_PausedBehaviorT = TypeVar("_PausedBehaviorT", PausedIncrementalBehavior, PausedFullBehavior)
+
+
+def parse_paused_behavior(*, name: str, value: Any, behavior_type: type[_PausedBehaviorT]) -> _PausedBehaviorT:
+    """Convert the value of an optional `paused_*_behavior` backup setting to its enum, raise ValueError if invalid"""
+    try:
+        return behavior_type(value)
+    except ValueError:
+        allowed = ", ".join(repr(member.value) for member in behavior_type)
+        raise ValueError(f"`{name}` must be one of {allowed}, got {value!r}") from None
+
+
+def validate_paused_behavior_settings(backup_settings: Mapping[str, Any]) -> None:
+    """Validate the optional `paused_incremental_behavior` and `paused_full_behavior` backup settings"""
+    if "paused_incremental_behavior" in backup_settings:
+        parse_paused_behavior(
+            name="paused_incremental_behavior",
+            value=backup_settings["paused_incremental_behavior"],
+            behavior_type=PausedIncrementalBehavior,
+        )
+    if "paused_full_behavior" in backup_settings:
+        parse_paused_behavior(
+            name="paused_full_behavior", value=backup_settings["paused_full_behavior"], behavior_type=PausedFullBehavior
+        )
 
 
 @contextlib.contextmanager

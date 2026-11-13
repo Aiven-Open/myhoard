@@ -8,6 +8,8 @@ from .util import (
     are_gtids_in_executed_set,
     change_replication_source_to,
     DEFAULT_MYSQL_TIMEOUT,
+    DEFAULT_PAUSED_FULL_BEHAVIOR,
+    DEFAULT_PAUSED_INCREMENTAL_BEHAVIOR,
     ERR_TIMEOUT,
     get_replica_status,
     get_xtrabackup_version,
@@ -18,7 +20,10 @@ from .util import (
     mysql_cursor,
     parse_dow_schedule,
     parse_fs_metadata,
+    parse_paused_behavior,
     parse_version,
+    PausedFullBehavior,
+    PausedIncrementalBehavior,
     RateTracker,
     relay_log_name,
     restart_unexpected_dead_sql_thread,
@@ -32,6 +37,7 @@ from rohmu.object_storage.base import BaseTransfer
 from socket import gaierror
 from socks import GeneralProxyError, ProxyConnectionError
 from ssl import SSLEOFError
+from types import EllipsisType
 from typing import Any, cast, Dict, List, Optional, TypedDict
 
 import contextlib
@@ -401,6 +407,25 @@ class Controller(threading.Thread):
             current_requests = dict(self.state["pending_preservation_requests"])
             current_requests[stream_id] = preserve_until.isoformat() if preserve_until else None
             self.state_manager.update_state(pending_preservation_requests=current_requests)
+
+    def update_paused_behavior(
+        self,
+        *,
+        incremental: PausedIncrementalBehavior | None | EllipsisType = ...,
+        full: PausedFullBehavior | None | EllipsisType = ...,
+    ) -> None:
+        """Change what scheduled backups do while backups are paused. None resets the setting to its default.
+
+        A setting that is not given (`...`) is left unchanged."""
+        with self.lock:
+            for name, value in (("paused_incremental_behavior", incremental), ("paused_full_behavior", full)):
+                if value is ...:
+                    continue
+                if value is None:
+                    self.backup_settings.pop(name, None)
+                else:
+                    self.backup_settings[name] = value.value
+                self.log.info("Updated %s to %r", name, self.backup_settings.get(name, "default"))
 
     def pause_backups(self, paused_until: datetime.datetime | None) -> None:
         if paused_until is None:
@@ -1038,6 +1063,16 @@ class Controller(threading.Thread):
                 incremental_backup_info = None
                 if request["incremental_requested"]:  # pylint: disable=unsubscriptable-object
                     incremental_backup_info = self.get_incremental_backup_info()
+                    backup_reason = request["backup_reason"]  # pylint: disable=unsubscriptable-object
+                    if (
+                        incremental_backup_info is None
+                        and backup_reason == BackupStream.BackupReason.scheduled
+                        and self._are_backups_paused()
+                    ):
+                        # Scheduled incremental backups must not silently turn into full ones while paused
+                        self.log.warning("Dropping scheduled incremental backup request, backups paused and not possible")
+                        self.state_manager.update_state(backup_request=None)
+                        return
                 self._start_new_backup(
                     backup_reason=request["backup_reason"],  # pylint: disable=unsubscriptable-object
                     normalized_backup_time=request["normalized_backup_time"],  # pylint: disable=unsubscriptable-object
@@ -1580,16 +1615,66 @@ class Controller(threading.Thread):
 
         return None
 
+    @property
+    def _paused_incremental_behavior(self) -> PausedIncrementalBehavior:
+        return parse_paused_behavior(
+            name="paused_incremental_behavior",
+            value=self.backup_settings.get("paused_incremental_behavior", DEFAULT_PAUSED_INCREMENTAL_BEHAVIOR),
+            behavior_type=PausedIncrementalBehavior,
+        )
+
+    @property
+    def _paused_full_behavior(self) -> PausedFullBehavior:
+        return parse_paused_behavior(
+            name="paused_full_behavior",
+            value=self.backup_settings.get("paused_full_behavior", DEFAULT_PAUSED_FULL_BEHAVIOR),
+            behavior_type=PausedFullBehavior,
+        )
+
+    def _are_backups_paused(self) -> bool:
+        paused_backups_until: str | None = self.state["paused_backups_until"]
+        return paused_backups_until is not None and datetime.datetime.fromisoformat(
+            paused_backups_until
+        ) > datetime.datetime.now(datetime.timezone.utc)
+
+    def _resolve_scheduled_incremental_while_paused(self, incremental_due: bool) -> bool | None:
+        """Apply the paused behavior settings to a scheduled backup that is due.
+
+        Returns whether the backup request should be incremental, or None if no request should be created."""
+        paused_until = self.state["paused_backups_until"]
+        if incremental_due:
+            if self._paused_incremental_behavior == PausedIncrementalBehavior.SKIP:
+                self.log.warning("Skipping scheduled incremental backup, backups paused until %s", paused_until)
+                return None
+        else:
+            if self._paused_full_behavior == PausedFullBehavior.SKIP:
+                self.log.warning("Skipping scheduled full backup, backups paused until %s", paused_until)
+                return None
+            if not self.backup_settings.get("incremental", {}).get("enabled", False):
+                self.log.warning(
+                    "Skipping scheduled full backup, backups paused until %s and incremental backups are disabled",
+                    paused_until,
+                )
+                return None
+            self.log.info("Replacing scheduled full backup with an incremental one, backups paused until %s", paused_until)
+        # A paused scheduled backup is never allowed to fall back to a full backup, so make sure it is possible now
+        if self.get_incremental_backup_info() is None:
+            self.log.warning("Skipping scheduled incremental backup, backups paused and incremental is not possible")
+            return None
+        return True
+
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         if not self.backup_settings.get("scheduled_backups_enabled", True):
             self.log.debug("Skipping backup interval check, scheduled backups are disabled")
             return
 
-        paused_backups_until: str | None = self.state["paused_backups_until"]
-        if paused_backups_until is not None and datetime.datetime.fromisoformat(
-            paused_backups_until
-        ) > datetime.datetime.now(datetime.timezone.utc):
-            self.log.warning("Skipping backup interval check, backups paused until %s", paused_backups_until)
+        paused = self._are_backups_paused()
+        if (
+            paused
+            and self._paused_incremental_behavior == PausedIncrementalBehavior.SKIP
+            and self._paused_full_behavior == PausedFullBehavior.SKIP
+        ):
+            self.log.warning("Skipping backup interval check, backups paused until %s", self.state["paused_backups_until"])
             return
 
         normalized_backup_time = self._current_normalized_backup_timestamp()
@@ -1617,6 +1702,10 @@ class Controller(threading.Thread):
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
             incremental_requested = self._should_schedule_incremental_backup()
+            if paused:
+                incremental_requested = self._resolve_scheduled_incremental_while_paused(incremental_requested)
+                if incremental_requested is None:
+                    return
             if incremental_requested:
                 self.log.info("Incremental backup is scheduled, it might fallback later to full if not possible to execute")
 
