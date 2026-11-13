@@ -8,6 +8,7 @@ from myhoard.util import (
     find_extra_xtrabackup_executables,
     parse_dow_schedule,
     restore_mysqld_options,
+    validate_paused_behavior_settings,
     wait_for_port,
 )
 from myhoard.web_server import WebServer
@@ -125,6 +126,8 @@ class MyHoard:
         ival = backup_settings["backup_interval_minutes"]
         if (ival > 1440 and ival // 1440 * 1440 != ival) or (ival < 1440 and 1440 // ival * ival != 1440):
             raise Exception("Backup interval must be 1440, multiple of 1440, or integer divisor of 1440")
+
+        validate_paused_behavior_settings(backup_settings)
 
         incremental = backup_settings.get("incremental", {})
         if incremental and incremental.get("enabled", False):
