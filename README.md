@@ -697,12 +697,29 @@ This endpoint is used to update backup settings
 ```
 {
   "paused_until": "{isodatetime|null}",
+  "allow_incremental_only": {true|false}
 }
 ```
 
 ### Allowed parameters are:
 
 **paused_until** (isodatetime | null) - The date after which backups are resumed (should be in iso-format), when null is specified the backups are resumed
+
+**allow_incremental_only** (boolean, optional, defaults to `false`) - While the backups are paused, still run the
+scheduled incremental backups, only if they are possible. Scheduled full backups stay skipped, and a scheduled
+incremental backup that turns out to be impossible (no usable base backup, broken backup, xtrabackup version change) is
+skipped or dropped instead of falling back to a full backup, so only binary logs are uploaded. Incremental backups are
+never taken unless `incremental.enabled` is set, and then only as scheduled by `incremental.full_backup_week_schedule`.
+Requesting it while `incremental.enabled` is not set is rejected with a 400, as it would only be a plain pause.
+It can only be given together with a `paused_until` date and belongs to that pause only: it is stored in the state
+file, so it survives a restart, each pause request replaces it and resuming the backups resets it. Backups requested
+manually via `POST /backup` ignore the pause: such a request also replaces a scheduled request of the same time that
+is waiting because of the pause.
+
+A scheduled backup request that was queued before the pause, or while it is active, is never dropped. It is kept as it
+is, and shows in `backup_request` of `GET /status`, until the pause ends, when it starts as usual. During the pause it
+only starts when it is an incremental backup that is possible, and `allow_incremental_only` is set; otherwise it waits,
+and is looked at again once per hour.
 
 ### Response
 
@@ -850,6 +867,8 @@ listed as completed. Response looks like this:
 {
   "mode": "{active|idle|observe|promote|restore}",
   "latest_uploaded_binlog_index": 123,
+  "paused_backups_until": "{isodatetime|null}",
+  "paused_allow_incremental_only": false,
   "backup_request": {
     "backup_reason": "{requested|scheduled}",
     "incremental_requested": false,
@@ -867,6 +886,10 @@ listed as completed. Response looks like this:
   ]
 }
 ```
+
+**paused_backups_until** is the date until which scheduled backups are paused, `null` when they are not. It is
+kept after it has passed, only the comparison with the current time tells whether the pause is still active.
+**paused_allow_incremental_only** tells whether scheduled incremental backups still run during that pause.
 
 See the status update API for more information regarding the different modes.
 

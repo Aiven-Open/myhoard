@@ -49,6 +49,8 @@ import uuid
 
 ERR_CANNOT_CONNECT = 2003
 ERR_BACKUP_IN_PROGRESS = 4085
+# While backups are paused, a skipped scheduled slot stays due, so it is looked at again only this often
+PAUSED_SKIPPED_SLOT_RECHECK_INTERVAL_S = 3600
 
 
 class BaseBackup(TypedDict):
@@ -133,6 +135,13 @@ class Controller(threading.Thread):
     BackupStream, BinlogScanner and RestoreCoordinator as well as provides state info
     that can be made available by other components like an HTTP server."""
 
+    # The scheduled slot skipped while backups are paused and the time before which it is not evaluated again
+    _paused_skipped_slot: str | None = None
+    _paused_skipped_slot_until: float = 0.0
+    # Same for a queued scheduled request held by the pause
+    _paused_held_slot: str | None = None
+    _paused_held_until: float = 0.0
+
     @enum.unique
     class Mode(str, enum.Enum):
         # Actively back up the system and perform related auxiliary operations
@@ -174,6 +183,7 @@ class Controller(threading.Thread):
         server_uuid: Optional[str]
         uploaded_binlogs: list
         paused_backups_until: str | None
+        paused_allow_incremental_only: bool
         broken_backup_requests: list[BrokenBackupRequest]
         broken_backup_results: dict[str, BrokenBackupResult]
 
@@ -269,6 +279,7 @@ class Controller(threading.Thread):
             "server_uuid": None,
             "uploaded_binlogs": [],
             "paused_backups_until": None,
+            "paused_allow_incremental_only": False,
             "broken_backup_requests": [],
             "broken_backup_results": {},
         }
@@ -387,6 +398,8 @@ class Controller(threading.Thread):
                         backup_time == old_request["normalized_backup_time"]  # pylint: disable=unsubscriptable-object
                         and old_request["backup_reason"]  # pylint: disable=unsubscriptable-object
                         == BackupStream.BackupReason.scheduled
+                        # A manual request ignores the pause, so it replaces a scheduled one held by the pause
+                        and not (backup_reason == BackupStream.BackupReason.requested and self._are_backups_paused())
                     )
                 ):
                     return
@@ -402,12 +415,21 @@ class Controller(threading.Thread):
             current_requests[stream_id] = preserve_until.isoformat() if preserve_until else None
             self.state_manager.update_state(pending_preservation_requests=current_requests)
 
-    def pause_backups(self, paused_until: datetime.datetime | None) -> None:
+    def pause_backups(self, paused_until: datetime.datetime | None, *, allow_incremental_only: bool = False) -> None:
+        """Pause scheduled backups until the given time, None resumes them.
+
+        With `allow_incremental_only` the scheduled incremental backups still run while paused, if they are possible,
+        only the scheduled full backups are skipped. It belongs to this pause only: every call replaces it, and
+        resuming resets it."""
         if paused_until is None:
             self.log.info("Backups are now resumed")
+            allow_incremental_only = False
         else:
-            self.log.warning("Pausing backups until %s", paused_until)
-        self.state_manager.update_state(paused_backups_until=paused_until.isoformat() if paused_until else None)
+            self.log.warning("Pausing backups until %s, allow_incremental_only: %s", paused_until, allow_incremental_only)
+        self.state_manager.update_state(
+            paused_backups_until=paused_until.isoformat() if paused_until else None,
+            paused_allow_incremental_only=allow_incremental_only,
+        )
 
     @property
     def mode(self) -> Mode:
@@ -1035,6 +1057,8 @@ class Controller(threading.Thread):
         with self.lock:
             if self.state["backup_request"]:
                 request: BackupRequest = self.state["backup_request"]
+                if self._is_scheduled_request_held_by_pause(request):
+                    return
                 incremental_backup_info = None
                 if request["incremental_requested"]:  # pylint: disable=unsubscriptable-object
                     incremental_backup_info = self.get_incremental_backup_info()
@@ -1512,13 +1536,19 @@ class Controller(threading.Thread):
         failed_stream_id = self.state["restore_options"]["stream_id"]
         self.mark_stream_as_broken(stream_id=failed_stream_id, broken=True)
 
-    def _should_schedule_incremental_backup(self) -> bool:
+    def _should_schedule_incremental_backup(self, normalized_backup_time: str | None = None) -> bool:
+        """Tell whether the backup of the given slot (default: now) is an incremental one. The weekday must come from
+        the slot, not from the current time: a slot that stays due past midnight, e.g. a skipped one while backups are
+        paused, is still the slot of its own day."""
         incremental_settings = self.backup_settings.get("incremental", {})
         if not incremental_settings.get("enabled", False):
             self.log.info("Incremental backup is disabled in configuration")
             return False
 
-        dow_idx = datetime.datetime.now(datetime.timezone.utc).weekday()
+        if normalized_backup_time:
+            dow_idx = datetime.datetime.fromisoformat(normalized_backup_time).astimezone(datetime.timezone.utc).weekday()
+        else:
+            dow_idx = datetime.datetime.now(datetime.timezone.utc).weekday()
         dow_schedule = incremental_settings.get("full_backup_week_schedule")
         if dow_idx not in parse_dow_schedule(dow_schedule):
             self.log.info("Incremental backup should be scheduled (day: %r)", dow_idx)
@@ -1580,16 +1610,56 @@ class Controller(threading.Thread):
 
         return None
 
+    def _are_backups_paused(self) -> bool:
+        paused_backups_until: str | None = self.state["paused_backups_until"]
+        return paused_backups_until is not None and datetime.datetime.fromisoformat(
+            paused_backups_until
+        ) > datetime.datetime.now(datetime.timezone.utc)
+
+    def _is_scheduled_request_held_by_pause(self, request: BackupRequest) -> bool:
+        """A scheduled request is kept queued, unchanged, while backups are paused and only started when the pause
+        allows it: never for a plain pause, only for a possible incremental backup with `allow_incremental_only`. A
+        manual request ignores the pause. Held requests are looked at again only once per hour."""
+        if request["backup_reason"] != BackupStream.BackupReason.scheduled or not self._are_backups_paused():
+            return False
+        slot = request["normalized_backup_time"]
+        if self._paused_held_slot == slot and time.time() < self._paused_held_until:
+            return True
+        if (
+            self.state.get("paused_allow_incremental_only", False)
+            and request["incremental_requested"]
+            and self.get_incremental_backup_info() is not None
+        ):
+            return False
+        self.log.warning(
+            "Holding scheduled backup request of %s, backups paused until %s", slot, self.state["paused_backups_until"]
+        )
+        self._paused_held_slot = slot
+        self._paused_held_until = time.time() + PAUSED_SKIPPED_SLOT_RECHECK_INTERVAL_S
+        return True
+
+    def _resolve_scheduled_incremental_while_paused(self, incremental_due: bool) -> bool:
+        """Tell whether a scheduled backup that is due may be requested while backups are paused and only incremental
+        backups are allowed. Only a scheduled incremental backup that is possible now is allowed, a full backup is
+        never taken, nor is an incremental one replacing it."""
+        paused_until = self.state["paused_backups_until"]
+        if not incremental_due:
+            self.log.warning("Skipping scheduled full backup, backups paused until %s", paused_until)
+            return False
+        if self.get_incremental_backup_info() is None:
+            self.log.warning("Skipping scheduled incremental backup, backups paused and incremental is not possible")
+            return False
+        return True
+
     def _mark_periodic_backup_requested_if_interval_exceeded(self):
         if not self.backup_settings.get("scheduled_backups_enabled", True):
             self.log.debug("Skipping backup interval check, scheduled backups are disabled")
             return
 
-        paused_backups_until: str | None = self.state["paused_backups_until"]
-        if paused_backups_until is not None and datetime.datetime.fromisoformat(
-            paused_backups_until
-        ) > datetime.datetime.now(datetime.timezone.utc):
-            self.log.warning("Skipping backup interval check, backups paused until %s", paused_backups_until)
+        paused = self._are_backups_paused()
+        allow_incremental_only = paused and self.state.get("paused_allow_incremental_only", False)
+        if paused and not allow_incremental_only:
+            self.log.warning("Skipping backup interval check, backups paused until %s", self.state["paused_backups_until"])
             return
 
         normalized_backup_time = self._current_normalized_backup_timestamp()
@@ -1616,7 +1686,17 @@ class Controller(threading.Thread):
             )
             and (not most_recent_scheduled or time.time() - most_recent_scheduled >= half_backup_interval_s)
         ):
-            incremental_requested = self._should_schedule_incremental_backup()
+            if (
+                allow_incremental_only
+                and self._paused_skipped_slot == normalized_backup_time
+                and time.time() < self._paused_skipped_slot_until
+            ):
+                return
+            incremental_requested = self._should_schedule_incremental_backup(normalized_backup_time)
+            if allow_incremental_only and not self._resolve_scheduled_incremental_while_paused(incremental_requested):
+                self._paused_skipped_slot = normalized_backup_time
+                self._paused_skipped_slot_until = time.time() + PAUSED_SKIPPED_SLOT_RECHECK_INTERVAL_S
+                return
             if incremental_requested:
                 self.log.info("Incremental backup is scheduled, it might fallback later to full if not possible to execute")
 

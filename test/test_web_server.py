@@ -346,6 +346,45 @@ async def test_backup_settings_paused_until(master_controller, web_client):
     assert response["success"]
 
 
+async def test_backup_settings_invalid_request_changes_nothing(master_controller, web_client):
+    path = "/backup/settings"
+    controller = master_controller[0]
+    until = datetime.datetime(2099, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    before_state = controller.state["paused_backups_until"]
+
+    # an invalid option must not leave the pause applied
+    await patch_and_verify_json_body(
+        web_client,
+        path,
+        {"paused_until": until.isoformat(), "allow_incremental_only": "invalid"},
+        expected_status=400,
+    )
+    assert controller.state["paused_backups_until"] == before_state
+
+
+async def test_backup_settings_allow_incremental_only(master_controller, web_client):
+    path = "/backup/settings"
+    controller = master_controller[0]
+    until = datetime.datetime(2099, 1, 3, 3, tzinfo=datetime.timezone.utc)
+    body = {"paused_until": until.isoformat(), "allow_incremental_only": True}
+
+    # without incremental backups it would only be a plain pause: rejected, and nothing is paused
+    controller.backup_settings["incremental"] = {"enabled": False}
+    await patch_and_verify_json_body(web_client, path, body, expected_status=400)
+    assert controller.state["paused_backups_until"] is None
+
+    controller.backup_settings["incremental"] = {"enabled": True, "full_backup_week_schedule": "sun"}
+    await patch_and_verify_json_body(web_client, path, body)
+    status = await get_and_verify_json_body(web_client, "/status")
+    assert status["paused_backups_until"] == until.isoformat()
+    assert status["paused_allow_incremental_only"] is True
+
+    await patch_and_verify_json_body(web_client, path, {"paused_until": None})
+    status = await get_and_verify_json_body(web_client, "/status")
+    assert status["paused_backups_until"] is None
+    assert status["paused_allow_incremental_only"] is False
+
+
 async def test_backup_stream_settings(master_controller, web_client):
     path = "/backup/1234"
     controller = master_controller[0]

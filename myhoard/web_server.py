@@ -100,14 +100,23 @@ class WebServer:
         return await self._update_resource(name="backup_settings", request=request, actions=actions)
 
     def _set_paused_until(self, body: dict[str, Any]):
-        paused_until = body.get("paused_until")
+        allow_incremental_only = body.get("allow_incremental_only")
+        if allow_incremental_only is not None and not isinstance(allow_incremental_only, bool):
+            raise BadRequest("`allow_incremental_only` must be a boolean.")
+
+        paused_until = body["paused_until"]
         if paused_until is None:
+            if allow_incremental_only is not None:
+                raise BadRequest("`allow_incremental_only` can only be given together with a `paused_until` date.")
             self.controller.pause_backups(paused_until=None)
             return
 
+        if allow_incremental_only and not self.controller.backup_settings.get("incremental", {}).get("enabled", False):
+            raise BadRequest("`allow_incremental_only` requires `incremental.enabled` to be set in the backup settings.")
+
         try:
             paused_until_date = datetime.fromisoformat(paused_until)
-        except ValueError:
+        except (TypeError, ValueError):
             raise BadRequest("`paused_until` must be a valid iso-format datetime string.")
 
         if paused_until_date.tzinfo is None:
@@ -116,7 +125,7 @@ class WebServer:
         if paused_until_date < datetime.now(timezone.utc):
             raise BadRequest("`paused_until` is not a valid date: date is in the past")
 
-        self.controller.pause_backups(paused_until=paused_until_date)
+        self.controller.pause_backups(paused_until=paused_until_date, allow_incremental_only=bool(allow_incremental_only))
 
     async def backup_preserve(self, request):
         with self._handle_request(name="backup_preserve"):
@@ -232,6 +241,8 @@ class WebServer:
                 {
                     "mode": self.controller.mode,
                     "latest_uploaded_binlog_index": self.controller.get_latest_uploaded_binlog_index(),
+                    "paused_backups_until": self.controller.state["paused_backups_until"],
+                    "paused_allow_incremental_only": self.controller.state["paused_allow_incremental_only"],
                     **self.controller.get_backup_progress(),
                 }
             )
