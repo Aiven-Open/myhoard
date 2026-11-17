@@ -1,9 +1,9 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from . import generate_rsa_key_pair
+from . import generate_rsa_key_pair, MySQLConfig, while_asserts
 from datetime import datetime
 from hypothesis import given, settings, strategies as st
 from time import sleep
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from unittest.mock import Mock, patch
 
 import collections
@@ -735,6 +735,150 @@ def test_restart_unexpected_dead_sql_thread() -> None:
     myhoard_util.restart_unexpected_dead_sql_thread(mock_cursor, replica_status, mock_stats, mock_logger)
     assert mock_stats.increase.call_args.args == ("myhoard.unexpected_sql_thread_starts",)
     assert mock_cursor.execute.call_args.args == ("START REPLICA SQL_THREAD",)
+
+
+# Three bytes in UTF-8, so a byte cut can land one or two bytes into it
+CUT_CHAR = "\u65e5"
+# Moves the 1023 byte cut of Last_SQL_Error so that it lands inside a CUT_CHAR, not between two of them. Where the
+# cut lands depends on the whole error text before the comment, including the default database 'mysql' that
+# mysql_cursor connects with. The precondition in the test fails loudly if that changes.
+CUT_PADDING = "p"
+
+
+def _raw_replica_status(connect_options: Dict[str, Any]) -> Dict[str, Any]:
+    """SHOW REPLICA STATUS with text columns as bytes, read on a separate connection made with use_unicode=False"""
+    connection = pymysql.connect(
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        host=connect_options["host"],
+        password=connect_options["password"],
+        port=connect_options["port"],
+        use_unicode=False,
+        user=connect_options["user"],
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW REPLICA STATUS")
+            row = cursor.fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return row
+
+
+def _break_replication_with_cut_error_text(*, master: MySQLConfig, standby: MySQLConfig) -> None:
+    # Only a single-threaded applier puts the failing statement into Last_SQL_Error. With workers it holds a short
+    # ASCII coordinator message.
+    with myhoard_util.mysql_cursor(**standby.connect_options) as cursor:
+        cursor.execute("STOP REPLICA SQL_THREAD")
+        cursor.execute("SET GLOBAL replica_parallel_workers = 0")
+        cursor.execute("START REPLICA SQL_THREAD")
+    with myhoard_util.mysql_cursor(**master.connect_options) as cursor:
+        cursor.execute("CREATE DATABASE cut_text")
+
+    def database_replicated() -> None:
+        with myhoard_util.mysql_cursor(**standby.connect_options) as cursor:
+            cursor.execute("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'cut_text'")
+            assert cursor.fetchone() is not None
+
+    while_asserts(database_replicated, timeout=30)
+
+    # Create the table on the standby only, so replicating the source's CREATE TABLE fails with error 1050
+    with myhoard_util.mysql_cursor(**standby.connect_options) as cursor:
+        cursor.execute("SET SESSION sql_log_bin = 0")
+        cursor.execute("CREATE TABLE cut_text.t (id INT PRIMARY KEY)")
+    comment = "x" + CUT_PADDING + CUT_CHAR * 400
+    with myhoard_util.mysql_cursor(**master.connect_options) as cursor:
+        cursor.execute(f"CREATE TABLE cut_text.t (id INT PRIMARY KEY) COMMENT '{comment}'")
+
+    def sql_thread_failed() -> None:
+        status = _raw_replica_status(standby.connect_options)
+        assert status["Replica_SQL_Running"] == b"No"
+        assert status["Last_SQL_Errno"] == 1050
+
+    while_asserts(sql_thread_failed, timeout=30)
+
+
+def test_get_replica_status_reads_error_text_cut_inside_a_character(
+    mysql_master: MySQLConfig, mysql_standby1: MySQLConfig
+) -> None:
+    _break_replication_with_cut_error_text(master=mysql_master, standby=mysql_standby1)
+
+    # Precondition: MySQL cut Last_SQL_Error inside a character. If this fails, CUT_PADDING needs another length.
+    raw_error = _raw_replica_status(mysql_standby1.connect_options)["Last_SQL_Error"]
+    assert len(raw_error) == 1023
+    with pytest.raises(UnicodeDecodeError):
+        raw_error.decode("utf-8")
+    with myhoard_util.mysql_cursor(**mysql_standby1.connect_options) as cursor:
+        with pytest.raises(UnicodeDecodeError):
+            cursor.execute("SHOW REPLICA STATUS")
+
+    with myhoard_util.mysql_cursor(**mysql_standby1.connect_options) as cursor:
+        replica_status = myhoard_util.get_replica_status(cursor)
+        assert replica_status is not None
+        status: Dict[str, Any] = dict(replica_status)
+        assert status["Replica_SQL_Running"] == "No"
+        assert status["Last_SQL_Errno"] == 1050
+        assert status["Last_SQL_Error"].startswith("Error 'Table 't' already exists' on query.")
+        assert status["Last_SQL_Error"].endswith(CUT_CHAR + "\ufffd")
+        assert status["Last_SQL_Error"].count("\ufffd") == 1
+        assert status["Last_SQL_Error"] == raw_error.decode("utf-8", errors="replace")
+        assert status["Last_Error"] == status["Last_SQL_Error"]
+
+        # The connection is still usable and decodes text as before
+        assert cursor.connection.use_unicode is True
+        cursor.execute("SELECT 'abc' AS text_value, 1 AS int_value")
+        assert cursor.fetchone() == {"text_value": "abc", "int_value": 1}
+
+
+def test_get_replica_status_matches_plain_read_on_healthy_standby(
+    mysql_master: MySQLConfig, mysql_standby1: MySQLConfig
+) -> None:
+    # A replication filter on a database that doesn't exist puts multi-byte text into Replicate_Ignore_DB, so the
+    # comparison covers text that pymysql has to decode, not only ASCII
+    ignored_database = "\u65e5\u672c"
+    with myhoard_util.mysql_cursor(**mysql_standby1.connect_options) as cursor:
+        cursor.execute("STOP REPLICA SQL_THREAD")
+        cursor.execute(f"CHANGE REPLICATION FILTER REPLICATE_IGNORE_DB = (`{ignored_database}`)")
+        cursor.execute("START REPLICA SQL_THREAD")
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        cursor.execute("CREATE DATABASE healthy_standby")
+
+    with myhoard_util.mysql_cursor(**mysql_standby1.connect_options) as cursor:
+
+        def same_as_plain_read() -> None:
+            cursor.execute("SHOW REPLICA STATUS")
+            before = cursor.fetchone()
+            replica_status = myhoard_util.get_replica_status(cursor)
+            cursor.execute("SHOW REPLICA STATUS")
+            after = cursor.fetchone()
+            assert before is not None
+            assert before["Replica_IO_Running"] == "Yes"
+            assert before["Replica_SQL_Running"] == "Yes"
+            assert before["Executed_Gtid_Set"]
+            assert before["Replicate_Ignore_DB"] == ignored_database
+            assert before == after, "status changed between the reads"
+            assert replica_status is not None
+            status: Dict[str, Any] = dict(replica_status)
+            assert list(status) == list(before)
+            assert status == before
+            assert {key: type(value) for key, value in status.items()} == {key: type(value) for key, value in before.items()}
+
+        while_asserts(same_as_plain_read, timeout=30)
+
+
+def test_get_replica_status_keeps_the_connection_decoding_text(mysql_master: MySQLConfig) -> None:
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        # Not a replica, callers get None as before
+        assert myhoard_util.get_replica_status(cursor) is None
+        assert cursor.connection.use_unicode is True
+
+        with patch.object(cursor, "execute", side_effect=pymysql.err.OperationalError(2013, "Lost connection")):
+            with pytest.raises(pymysql.err.OperationalError):
+                myhoard_util.get_replica_status(cursor)
+        assert cursor.connection.use_unicode is True
+        cursor.execute("SELECT 'abc' AS text_value")
+        assert cursor.fetchone() == {"text_value": "abc"}
 
 
 def test_xtrabackup_version() -> None:
