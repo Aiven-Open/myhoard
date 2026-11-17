@@ -1635,7 +1635,6 @@ class RestoreCoordinator(threading.Thread):
                     # File must end with linefeed or else last line will not be processed correctly
                     index_file.write(("\n".join(names) + "\n").encode("utf-8"))
             self.update_state(last_flushed_index=last_flushed_index, write_relay_log_manually=False)
-            cursor.execute("SHOW REPLICA STATUS")
             replica_status = get_replica_status(cursor)
             # replica_status can be none if RESET REPLICA has been performed or if the replica never was running
             final_relay_log_file = replica_status["Relay_Log_File"] if replica_status is not None else None

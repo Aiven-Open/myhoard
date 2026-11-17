@@ -9,7 +9,7 @@ from math import log10
 from pathlib import Path
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
-from typing import Any, Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
+from typing import Any, cast, Dict, Iterable, Iterator, List, Literal, NamedTuple, Optional, Tuple, TypedDict, Union
 
 import collections
 import contextlib
@@ -836,9 +836,32 @@ def get_replica_status(cursor) -> Optional[ReplicaStatus]:
     """Retrieve the replica status
 
     replica_status can be none if RESET REPLICA has been performed or if the replica never was running.
+
+    MySQL cuts Last_Error, Last_SQL_Error and Last_IO_Error at 1023 bytes, and the cut can land inside a
+    multi-byte character. pymysql decodes text columns strictly, so the whole query would raise
+    UnicodeDecodeError and leave the rest of the result unread on the connection. Read the row as bytes
+    and decode it here instead, turning a cut character into U+FFFD.
+
+    The row equals a strict read only because SHOW REPLICA STATUS has just integer and non-binary text columns.
+    With use_unicode off a binary text column would come back as str here instead of bytes, and a DECIMAL column
+    would fail in its converter. test_get_replica_status_matches_plain_read_on_healthy_standby checks this.
     """
-    cursor.execute("SHOW REPLICA STATUS")
-    return cursor.fetchone()
+    connection = cursor.connection
+    use_unicode = connection.use_unicode
+    # pymysql reads use_unicode while it reads the result, so it can be turned off for this one statement
+    connection.use_unicode = False
+    try:
+        cursor.execute("SHOW REPLICA STATUS")
+        row = cursor.fetchone()
+    finally:
+        connection.use_unicode = use_unicode
+    if row is None or not use_unicode:
+        return row
+    encoding = connection.encoding
+    return cast(
+        ReplicaStatus,
+        {key: value.decode(encoding, errors="replace") if isinstance(value, bytes) else value for key, value in row.items()},
+    )
 
 
 def restart_unexpected_dead_sql_thread(cursor, replica_status, stats, log):
