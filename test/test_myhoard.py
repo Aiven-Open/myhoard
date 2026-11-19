@@ -1,6 +1,8 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from . import get_random_port, wait_for_port, while_asserts
+from . import get_random_port, started_download_workers, wait_for_condition, wait_for_port, while_asserts
 from myhoard.myhoard import MyHoard
+from rohmu.object_storage.local import LocalTransfer
+from typing import Iterator
 from unittest.mock import MagicMock, mock_open, patch
 
 import contextlib
@@ -30,6 +32,54 @@ def mock_stderr_isatty():
             yield
 
     return _mock_stderr_isatty
+
+
+def _write_config(config) -> str:
+    config_name = os.path.join(config["state_directory"], "myhoard.json")
+    with open(config_name, "w") as f:
+        json.dump(config, f)
+    return config_name
+
+
+def _storage_directory(config) -> str:
+    return config["backup_sites"]["default"]["object_storage"]["directory"]
+
+
+@pytest.fixture(name="daemon_restoring_with_hung_download_workers")
+def fixture_daemon_restoring_with_hung_download_workers(myhoard_config) -> Iterator[subprocess.Popen]:
+    """The daemon as a subprocess, in a restore whose download worker has started and never exits by itself."""
+    storage_dir = _storage_directory(myhoard_config)
+    # Enough of a backup to be listed and picked for restore. The restore then waits for the rest of the backup to
+    # appear, with its download workers running.
+    LocalTransfer(storage_dir).store_file_from_memory("default/stream/basebackup.json", b'{"end_ts": 0}')
+    myhoard_config["restore_download_workers"] = 1
+    config_name = _write_config(myhoard_config)
+    http_address = myhoard_config["http_address"]
+    http_port = myhoard_config["http_port"]
+    python3 = sys.executable or os.environ.get("PYTHON", "python3")
+    cmd = [python3, "-m", "test.daemon_with_hung_download_workers", "--config", config_name]
+    with subprocess.Popen(cmd, env={"PYTHONPATH": ROOT_DIR}) as proc:
+        try:
+            wait_for_port(http_port, hostname=http_address, wait_time=5)
+
+            def backup_listed():
+                response = requests.get(f"http://{http_address}:{http_port}/backup", timeout=1)
+                assert response.status_code == 200
+                assert response.json()["backups"]
+
+            while_asserts(backup_listed)
+            response = requests.put(
+                f"http://{http_address}:{http_port}/status",
+                json={"mode": "restore", "site": "default", "stream_id": "stream"},
+                timeout=1,
+            )
+            response.raise_for_status()
+            wait_for_condition(
+                lambda: started_download_workers(storage_dir), timeout=30, description="download worker has started"
+            )
+            yield proc
+        finally:
+            proc.kill()
 
 
 def test_sample_config_keys_match_fixture_config_keys(myhoard_config):
@@ -112,6 +162,36 @@ def test_basic_daemon_execution(myhoard_config):
         finally:
             with contextlib.suppress(Exception):
                 os.kill(proc.pid, signal.SIGKILL)
+
+
+def test_daemon_applies_reloaded_config_when_restore_download_workers_do_not_exit(
+    myhoard_config, daemon_restoring_with_hung_download_workers
+):
+    """A reload stops the restore coordinator. Download workers that do not exit must not freeze the daemon there."""
+    http_address = myhoard_config["http_address"]
+    new_http_port = get_random_port(start=3000, end=30000)
+    myhoard_config["http_port"] = new_http_port
+    _write_config(myhoard_config)
+
+    daemon_restoring_with_hung_download_workers.send_signal(signal.SIGHUP)
+
+    wait_for_port(new_http_port, hostname=http_address, wait_time=10)
+    response = requests.get(f"http://{http_address}:{new_http_port}/status", timeout=1)
+    response.raise_for_status()
+    assert response.json()["mode"] == "restore"
+    # The restore goes on with a new coordinator, which starts a download worker of its own
+    wait_for_condition(
+        lambda: len(started_download_workers(_storage_directory(myhoard_config))) == 2,
+        timeout=30,
+        description="download worker has started after the reload",
+    )
+
+
+def test_daemon_exits_on_sigterm_when_restore_download_workers_do_not_exit(daemon_restoring_with_hung_download_workers):
+    """Shutdown stops the restore coordinator too, and must end with a clean exit."""
+    daemon_restoring_with_hung_download_workers.send_signal(signal.SIGTERM)
+
+    assert daemon_restoring_with_hung_download_workers.wait(timeout=10) == 0
 
 
 def test_main_logging_uses_journal_handler_when_available_and_not_tty(

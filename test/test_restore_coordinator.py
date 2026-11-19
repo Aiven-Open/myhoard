@@ -1,19 +1,34 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
-from . import build_statsd_client, DataGenerator, generate_rsa_key_pair, restart_mysql, while_asserts
+from . import (
+    build_statsd_client,
+    DataGenerator,
+    generate_rsa_key_pair,
+    hang_until_parent_is_gone,
+    restart_mysql,
+    wait_for_condition,
+    while_asserts,
+)
+from functools import partial
+from multiprocessing.synchronize import Semaphore
+from myhoard import restore_coordinator
 from myhoard.backup_stream import BackupStream
 from myhoard.binlog_scanner import BinlogScanner
 from myhoard.restore_coordinator import extend_gtid_executed, RestoreCoordinator
 from myhoard.state_manager import StateManager
+from myhoard.statsd import StatsClient
 from myhoard.util import get_xtrabackup_version, GtidRangeDict
 from packaging.version import Version
 from rohmu.object_storage.local import LocalTransfer
-from typing import Any, cast, Generic, List, Mapping, TypeVar
-from unittest.mock import Mock, patch
+from typing import Any, Callable, cast, Generic, Iterator, List, Mapping, NamedTuple, TypeVar
+from unittest.mock import call, Mock, patch
 
 import logging
+import multiprocessing
 import myhoard.util as myhoard_util
 import os
 import pytest
+import signal
+import threading
 import time
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -926,3 +941,211 @@ def test_extend_gtid_executed_leaves_tagged_gtids_alone(mysql_master) -> None:
         ]
     else:
         assert rows == [(new_uuid, 1, 5), (server_uuid, 1, 15)]
+
+
+class _WorkerSignals(NamedTuple):
+    """How the stand-in download workers of a test tell it how far they are."""
+
+    worker_started: Semaphore
+    download_started: Semaphore
+
+
+def _hung_download_worker(signals: _WorkerSignals, _config, _queue_in, _queue_out) -> None:
+    """Stands in for `download_binlog` stuck in a download: it never looks at its queue again."""
+    signals.worker_started.release()
+    hang_until_parent_is_gone()
+
+
+def _sigterm_proof_download_worker(signals: _WorkerSignals, config, queue_in, queue_out) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    _hung_download_worker(signals, config, queue_in, queue_out)
+
+
+def _slow_download_worker(signals: _WorkerSignals, _config, queue_in, queue_out) -> None:
+    """Stands in for `download_binlog` with downloads that take half a second each."""
+    signals.worker_started.release()
+    while action := queue_in.get():
+        time.sleep(0.5)
+        queue_out.put({**action, "result": "success"})
+
+
+def _endless_download_worker(signals: _WorkerSignals, _config, queue_in, _queue_out) -> None:
+    """Stands in for `download_binlog` with a download that works on and on."""
+    signals.worker_started.release()
+    queue_in.get()
+    signals.download_started.release()
+    hang_until_parent_is_gone()
+
+
+@pytest.fixture(name="worker_signals")
+def fixture_worker_signals() -> _WorkerSignals:
+    mp_context = multiprocessing.get_context("spawn")
+    return _WorkerSignals(worker_started=mp_context.Semaphore(0), download_started=mp_context.Semaphore(0))
+
+
+@pytest.fixture(name="start_download_workers")
+def fixture_start_download_workers(
+    session_tmpdir, monkeypatch, worker_signals
+) -> Iterator[Callable[..., RestoreCoordinator]]:
+    """Returns a function that builds a coordinator with running download workers and no coordinator thread, which is
+    how `stop()` finds them once the thread has exited. Its stats client is a mock. Stand-in workers have started
+    when the function returns."""
+    coordinators = []
+    workers = []
+
+    def start_download_workers(
+        *,
+        worker: Callable | None = None,
+        count: int = 1,
+        stop_grace: float = RestoreCoordinator.DOWNLOAD_WORKER_STOP_GRACE,
+        terminate_grace: float = RestoreCoordinator.DOWNLOAD_WORKER_TERMINATE_GRACE,
+    ) -> RestoreCoordinator:
+        rc = _make_minimal_coordinator(session_tmpdir)
+        rc.stats = Mock(spec=StatsClient)
+        rc.download_worker_stop_grace = stop_grace
+        rc.download_worker_terminate_grace = terminate_grace
+        rc.download_workers_count = count
+        rc.file_storage_config = {"storage_type": "local", "directory": session_tmpdir().strpath}
+        if worker:
+            monkeypatch.setattr(restore_coordinator, "download_binlog", partial(worker, worker_signals))
+        rc._start_process_pool()  # pylint: disable=protected-access
+        coordinators.append(rc)
+        workers.extend(rc.worker_processes)
+        if worker:
+            for _ in range(count):
+                assert worker_signals.worker_started.acquire(timeout=30), "stand-in download worker has not started"
+        return rc
+
+    yield start_download_workers
+    for process in workers:
+        process.kill()
+        process.join()
+    for rc in coordinators:
+        # After a failed test a queue may hold data that nothing reads, which would block pytest at exit
+        rc.queue_in.cancel_join_thread()
+        rc.queue_out.cancel_join_thread()
+
+
+def _stop(rc: RestoreCoordinator, *, timeout: float = 15.0) -> float:
+    """Returns how long `rc.stop()` took, and fails instead of hanging when it does not return."""
+    workers = list(rc.worker_processes)
+    stopper = threading.Thread(target=rc.stop, daemon=True)
+    started_at = time.monotonic()
+    stopper.start()
+    stopper.join(timeout)
+    duration = time.monotonic() - started_at
+    if stopper.is_alive():
+        for worker in workers:
+            # Not worker.kill(), which a test may have patched
+            if worker.is_alive():
+                os.kill(worker.pid, signal.SIGKILL)
+        stopper.join()
+        pytest.fail(f"stop() had not returned after {timeout} s")
+    return duration
+
+
+def _queue_failing_downloads(rc: RestoreCoordinator, downloads_dir: str, count: int) -> None:
+    """Queues downloads of binlogs that do not exist. A failed download makes as large a result as a successful one."""
+    for index in range(count):
+        rc.queue_out.put(
+            {
+                "compression_algorithm": "snappy",
+                "local_file_name": os.path.join(downloads_dir, f"relay.{index:06}.prefetch"),
+                "remote_file_size": 1,
+                "remote_key": f"default/stream/binlogs/0/{index:06}",
+            }
+        )
+    wait_for_condition(
+        lambda: len(os.listdir(downloads_dir)) == count, timeout=60, description="workers have tried all downloads"
+    )
+
+
+def _forced_stop(action: str):
+    return call("myhoard.restore.download_worker_forced_stop", tags={"action": action})
+
+
+def test_stop_lets_idle_download_worker_exit_by_itself(start_download_workers, session_tmpdir) -> None:
+    rc = start_download_workers()
+    (worker,) = rc.worker_processes
+    _queue_failing_downloads(rc, session_tmpdir().strpath, 1)
+
+    duration = _stop(rc)
+
+    assert worker.exitcode == 0
+    assert duration < rc.download_worker_stop_grace
+    assert rc.stats.increase.call_args_list == []
+    assert rc.worker_processes == []
+
+
+def test_stop_returns_with_unread_download_results(start_download_workers, session_tmpdir) -> None:
+    rc = start_download_workers()
+    (worker,) = rc.worker_processes
+    # More results than fit in the pipe of the results queue (64 KiB on Linux), which nothing reads once the
+    # coordinator thread is gone. The worker cannot exit before they are read.
+    _queue_failing_downloads(rc, session_tmpdir().strpath, 400)
+
+    _stop(rc)
+
+    assert worker.exitcode == 0
+    assert rc.stats.increase.call_args_list == []
+
+
+def test_stop_drops_queued_downloads(start_download_workers) -> None:
+    rc = start_download_workers(worker=_slow_download_worker)
+    (worker,) = rc.worker_processes
+    # 10 s of downloads, twice the grace: the worker can only exit by itself in time if they are dropped
+    for index in range(20):
+        rc.queue_out.put({"remote_key": str(index)})
+
+    duration = _stop(rc)
+
+    assert worker.exitcode == 0
+    assert duration < rc.download_worker_stop_grace
+    assert rc.stats.increase.call_args_list == []
+
+
+def test_stop_terminates_download_workers_that_do_not_exit(start_download_workers) -> None:
+    rc = start_download_workers(worker=_hung_download_worker, count=2, stop_grace=0.5)
+    workers = list(rc.worker_processes)
+
+    _stop(rc)
+
+    assert [worker.exitcode for worker in workers] == [-signal.SIGTERM, -signal.SIGTERM]
+    assert rc.stats.increase.call_args_list == [_forced_stop("terminate"), _forced_stop("terminate")]
+    assert rc.worker_processes == []
+
+
+def test_stop_kills_download_worker_that_ignores_sigterm(start_download_workers) -> None:
+    rc = start_download_workers(worker=_sigterm_proof_download_worker, stop_grace=0.5, terminate_grace=0.5)
+    (worker,) = rc.worker_processes
+
+    _stop(rc)
+
+    assert worker.exitcode == -signal.SIGKILL
+    assert rc.stats.increase.call_args_list == [_forced_stop("terminate"), _forced_stop("kill")]
+
+
+def test_stop_terminates_download_that_outlasts_the_grace(start_download_workers, worker_signals) -> None:
+    """A working download is not told apart from a hung one: its binlog is downloaded again by the next coordinator."""
+    rc = start_download_workers(worker=_endless_download_worker, stop_grace=0.2)
+    (worker,) = rc.worker_processes
+    rc.queue_out.put({"remote_key": "0"})
+    assert worker_signals.download_started.acquire(timeout=30)
+
+    _stop(rc)
+
+    assert worker.exitcode == -signal.SIGTERM
+    assert rc.stats.increase.call_args_list == [_forced_stop("terminate")]
+
+
+def test_stop_reports_download_worker_that_survives_kill(start_download_workers, caplog) -> None:
+    rc = start_download_workers(worker=_sigterm_proof_download_worker, stop_grace=0.2, terminate_grace=0.2)
+    (worker,) = rc.worker_processes
+
+    # Stands in for a process that SIGKILL does not end in time, such as one stuck in uninterruptible IO
+    with caplog.at_level(logging.ERROR, logger=rc.log.name), patch.object(worker, "kill"):
+        _stop(rc)
+
+    assert worker.is_alive()
+    assert f"Download worker pid={worker.pid} is still alive after kill, giving up on it" in caplog.text
+    assert rc.worker_processes == []

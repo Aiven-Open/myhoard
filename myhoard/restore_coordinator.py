@@ -160,6 +160,11 @@ class RestoreCoordinator(threading.Thread):
     # read in all binlogs that were available at that time
     BINLOG_POLL_INTERVAL = 30
 
+    # How long stopping waits for the binlog download workers to exit by themselves, and then for terminate() to work
+    DOWNLOAD_WORKER_STOP_GRACE = 5.0
+    DOWNLOAD_WORKER_TERMINATE_GRACE = 2.0
+    DOWNLOAD_WORKER_QUEUE_POLL_INTERVAL = 0.1
+
     ITERATION_SLEEP_SHORT = 0.2
     ITERATION_SLEEP_LONG = 10
 
@@ -284,6 +289,8 @@ class RestoreCoordinator(threading.Thread):
         # a basebackup fails for any reason but earlier backups are available and basebackup from one of those
         # can be successfully restored.
         self.binlog_streams = binlog_streams
+        self.download_worker_stop_grace = self.DOWNLOAD_WORKER_STOP_GRACE
+        self.download_worker_terminate_grace = self.DOWNLOAD_WORKER_TERMINATE_GRACE
         self.download_workers_count = download_workers_count
         self.use_memory = use_memory
         self.current_file = None
@@ -527,15 +534,67 @@ class RestoreCoordinator(threading.Thread):
         self.log.info("Stopping restore coordinator")
         self.is_running = False
         self.queue_in.put(None)
-        for _ in range(len(self.worker_processes)):
-            self.queue_out.put(None)
         # Thread might not have been started or could've already been joined, we don't care about that
         with suppress(Exception):
             self.join()
-        for worker in self.worker_processes:
-            worker.join()
-        self.worker_processes = []
+        self._stop_download_workers()
         self.log.info("Restore coordinator stopped")
+
+    def _stop_download_workers(self) -> None:
+        """Stops the download workers in bounded time. Only for use after the coordinator thread has exited: that
+        thread queues the downloads and reads their results."""
+        if not self.worker_processes:
+            return
+        # The next coordinator queues these again. A worker that finishes a download meanwhile can still take one more.
+        dropped_downloads = 0
+        with suppress(queue.Empty):
+            while True:
+                if self.queue_out.get(timeout=self.DOWNLOAD_WORKER_QUEUE_POLL_INTERVAL):
+                    dropped_downloads += 1
+        if dropped_downloads:
+            self.log.info("Dropped %s queued binlog downloads", dropped_downloads)
+        for _ in self.worker_processes:
+            self.queue_out.put(None)
+
+        # A worker cannot exit while results it has produced are unread
+        deadline = time.monotonic() + self.download_worker_stop_grace
+        while time.monotonic() < deadline:
+            try:
+                self.queue_in.get(timeout=self.DOWNLOAD_WORKER_QUEUE_POLL_INTERVAL)
+            except queue.Empty:
+                if not self._alive_download_workers():
+                    break
+
+        for worker in self._alive_download_workers():
+            # Also a working download that takes longer than the grace, the next coordinator downloads it again
+            self.log.info(
+                "Download worker pid=%s did not exit in %g s, terminating it", worker.pid, self.download_worker_stop_grace
+            )
+            self.stats.increase("myhoard.restore.download_worker_forced_stop", tags={"action": "terminate"})
+            worker.terminate()
+        self._join_download_workers(timeout=self.download_worker_terminate_grace)
+
+        for worker in self._alive_download_workers():
+            self.log.error(
+                "Download worker pid=%s survived terminate for %g s, killing it",
+                worker.pid,
+                self.download_worker_terminate_grace,
+            )
+            self.stats.increase("myhoard.restore.download_worker_forced_stop", tags={"action": "kill"})
+            worker.kill()
+        self._join_download_workers(timeout=self.download_worker_terminate_grace)
+
+        for worker in self._alive_download_workers():
+            self.log.error("Download worker pid=%s is still alive after kill, giving up on it", worker.pid)
+        self.worker_processes = []
+
+    def _alive_download_workers(self) -> List:
+        return [worker for worker in self.worker_processes if worker.is_alive()]
+
+    def _join_download_workers(self, *, timeout: float) -> None:
+        deadline = time.monotonic() + timeout
+        for worker in self.worker_processes:
+            worker.join(max(deadline - time.monotonic(), 0))
 
     def _handle_broken_backup(self, stream_id: str):
         broken_info = self._load_file_data("broken.json", stream_id=stream_id, missing_ok=True)

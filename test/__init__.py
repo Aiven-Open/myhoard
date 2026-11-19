@@ -264,6 +264,30 @@ def generate_rsa_key_pair(*, bits=3072, public_exponent=65537):
     return private_pem, public_pem
 
 
+def mark_download_worker_started(config, name) -> None:
+    """Leaves a file in the storage directory for the test to wait for."""
+    with open(os.path.join(config["object_storage"]["directory"], f"started-{name}"), "w", encoding="utf-8"):
+        pass
+
+
+def started_download_workers(storage_directory: str) -> List[str]:
+    return [name for name in os.listdir(storage_directory) if name.startswith("started-")]
+
+
+def hang_until_parent_is_gone() -> None:
+    """For a stand-in worker process that must not exit by itself, and must not outlive a killed test either."""
+    parent_pid = os.getppid()
+    while os.getppid() == parent_pid:
+        time.sleep(0.1)
+
+
+def hung_download_worker(config, _queue_in, _queue_out) -> None:
+    """Stands in for `myhoard.binlog_downloader.download_binlog` stuck in a download: it never looks at its queue
+    again."""
+    mark_download_worker_started(config, os.getpid())
+    hang_until_parent_is_gone()
+
+
 def wait_for_condition(condition, *, timeout=5.0, interval=0.1, description="<no reason>"):
     start_time = time.monotonic()
     while True:
