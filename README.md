@@ -520,7 +520,38 @@ constant regardless of how much data there is. ``REDUCED`` requires Percona
 XtraBackup 8.4 or newer (and therefore MySQL 8.4 or newer). On older versions a
 warning is logged and ``--lock-ddl`` is not passed, so XtraBackup's default
 applies. It works for both full and incremental backups but cannot be combined
-with XtraBackup's page tracking, which MyHoard does not use.
+with XtraBackup's page tracking, see ``xtrabackup.page_tracking``.
+
+**xtrabackup.page_tracking**
+
+Lets XtraBackup use the server's page tracking, so an incremental backup reads
+only the pages that changed since the previous backup instead of every page of
+every tablespace. It is disabled by default.
+
+When enabled, ``--page-tracking`` is passed for full and incremental backups.
+Every such backup restarts the tracking on the server, which gives the next
+incremental its list of changed pages. An incremental whose base backup was
+taken before tracking started is done with the full scan by XtraBackup itself,
+so the setting can be turned on in the middle of a backup chain.
+
+Page tracking needs the ``mysqlbackup`` server component. Before a backup
+MyHoard installs it with ``INSTALL COMPONENT 'file://component_mysqlbackup'`` if
+it is not installed yet. The statement is not written to the binary log, so
+each server gets the component when it takes its first backup. The MySQL user
+MyHoard connects with needs ``INSERT`` and ``SELECT`` on ``mysql.component`` and
+the ``SYSTEM_VARIABLES_ADMIN`` privilege, on top of what a backup needs anyway.
+
+``--page-tracking`` is not passed, and a warning is logged, when the component
+cannot be installed, when XtraBackup is older than 8.4.0-7 (older versions read
+large ranges of unchanged pages, PXB-3853 and PXB-3862), or when ``lock_ddl`` is
+``REDUCED`` (XtraBackup refuses the two together). So a backup with page
+tracking always holds the DDL lock for its whole run.
+
+When XtraBackup falls back to the full scan it logs ``pagetracking: Failed to
+get page tracking file from server`` as an error although the backup succeeds.
+
+Whether a backup ran with ``--page-tracking`` is stored as ``page_tracking`` in
+the backup's ``basebackup.json``.
 
 **xtrabackup.register_redo_log_consumer**
 
@@ -545,9 +576,9 @@ backup down as much as the size of the data does. At ``1`` even a nearly empty
 server takes about a minute to back up.
 
 For full backups both reads and writes are limited, for incremental backups only
-reads. An incremental backup still reads every page of every tablespace to find
-the ones that changed, so its read IO is about the size of the whole dataset and
-this is what the throttle limits.
+reads. Without ``page_tracking`` an incremental backup still reads every page of
+every tablespace to find the ones that changed, so its read IO is about the size
+of the whole dataset and this is what the throttle limits.
 
 The limit is shared by all ``copy_threads``, so both can be set together; more
 threads do not raise the throughput past the throttle. The redo log is copied

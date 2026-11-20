@@ -47,6 +47,7 @@ DEFAULT_XTRABACKUP_SETTINGS: dict[str, Any] = {
     "encrypt_threads": 1,
     "estimate_memory": False,
     "lock_ddl": None,
+    "page_tracking": False,
     "register_redo_log_consumer": False,
     "throttle": None,
 }
