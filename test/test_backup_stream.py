@@ -168,6 +168,7 @@ def _run_backup_stream_test(session_tmpdir, mysql_master: MySQLConfig, backup_st
         assert backup["basebackup_info"]["split_size"] == split_size
         # lock_ddl is not configured, so xtrabackup ran with its default
         assert backup["basebackup_info"]["lock_ddl"] == myhoard_util.LOCK_DDL_ON
+        assert backup["basebackup_info"]["page_tracking"] is False
         if split_size:
             expected_number_of_splits = math.ceil(backup["basebackup_info"]["compressed_size"] / float(split_size))
             assert backup["basebackup_info"]["number_of_splits"] == expected_number_of_splits
@@ -337,3 +338,41 @@ def test_basebackup_error_tagged_with_lock_ddl(session_tmpdir, lock_ddl_tag, exp
             "reason": BaseBackupFailureReason.xtrabackup_error,
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("xtrabackup_settings", "expected_page_tracking"),
+    [
+        # not configured: off, like every other xtrabackup setting it falls back to the default
+        (None, False),
+        ({"page_tracking": True}, True),
+    ],
+)
+def test_basebackup_page_tracking_setting_is_passed_on(session_tmpdir, xtrabackup_settings, expected_page_tracking):
+    # pylint: disable=protected-access
+    state_dir = session_tmpdir().strpath
+    _, public_key_pem = generate_rsa_key_pair()
+    bs = BackupStream(
+        backup_reason=BackupStream.BackupReason.requested,
+        file_storage_setup_fn=MagicMock,
+        mode=BackupStream.Mode.active,
+        mysql_client_params={},
+        mysql_config_file_name="",
+        mysql_data_directory="",
+        normalized_backup_time="2019-02-25T08:20",
+        rsa_public_key_pem=public_key_pem,
+        remote_binlogs_state_file=os.path.join(state_dir, "backup_stream.remote_binlogs"),
+        server_id=1,
+        site="default",
+        state_file=os.path.join(state_dir, "backup_stream.json"),
+        stats=build_statsd_client(),
+        temp_dir=state_dir,
+        xtrabackup_settings=xtrabackup_settings,
+    )
+    bs.file_storage = MagicMock()
+    with patch("myhoard.backup_stream.BasebackupOperation") as basebackup_operation:
+        basebackup_operation.return_value.lock_ddl_tag = None
+        basebackup_operation.return_value.create_backup.side_effect = XtraBackupError("xtrabackup failed with code 1")
+        bs._take_basebackup()
+
+    assert basebackup_operation.call_args.kwargs["page_tracking"] is expected_page_tracking

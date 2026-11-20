@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import base64
 import logging
 import os
+import pymysql
 import re
 import select
 import shutil
@@ -29,6 +30,12 @@ import threading
 # Number of seconds to allow for database operations to complete
 # while running the OPTIMIZE TABLE mitigation
 CURSOR_TIMEOUT_DURING_OPTIMIZE: int = 120
+
+# Before 8.4.0-7 a page tracking backup also read large ranges of unchanged pages (PXB-3853, PXB-3862)
+# and could be slower than the full scan it is meant to replace.
+PAGE_TRACKING_MIN_XTRABACKUP_VERSION: BinVersion = (8, 4, 0, 7)
+# The server component that records changed pages, xtrabackup refuses --page-tracking without it
+PAGE_TRACKING_COMPONENT_URN = "file://component_mysqlbackup"
 
 # --lock-ddl=REDUCED only exists in Percona XtraBackup 8.4 and newer (Pro since 8.4.0-2, community
 # since 8.4.0-5); the 8.0 series has no REDUCED enum value and refuses to start with it. Since the
@@ -77,6 +84,7 @@ class BasebackupOperation:
         mysql_config_file_name,
         mysql_data_directory,
         optimize_tables_before_backup=False,
+        page_tracking: bool = False,
         progress_callback=None,
         register_redo_log_consumer=False,
         stats,
@@ -116,6 +124,9 @@ class BasebackupOperation:
         self.mysql_data_directory = mysql_data_directory
         self.number_of_files = 0
         self.optimize_tables_before_backup = optimize_tables_before_backup
+        self.page_tracking = page_tracking
+        # Whether `--page-tracking` is passed to xtrabackup, see _resolve_page_tracking. Resolved when the backup starts
+        self.page_tracking_enabled = False
         self.proc = None
         self.processed_original_bytes = 0
         self.progress_callback = progress_callback
@@ -136,6 +147,7 @@ class BasebackupOperation:
         # Resolved before the first progress update so every metric of this backup is tagged with it
         self.lock_ddl_option = self._resolve_lock_ddl()
         self.lock_ddl_resolved = True
+        self.page_tracking_enabled = self._resolve_page_tracking()
         self.data_directory_size_start, self.data_directory_filtered_size = self._get_data_directory_size()
         self._update_progress()
         if self.optimize_tables_before_backup:
@@ -216,6 +228,9 @@ class BasebackupOperation:
         if self.lock_ddl_option:
             command_line.append(f"--lock-ddl={self.lock_ddl_option}")
 
+        if self.page_tracking_enabled:
+            command_line.append("--page-tracking")
+
         if throttle := self._resolve_throttle():
             command_line.append(f"--throttle={throttle}")
 
@@ -243,8 +258,8 @@ class BasebackupOperation:
         window roughly flat as data grows.
 
         REDUCED works for both full and incremental backups. It is incompatible with xtrabackup's page
-        tracking (`--page-tracking`), which MyHoard does not use - anything adding page tracking must not
-        combine it with REDUCED. See
+        tracking (`--page-tracking`), so page tracking is left out when REDUCED is in effect, see
+        _resolve_page_tracking. See
         https://docs.percona.com/percona-xtrabackup/8.4/reduction-in-locks.html
         """
         if self.lock_ddl in (None, LOCK_DDL_ON):
@@ -267,6 +282,67 @@ class BasebackupOperation:
             return None
 
         return LOCK_DDL_REDUCED
+
+    def _resolve_page_tracking(self) -> bool:
+        """Resolves whether to pass `--page-tracking` to xtrabackup. Needs `lock_ddl_option` resolved first.
+
+        With page tracking the server records which pages change, and an incremental backup reads only
+        those instead of every page of every tablespace. Every backup run with the option, full ones
+        included, restarts the tracking, so the next incremental has a page list that starts at this
+        backup. An incremental whose base was taken before tracking started falls back to the full scan
+        inside xtrabackup, so turning the setting on in the middle of a chain is safe.
+
+        The option is left out, with a warning, when xtrabackup could not use it:
+        - the xtrabackup in use is older than PAGE_TRACKING_MIN_XTRABACKUP_VERSION
+        - `--lock-ddl=REDUCED` is in effect, xtrabackup refuses the two on the same command line
+        - the `mysqlbackup` component is not installed on the server and installing it fails, for
+          example because the server build does not ship it
+
+        See https://docs.percona.com/percona-xtrabackup/8.4/page-tracking.html
+        """
+        if not self.page_tracking:
+            return False
+
+        xtrabackup_version = get_xtrabackup_version()
+        if xtrabackup_version < PAGE_TRACKING_MIN_XTRABACKUP_VERSION:
+            self.log.warning(
+                "page_tracking requires Percona XtraBackup %r or newer but %r is in use, not passing --page-tracking",
+                PAGE_TRACKING_MIN_XTRABACKUP_VERSION,
+                xtrabackup_version,
+            )
+            return False
+
+        if self.lock_ddl_option == LOCK_DDL_REDUCED:
+            self.log.warning("page_tracking cannot be combined with lock_ddl REDUCED, not passing --page-tracking")
+            return False
+
+        return self._ensure_page_tracking_component()
+
+    def _ensure_page_tracking_component(self) -> bool:
+        """Installs the `mysqlbackup` server component unless it is there already. Returns False if it is
+        missing and could not be installed.
+
+        The component is registered in `mysql.component`, so it stays installed over server restarts and
+        is part of every backup taken afterwards. `INSTALL COMPONENT` is not replicated, which is why this
+        runs on whichever server takes the backup."""
+        try:
+            with mysql_cursor(**self.mysql_client_params) as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) AS count FROM mysql.component WHERE component_urn = %s", [PAGE_TRACKING_COMPONENT_URN]
+                )
+                row = cursor.fetchone()
+                if row and row["count"] > 0:
+                    return True
+                cursor.execute(f"INSTALL COMPONENT '{PAGE_TRACKING_COMPONENT_URN}'")
+                self.log.info("Installed server component %r for page tracking", PAGE_TRACKING_COMPONENT_URN)
+                return True
+        except pymysql.err.Error as ex:
+            self.log.warning(
+                "Could not make sure server component %r is installed, not passing --page-tracking: %r",
+                PAGE_TRACKING_COMPONENT_URN,
+                ex,
+            )
+            return False
 
     def _resolve_throttle(self) -> int | None:
         """Resolves the `--throttle` value to put on the command line, or None to leave the option out.

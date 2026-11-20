@@ -1057,6 +1057,7 @@ class BackupStream(threading.Thread):
             mysql_config_file_name=self.mysql_config_file_name,
             mysql_data_directory=self.mysql_data_directory,
             optimize_tables_before_backup=self.optimize_tables_before_backup,
+            page_tracking=self.xtrabackup_settings["page_tracking"],
             progress_callback=self._basebackup_progress_callback,
             register_redo_log_consumer=self.xtrabackup_settings["register_redo_log_consumer"],
             stats=self.stats,
@@ -1139,6 +1140,8 @@ class BackupStream(threading.Thread):
                 "lsn_info": self.basebackup_operation.lsn_info,
                 "normalized_backup_time": self.state["normalized_backup_time"],
                 "number_of_files": self.basebackup_operation.number_of_files,
+                # Whether the backup ran with --page-tracking
+                "page_tracking": self.basebackup_operation.page_tracking_enabled,
                 "split_size": self.split_size,
                 "number_of_splits": basebackup_file_metadata.get("number_of_splits", 1),
                 "start_size": self.basebackup_operation.data_directory_size_start,

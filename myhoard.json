@@ -80,6 +80,7 @@
         "encrypt_threads": 1,
         "estimate_memory": false,
         "lock_ddl": null,
+        "page_tracking": false,
         "register_redo_log_consumer": false,
         "throttle": null
     }

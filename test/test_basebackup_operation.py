@@ -1,6 +1,10 @@
 # Copyright (c) 2019 Aiven, Helsinki, Finland. https://aiven.io/
 from . import build_statsd_client, MySQLConfig, restart_mysql
-from myhoard.basebackup_operation import BasebackupOperation
+from myhoard.basebackup_operation import (
+    BasebackupOperation,
+    PAGE_TRACKING_COMPONENT_URN,
+    PAGE_TRACKING_MIN_XTRABACKUP_VERSION,
+)
 from packaging.version import Version
 from typing import Any, IO
 from unittest import SkipTest
@@ -8,6 +12,7 @@ from unittest.mock import mock_open, patch
 
 import myhoard.util as myhoard_util
 import os
+import pymysql
 import pytest
 
 pytestmark = [pytest.mark.unittest, pytest.mark.all]
@@ -334,7 +339,12 @@ def test_process_output_line_new_file(line: str, expected_file: str) -> None:
 
 
 def _make_backup_op(
-    *, copy_threads: int = 1, estimate_memory: bool = False, lock_ddl: str | None = None, throttle: Any = None
+    *,
+    copy_threads: int = 1,
+    estimate_memory: bool = False,
+    lock_ddl: str | None = None,
+    page_tracking: bool = False,
+    throttle: Any = None,
 ) -> BasebackupOperation:
     # /dev/null is read for the mysql config at construction time; no live server or subprocess is needed.
     op = BasebackupOperation(
@@ -346,6 +356,7 @@ def _make_backup_op(
         mysql_client_params={"host": "127.0.0.1"},
         mysql_config_file_name="/dev/null",
         mysql_data_directory="/dev/null",
+        page_tracking=page_tracking,
         stats=build_statsd_client(),
         stream_handler=None,
         temp_dir="/tmp",
@@ -497,3 +508,149 @@ def test_build_backup_command_line_throttle_with_parallel_copy() -> None:
 
     assert "--parallel=4" in command_line
     assert "--throttle=5" in command_line
+
+
+@pytest.mark.parametrize(
+    ("page_tracking", "lock_ddl", "xtrabackup_version", "component_installed", "expected"),
+    [
+        # off by default: the command line stays what MyHoard has always produced
+        (False, None, (8, 4, 0, 7), True, False),
+        (True, None, (8, 4, 0, 7), True, True),
+        (True, myhoard_util.LOCK_DDL_ON, (8, 4, 0, 8), True, True),
+        # xtrabackup refuses --page-tracking together with --lock-ddl=REDUCED
+        (True, myhoard_util.LOCK_DDL_REDUCED, (8, 4, 0, 7), True, False),
+        # before 8.4.0-7 page tracking also read unchanged page ranges
+        (True, None, (8, 4, 0, 6), True, False),
+        (True, None, (8, 0, 35, 36), True, False),
+        # the server component is missing and could not be installed
+        (True, None, (8, 4, 0, 7), False, False),
+    ],
+)
+def test_build_backup_command_line_page_tracking(
+    page_tracking: bool,
+    lock_ddl: str | None,
+    xtrabackup_version: myhoard_util.BinVersion,
+    component_installed: bool,
+    expected: bool,
+) -> None:
+    op = _make_backup_op(lock_ddl=lock_ddl, page_tracking=page_tracking)
+    with (
+        patch("myhoard.basebackup_operation.get_xtrabackup_version", return_value=xtrabackup_version),
+        patch.object(op, "_ensure_page_tracking_component", return_value=component_installed),
+    ):
+        # create_backup resolves both before building the command line
+        op.lock_ddl_option = op._resolve_lock_ddl()  # pylint: disable=protected-access
+        op.page_tracking_enabled = op._resolve_page_tracking()  # pylint: disable=protected-access
+        command_line = op._build_backup_command_line(  # pylint: disable=protected-access
+            mysql_config_file_name="/etc/mysql/my.cnf", encryption_key_file_name="/tmp/key.bin"
+        )
+
+    assert op.page_tracking_enabled is expected
+    assert ("--page-tracking" in command_line) is expected
+
+
+def test_page_tracking_off_does_not_touch_the_server() -> None:
+    op = _make_backup_op()
+    with (
+        patch("myhoard.basebackup_operation.get_xtrabackup_version") as get_version,
+        patch("myhoard.basebackup_operation.mysql_cursor") as mysql_cursor,
+    ):
+        assert op._resolve_page_tracking() is False  # pylint: disable=protected-access
+
+    get_version.assert_not_called()
+    mysql_cursor.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("installed_count", "install_error", "expected_install", "expected"),
+    [
+        (1, None, False, True),
+        (0, None, True, True),
+        # for example a server build that does not ship the component
+        (0, pymysql.err.OperationalError(1126, "Can't open shared library"), True, False),
+    ],
+)
+def test_ensure_page_tracking_component(
+    installed_count: int, install_error: Exception | None, expected_install: bool, expected: bool
+) -> None:
+    install_statement = "INSTALL COMPONENT 'file://component_mysqlbackup'"
+
+    def execute(statement: str, _args: Any = None) -> None:
+        if statement == install_statement and install_error:
+            raise install_error
+
+    op = _make_backup_op(page_tracking=True)
+    with patch("myhoard.basebackup_operation.mysql_cursor") as mysql_cursor:
+        cursor = mysql_cursor.return_value.__enter__.return_value
+        cursor.execute.side_effect = execute
+        cursor.fetchone.return_value = {"count": installed_count}
+        assert op._ensure_page_tracking_component() is expected  # pylint: disable=protected-access
+
+    statements = [call.args[0] for call in cursor.execute.call_args_list]
+    assert (install_statement in statements) is expected_install
+
+
+def test_ensure_page_tracking_component_server_unreachable() -> None:
+    op = _make_backup_op(page_tracking=True)
+    error = pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+    with patch("myhoard.basebackup_operation.mysql_cursor", side_effect=error):
+        assert op._ensure_page_tracking_component() is False  # pylint: disable=protected-access
+
+
+def test_backup_with_page_tracking(mysql_master: MySQLConfig, caplog: pytest.LogCaptureFixture) -> None:
+    if myhoard_util.get_xtrabackup_version() < PAGE_TRACKING_MIN_XTRABACKUP_VERSION:
+        raise SkipTest("xtrabackup is too old for page tracking")
+
+    def component_count() -> int:
+        with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM mysql.component WHERE component_urn = %s", [PAGE_TRACKING_COMPONENT_URN]
+            )
+            row = cursor.fetchone()
+            assert row
+            return row["count"]
+
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        cursor.execute("CREATE DATABASE tracked")
+        cursor.execute("CREATE TABLE tracked.t (id INTEGER PRIMARY KEY, value VARCHAR(100))")
+        cursor.execute("INSERT INTO tracked.t (id, value) VALUES (1, 'before the full backup')")
+        cursor.execute("COMMIT")
+    assert component_count() == 0
+
+    def stream_handler(stream: IO[bytes]) -> None:
+        while stream.read(10 * 1024):
+            pass
+
+    def make_op(incremental_since_checkpoint: str | None = None) -> BasebackupOperation:
+        return BasebackupOperation(
+            encryption_algorithm="AES256",
+            encryption_key=os.urandom(24),
+            mysql_client_params=mysql_master.connect_options,
+            mysql_config_file_name=mysql_master.config_name,
+            mysql_data_directory=mysql_master.config_options.datadir,
+            page_tracking=True,
+            stats=build_statsd_client(),
+            stream_handler=stream_handler,
+            temp_dir=mysql_master.base_dir,
+            incremental_since_checkpoint=incremental_since_checkpoint,
+        )
+
+    op = make_op()
+    op.create_backup()
+    assert op.page_tracking_enabled
+
+    assert component_count() == 1
+    with myhoard_util.mysql_cursor(**mysql_master.connect_options) as cursor:
+        cursor.execute("INSERT INTO tracked.t (id, value) VALUES (2, 'after the full backup')")
+        cursor.execute("COMMIT")
+
+    assert op.checkpoints_file_content is not None
+    caplog.clear()
+    with caplog.at_level("INFO", logger="BasebackupOperation"):
+        inc_op = make_op(incremental_since_checkpoint=op.checkpoints_file_content)
+        inc_op.create_backup()
+    assert inc_op.page_tracking_enabled
+    assert inc_op.checkpoints_file_content is not None
+    assert myhoard_util.parse_xtrabackup_info(inc_op.checkpoints_file_content)["backup_type"] == "incremental"
+    # xtrabackup says so when it uses the page list, and it says something else when it falls back to the full scan
+    assert "Using pagetracking feature for incremental backup" in caplog.text
