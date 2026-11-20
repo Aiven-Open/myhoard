@@ -286,6 +286,53 @@ def test_process_binlog_info(mysql_master: MySQLConfig) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("line", "expected_file"),
+    [
+        # Percona XtraBackup up to 8.4.0-6
+        (
+            "2026-11-20T10:00:00.1-00:00 3 [Note] [MY-011825] [Xtrabackup] "
+            "Compressing, encrypting and streaming ./test0/foo0.ibd",
+            "./test0/foo0.ibd",
+        ),
+        (
+            "2026-11-20T10:00:00.1-00:00 0 [Note] [MY-011825] [Xtrabackup] "
+            "Compressing, encrypting and streaming mysql/slow_log_215.sdi to <STDOUT>",
+            "mysql/slow_log_215.sdi",
+        ),
+        (
+            "2026-11-20T10:00:00.1-00:00 0 [Note] [MY-011825] [Xtrabackup] "
+            "Compressing, encrypting and streaming ./bin.000004 to <STDOUT> up to position 197",
+            "./bin.000004",
+        ),
+        # 8.4.0-7 and newer add the file size, and leave out the space before the name of a tablespace file
+        (
+            "2026-11-20T10:00:00.1-00:00 3 [Note] [MY-011825] [Xtrabackup] space_id: 5, "
+            "Compressing, encrypting and streaming./test0/foo0.ibd, size 114688 (112.00 KiB)",
+            "./test0/foo0.ibd",
+        ),
+        (
+            "2026-11-20T10:00:00.1-00:00 0 [Note] [MY-011825] [Xtrabackup] "
+            "Compressing, encrypting and streaming mysql/slow_log_215.sdi to <STDOUT>, size 12505 (12.21 KiB)",
+            "mysql/slow_log_215.sdi",
+        ),
+        (
+            "2026-11-20T10:00:00.1-00:00 0 [Note] [MY-011825] [Xtrabackup] "
+            "Compressing, encrypting and streaming ./bin.000004 to <STDOUT> up to position 197, size 197 (197 bytes)",
+            "./bin.000004",
+        ),
+        (
+            "2026-11-20T10:00:00.1-00:00 0 [Note] [MY-011825] [Xtrabackup] Compressing, encrypting and streaming <STDOUT>",
+            "<STDOUT>",
+        ),
+    ],
+)
+def test_process_output_line_new_file(line: str, expected_file: str) -> None:
+    op = _make_backup_op()
+    assert op._process_output_line_new_file(line)  # pylint: disable=protected-access
+    assert op.current_file == expected_file
+
+
 def _make_backup_op(
     *, copy_threads: int = 1, estimate_memory: bool = False, lock_ddl: str | None = None, throttle: Any = None
 ) -> BasebackupOperation:
