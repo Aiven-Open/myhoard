@@ -1914,7 +1914,12 @@ class RestoreCoordinator(threading.Thread):
         # the previous stream. The adjusted remote index for that is the number we'll want to add to the indexes
         # for next stream as that has its indexes start from one.
         binlog_stream_offset = self.state["last_processed_index"] or 0
-        self.update_state(binlog_stream_offset=binlog_stream_offset, current_binlog_stream_index=current_index + 1)
+        self.update_state(
+            binlog_stream_offset=binlog_stream_offset,
+            # The buckets of the next stream start from zero, like its indexes start from one
+            current_binlog_bucket=0,
+            current_binlog_stream_index=current_index + 1,
+        )
         self.log.info(
             "Switched to binlog stream index %s, index adjustment set to %s", current_index + 1, binlog_stream_offset
         )

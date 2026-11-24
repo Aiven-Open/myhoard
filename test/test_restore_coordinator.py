@@ -11,9 +11,9 @@ from . import (
 from functools import partial
 from multiprocessing.synchronize import Semaphore
 from myhoard import restore_coordinator
-from myhoard.backup_stream import BackupStream
+from myhoard.backup_stream import BackupStream, BINLOG_BUCKET_SIZE
 from myhoard.binlog_scanner import BinlogScanner
-from myhoard.restore_coordinator import extend_gtid_executed, RestoreCoordinator
+from myhoard.restore_coordinator import BinlogStream, extend_gtid_executed, RestoreCoordinator
 from myhoard.state_manager import StateManager
 from myhoard.statsd import StatsClient
 from myhoard.util import get_xtrabackup_version, GtidRangeDict
@@ -905,6 +905,65 @@ def test_run_basebackup_restore_operation_passes_lock_ddl(
         )
 
     assert restore_operation.call_args.kwargs["lock_ddl"] == expected_lock_ddl
+
+
+def _store_binlog_listing(file_storage: LocalTransfer, *, stream_id: str, binlog_count: int) -> List[str]:
+    """Stores what a restore lists from a backup stream, its promotion and `binlog_count` binlogs numbered from 1,
+    and returns the binlog keys in index order. The objects are empty: listing reads only their metadata."""
+    server_id = 1
+    promotion = {"promoted_at": 1.0, "server_id": server_id, "start_index": 1}
+    file_storage.store_file_from_memory(
+        f"default/{stream_id}/promotions/{server_id}", b"", metadata=myhoard_util.make_fs_metadata(promotion)
+    )
+    keys = []
+    for index in range(1, binlog_count + 1):
+        binlog = {
+            "compression_algorithm": "snappy",
+            "file_size": 1000,
+            "gtid_ranges": [],
+            "local_index": index,
+            "remote_index": index,
+            "server_id": server_id,
+        }
+        key = f"default/{stream_id}/binlogs/{index // BINLOG_BUCKET_SIZE}/{index}_{server_id}"
+        file_storage.store_file_from_memory(key, b"", metadata=myhoard_util.make_fs_metadata(binlog))
+        keys.append(key)
+    return keys
+
+
+@pytest.mark.parametrize(
+    "binlog_counts",
+    [
+        pytest.param([2594, 2450, 900], id="next_streams_end_in_an_earlier_bucket"),
+        pytest.param([501, 1200], id="next_stream_ends_in_a_later_bucket"),
+        pytest.param([BINLOG_BUCKET_SIZE - 1, 3], id="first_stream_fills_its_first_bucket"),
+    ],
+)
+def test_binlogs_of_every_stream_are_listed_after_a_stream_switch(session_tmpdir, binlog_counts: List[int]) -> None:
+    """Each backup stream numbers its binlogs from 1, so the listing of a stream the restore switches to starts
+    from the first bucket again, wherever the previous stream ended.
+
+    The first case is a restore that ended without the binlogs of the streams added while it ran: the first
+    stream had 2594 binlogs and ended in bucket 5, and bucket 5 of the next streams was empty."""
+    storage_directory = session_tmpdir().strpath
+    file_storage = LocalTransfer(storage_directory)
+    binlog_streams: List[BinlogStream] = []
+    expected_keys: List[str] = []
+    for stream_number, binlog_count in enumerate(binlog_counts):
+        stream_id = f"stream{stream_number}"
+        binlog_streams.append({"site": "default", "stream_id": stream_id})
+        expected_keys.extend(_store_binlog_listing(file_storage, stream_id=stream_id, binlog_count=binlog_count))
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = binlog_streams
+    rc.file_storage_config = {"directory": storage_directory, "storage_type": "local"}
+    # Listing also queues the binlogs it finds for download and nothing reads that queue here
+    rc.max_binlog_count = 1
+
+    rc._fetch_more_binlog_infos(force=True)  # pylint: disable=protected-access
+
+    assert [binlog["remote_key"] for binlog in rc.pending_binlogs] == expected_keys
+    assert [binlog["adjusted_remote_index"] for binlog in rc.pending_binlogs] == list(range(1, len(expected_keys) + 1))
+    assert rc.state["restore_errors"] == 0
 
 
 def _build_range(server_uuid: str, start: int, end: int) -> GtidRangeDict:
