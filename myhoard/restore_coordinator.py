@@ -1397,17 +1397,23 @@ class RestoreCoordinator(threading.Thread):
         if not force and self.state["last_poll"] and time.time() - self.state["last_poll"] < self.binlog_poll_interval:
             return
 
-        self._fetch_more_binlogs_infos_for_current_stream()
-        while not self.state["target_time_reached"] and self._switch_to_next_binlog_stream():
-            self._fetch_more_binlogs_infos_for_current_stream()
+        # A stream is left only once it has been listed to its end
+        while self._fetch_more_binlogs_infos_for_current_stream():
+            if self.state["target_time_reached"] or not self._switch_to_next_binlog_stream():
+                return
+        # The listing failed. Repeat it after the poll interval, not on every call
+        self.update_state(last_poll=time.time())
 
-    def _fetch_more_binlogs_infos_for_current_stream(self) -> None:
+    def _fetch_more_binlogs_infos_for_current_stream(self) -> bool:
+        """Returns False when the stream could not be listed to its end"""
         bucket = self.state["current_binlog_bucket"]
         new_binlogs = []
+        listing_failed = False
         while True:
             previous_bucket = bucket
             binlogs, highest_index, target_time_reached = self._list_binlogs_in_bucket(bucket)
             if binlogs is None:
+                listing_failed = True
                 break
 
             assert highest_index is not None, "binlogs was set but highest_index is None"
@@ -1430,7 +1436,7 @@ class RestoreCoordinator(threading.Thread):
                 last_poll=time.time(),
                 target_time_reached=target_time_reached,
             )
-            return
+            return not listing_failed
 
         # Also refresh promotions list so that we know which of the remote
         # binlogs are actually valid
@@ -1459,12 +1465,12 @@ class RestoreCoordinator(threading.Thread):
             self.stats.unexpected_exception(ex=ex, where="RestoreCoordinator._fetch_more_binlog_infos")
             self.state_manager.increment_counter(name="remote_read_errors")
             self.stats.increase("myhoard.remote_read_errors")
-            return
+            return False
 
         if 1 not in promotions:
             self.state_manager.increment_counter(name="restore_errors")
             self.log.error("Missing initial promotion info: %r", promotions)
-            return
+            return False
 
         promotions = {start_index: info["server_id"] for start_index, info in promotions.items()}
         if self.pending_binlogs:
@@ -1480,7 +1486,7 @@ class RestoreCoordinator(threading.Thread):
             self.stats.unexpected_exception(ex=ex, where="RestoreCoordinator._fetch_more_binlog_infos")
             self.state_manager.increment_counter(name="restore_errors")
             self.stats.increase("myhoard.restore_errors")
-            return
+            return False
 
         if target_time_reached:
             # If list of binlogs ends with binlogs that don't have any GTIDs exclude those from the actual
@@ -1501,7 +1507,7 @@ class RestoreCoordinator(threading.Thread):
                 last_poll=time.time(),
                 target_time_reached=target_time_reached,
             )
-            return
+            return not listing_failed
 
         # If persisting new binlogs succeeding but persisting other state failed we might get same binlogs anew
         actual_new_binlogs = []
@@ -1526,6 +1532,7 @@ class RestoreCoordinator(threading.Thread):
 
         self._queue_prefetch_operations()
         self.stats.gauge_int("myhoard.restore.pending_binlogs", len(self.pending_binlogs))
+        return not listing_failed
 
     def _fetch_more_binlogs(self, *, force=False):
         self._fetch_more_binlog_infos(force=force)
@@ -1914,7 +1921,12 @@ class RestoreCoordinator(threading.Thread):
         # the previous stream. The adjusted remote index for that is the number we'll want to add to the indexes
         # for next stream as that has its indexes start from one.
         binlog_stream_offset = self.state["last_processed_index"] or 0
-        self.update_state(binlog_stream_offset=binlog_stream_offset, current_binlog_stream_index=current_index + 1)
+        self.update_state(
+            binlog_stream_offset=binlog_stream_offset,
+            # The buckets of the next stream start from zero, like its indexes start from one
+            current_binlog_bucket=0,
+            current_binlog_stream_index=current_index + 1,
+        )
         self.log.info(
             "Switched to binlog stream index %s, index adjustment set to %s", current_index + 1, binlog_stream_offset
         )

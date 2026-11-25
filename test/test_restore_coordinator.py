@@ -8,12 +8,13 @@ from . import (
     wait_for_condition,
     while_asserts,
 )
+from contextlib import contextmanager
 from functools import partial
 from multiprocessing.synchronize import Semaphore
 from myhoard import restore_coordinator
-from myhoard.backup_stream import BackupStream
+from myhoard.backup_stream import BackupStream, BINLOG_BUCKET_SIZE
 from myhoard.binlog_scanner import BinlogScanner
-from myhoard.restore_coordinator import extend_gtid_executed, RestoreCoordinator
+from myhoard.restore_coordinator import BinlogStream, extend_gtid_executed, RestoreCoordinator
 from myhoard.state_manager import StateManager
 from myhoard.statsd import StatsClient
 from myhoard.util import get_xtrabackup_version, GtidRangeDict
@@ -905,6 +906,142 @@ def test_run_basebackup_restore_operation_passes_lock_ddl(
         )
 
     assert restore_operation.call_args.kwargs["lock_ddl"] == expected_lock_ddl
+
+
+def _store_binlog_listing(file_storage: LocalTransfer, *, stream_id: str, binlog_count: int) -> List[str]:
+    """Stores what a restore lists from a backup stream, its promotion and `binlog_count` binlogs numbered from 1,
+    and returns the binlog keys in index order. The objects are empty: listing reads only their metadata."""
+    server_id = 1
+    promotion = {"promoted_at": 1.0, "server_id": server_id, "start_index": 1}
+    file_storage.store_file_from_memory(
+        f"default/{stream_id}/promotions/{server_id}", b"", metadata=myhoard_util.make_fs_metadata(promotion)
+    )
+    keys = []
+    for index in range(1, binlog_count + 1):
+        binlog = {
+            "compression_algorithm": "snappy",
+            "file_size": 1000,
+            "gtid_ranges": [],
+            "local_index": index,
+            "remote_index": index,
+            "server_id": server_id,
+        }
+        key = f"default/{stream_id}/binlogs/{index // BINLOG_BUCKET_SIZE}/{index}_{server_id}"
+        file_storage.store_file_from_memory(key, b"", metadata=myhoard_util.make_fs_metadata(binlog))
+        keys.append(key)
+    return keys
+
+
+@pytest.mark.parametrize(
+    "binlog_counts",
+    [
+        pytest.param([2594, 2450, 900], id="next_streams_end_in_an_earlier_bucket"),
+        pytest.param([501, 1200], id="next_stream_ends_in_a_later_bucket"),
+        pytest.param([BINLOG_BUCKET_SIZE - 1, 3], id="first_stream_fills_its_first_bucket"),
+    ],
+)
+def test_binlogs_of_every_stream_are_listed_after_a_stream_switch(session_tmpdir, binlog_counts: List[int]) -> None:
+    """Each backup stream numbers its binlogs from 1, so the listing of a stream the restore switches to starts
+    from the first bucket again, wherever the previous stream ended.
+
+    The first case is a restore that ended without the binlogs of the streams added while it ran: the first
+    stream had 2594 binlogs and ended in bucket 5, and bucket 5 of the next streams was empty."""
+    storage_directory = session_tmpdir().strpath
+    file_storage = LocalTransfer(storage_directory)
+    binlog_streams: List[BinlogStream] = []
+    expected_keys: List[str] = []
+    for stream_number, binlog_count in enumerate(binlog_counts):
+        stream_id = f"stream{stream_number}"
+        binlog_streams.append({"site": "default", "stream_id": stream_id})
+        expected_keys.extend(_store_binlog_listing(file_storage, stream_id=stream_id, binlog_count=binlog_count))
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = binlog_streams
+    rc.file_storage_config = {"directory": storage_directory, "storage_type": "local"}
+    # Listing also queues the binlogs it finds for download and nothing reads that queue here
+    rc.max_binlog_count = 1
+
+    rc._fetch_more_binlog_infos(force=True)  # pylint: disable=protected-access
+
+    assert [binlog["remote_key"] for binlog in rc.pending_binlogs] == expected_keys
+    assert [binlog["adjusted_remote_index"] for binlog in rc.pending_binlogs] == list(range(1, len(expected_keys) + 1))
+    assert rc.state["restore_errors"] == 0
+
+
+class _TransferFailingOnce(LocalTransfer):
+    """Local storage whose listing of one key fails once, like a transient object storage error"""
+
+    def __init__(self, directory: str, *, failing_key: str) -> None:
+        super().__init__(directory)
+        self.failing_key: str | None = failing_key
+
+    def list_iter(self, key: str, *args: Any, **kwargs: Any) -> Iterator[Any]:
+        if key == self.failing_key:
+            self.failing_key = None
+            raise OSError(f"Listing {key!r} failed")
+        return super().list_iter(key, *args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "failing_listing,listed_before_retry",
+    [
+        pytest.param("binlogs/2", 999, id="bucket_listing_fails"),
+        pytest.param("promotions", 0, id="promotions_listing_fails"),
+    ],
+)
+def test_next_stream_is_not_used_before_the_current_one_is_listed_to_its_end(
+    session_tmpdir, failing_listing: str, listed_before_retry: int
+) -> None:
+    """A failed listing leaves binlogs of the current stream unlisted. The binlogs of the next stream would
+    follow the ones listed so far with no gap in the indexes, so nothing would tell that some are missing."""
+    storage_directory = session_tmpdir().strpath
+    file_storage = _TransferFailingOnce(storage_directory, failing_key=f"default/stream0/{failing_listing}")
+    expected_keys = _store_binlog_listing(file_storage, stream_id="stream0", binlog_count=1200)
+    expected_keys += _store_binlog_listing(file_storage, stream_id="stream1", binlog_count=50)
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = [{"site": "default", "stream_id": "stream0"}, {"site": "default", "stream_id": "stream1"}]
+    # Listing also queues the binlogs it finds for download and nothing reads that queue here
+    rc.max_binlog_count = 1
+
+    @contextmanager
+    def with_transfer(_storage_config: Any) -> Iterator[LocalTransfer]:
+        yield file_storage
+
+    with patch.object(rc.file_storage_pool, "with_transfer", with_transfer):
+        rc._fetch_more_binlog_infos(force=True)  # pylint: disable=protected-access
+
+        assert [binlog["remote_key"] for binlog in rc.pending_binlogs] == expected_keys[:listed_before_retry]
+        assert rc.state["current_binlog_stream_index"] == 0
+        assert rc.state["remote_read_errors"] == 1
+
+        # The failed listing is not repeated before the poll interval has passed
+        rc._fetch_more_binlog_infos()  # pylint: disable=protected-access
+        assert len(rc.pending_binlogs) == listed_before_retry
+
+        rc._fetch_more_binlog_infos(force=True)  # pylint: disable=protected-access
+
+    assert [binlog["remote_key"] for binlog in rc.pending_binlogs] == expected_keys
+    assert [binlog["adjusted_remote_index"] for binlog in rc.pending_binlogs] == list(range(1, len(expected_keys) + 1))
+    assert rc.state["restore_errors"] == 0
+
+
+def test_stream_with_a_gap_in_its_binlogs_is_not_skipped(session_tmpdir) -> None:
+    """A listing error that does not go away keeps the restore on the stream. Using the next stream would
+    apply its binlogs without the ones of this stream."""
+    storage_directory = session_tmpdir().strpath
+    file_storage = LocalTransfer(storage_directory)
+    stream0_keys = _store_binlog_listing(file_storage, stream_id="stream0", binlog_count=10)
+    file_storage.delete_key(stream0_keys[4])
+    _store_binlog_listing(file_storage, stream_id="stream1", binlog_count=5)
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = [{"site": "default", "stream_id": "stream0"}, {"site": "default", "stream_id": "stream1"}]
+    rc.file_storage_config = {"directory": storage_directory, "storage_type": "local"}
+
+    rc._fetch_more_binlog_infos(force=True)  # pylint: disable=protected-access
+    rc._fetch_more_binlog_infos(force=True)  # pylint: disable=protected-access
+
+    assert not rc.pending_binlogs
+    assert rc.state["current_binlog_stream_index"] == 0
+    assert rc.state["restore_errors"] == 2
 
 
 def _build_range(server_uuid: str, start: int, end: int) -> GtidRangeDict:
