@@ -1044,6 +1044,91 @@ def test_stream_with_a_gap_in_its_binlogs_is_not_skipped(session_tmpdir) -> None
     assert rc.state["restore_errors"] == 2
 
 
+@pytest.mark.parametrize(
+    "binlog_counts,failing_listing",
+    [
+        pytest.param([0, 5], "stream0/binlogs/0", id="first_stream_fails_and_the_next_one_has_the_binlogs"),
+        pytest.param([0, 5], "stream1/binlogs/0", id="next_stream_fails"),
+        pytest.param([10], "stream0/binlogs/0", id="bucket_listing_fails"),
+        pytest.param([10], "stream0/promotions", id="promotions_listing_fails"),
+    ],
+)
+def test_failed_listing_is_repeated_while_a_restore_has_no_binlogs_pending(
+    session_tmpdir, binlog_counts: List[int], failing_listing: str
+) -> None:
+    """With no binlogs pending, a failed listing does not tell whether there are any. Ending the restore
+    there would leave out all of them."""
+    storage_directory = session_tmpdir().strpath
+    file_storage = _TransferFailingOnce(storage_directory, failing_key=f"default/{failing_listing}")
+    binlog_streams: List[BinlogStream] = []
+    expected_keys: List[str] = []
+    for stream_number, binlog_count in enumerate(binlog_counts):
+        stream_id = f"stream{stream_number}"
+        binlog_streams.append({"site": "default", "stream_id": stream_id})
+        expected_keys.extend(_store_binlog_listing(file_storage, stream_id=stream_id, binlog_count=binlog_count))
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = binlog_streams
+    # Listing also queues the binlogs it finds for download and nothing reads that queue here
+    rc.max_binlog_count = 1
+    rc.update_state(phase=RestoreCoordinator.Phase.refreshing_binlogs)
+
+    @contextmanager
+    def with_transfer(_storage_config: Any) -> Iterator[LocalTransfer]:
+        yield file_storage
+
+    with patch.object(rc.file_storage_pool, "with_transfer", with_transfer):
+        rc.refresh_binlogs()
+
+        assert rc.state["phase"] == RestoreCoordinator.Phase.refreshing_binlogs
+        assert not rc.pending_binlogs
+        assert rc.state["remote_read_errors"] == 1
+
+        rc.refresh_binlogs()
+
+    assert rc.state["phase"] == RestoreCoordinator.Phase.applying_binlogs
+    assert [binlog["remote_key"] for binlog in rc.pending_binlogs] == expected_keys
+
+
+def test_restore_with_no_binlogs_ends_after_a_listing_that_did_not_fail(session_tmpdir) -> None:
+    storage_directory = session_tmpdir().strpath
+    _store_binlog_listing(LocalTransfer(storage_directory), stream_id="stream0", binlog_count=0)
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = [{"site": "default", "stream_id": "stream0"}]
+    rc.file_storage_config = {"directory": storage_directory, "storage_type": "local"}
+    rc.update_state(phase=RestoreCoordinator.Phase.refreshing_binlogs)
+
+    rc.refresh_binlogs()
+
+    assert rc.state["phase"] == RestoreCoordinator.Phase.finalizing
+    assert rc.state["remote_read_errors"] == 0
+    assert rc.state["restore_errors"] == 0
+
+
+def test_restore_ends_without_binlogs_when_the_listing_keeps_failing(session_tmpdir) -> None:
+    """A listing error that does not go away does not hold the restore for good. Nothing else would end it:
+    completion can be forced only while binlogs are being applied."""
+    storage_directory = session_tmpdir().strpath
+    file_storage = LocalTransfer(storage_directory)
+    keys = _store_binlog_listing(file_storage, stream_id="stream0", binlog_count=10)
+    file_storage.delete_key(keys[4])
+    rc = _make_minimal_coordinator(session_tmpdir, stream_id="stream0")
+    rc.binlog_streams = [{"site": "default", "stream_id": "stream0"}]
+    rc.file_storage_config = {"directory": storage_directory, "storage_type": "local"}
+    rc.MAX_BINLOG_REFRESH_FAILURES = 3
+    rc.update_state(phase=RestoreCoordinator.Phase.refreshing_binlogs)
+
+    rc.refresh_binlogs()
+    rc.refresh_binlogs()
+
+    assert rc.state["phase"] == RestoreCoordinator.Phase.refreshing_binlogs
+
+    rc.refresh_binlogs()
+
+    assert rc.state["phase"] == RestoreCoordinator.Phase.finalizing
+    assert not rc.pending_binlogs
+    assert rc.state["restore_errors"] == 3
+
+
 def _build_range(server_uuid: str, start: int, end: int) -> GtidRangeDict:
     return {"server_uuid": server_uuid, "start": start, "end": end, "server_id": 0, "start_ts": 0, "end_ts": 0}
 
