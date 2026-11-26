@@ -168,6 +168,10 @@ class RestoreCoordinator(threading.Thread):
     ITERATION_SLEEP_SHORT = 0.2
     ITERATION_SLEEP_LONG = 10
 
+    # How many failed listings in a row a restore with no binlogs pending repeats before it ends without
+    # binlogs. One listing per ITERATION_SLEEP_LONG, so this is five minutes
+    MAX_BINLOG_REFRESH_FAILURES = 30
+
     # If restoring basebackup fails four times for whatever reason, mark this restoration as
     # failed (Phase.failed_basebackup). This is only intended to be triggered in cases where
     # basebackup is corrupt and cannot be restored. Controller will try restoring older basebackup
@@ -285,6 +289,7 @@ class RestoreCoordinator(threading.Thread):
         self.basebackup_bytes_downloaded = 0
         self.basebackup_restore_operation: Optional[BasebackupRestoreOperation] = None
         self.binlog_poll_interval = self.BINLOG_POLL_INTERVAL
+        self.binlog_refresh_failures = 0
         # Binary logs may be fetched from multiple consecutive backup streams. This is utilized if restoring
         # a basebackup fails for any reason but earlier backups are available and basebackup from one of those
         # can be successfully restored.
@@ -902,12 +907,25 @@ class RestoreCoordinator(threading.Thread):
         self.update_state(phase=self.Phase.refreshing_binlogs)
 
     def refresh_binlogs(self) -> None:
-        self._fetch_more_binlog_infos(force=True)
-        if not self.pending_binlogs:
+        listed = self._fetch_more_binlog_infos(force=True)
+        if self.pending_binlogs:
+            self.update_state(phase=self.Phase.applying_binlogs)
+        elif listed:
             self.log.info("No binary logs available, marking restore completed immediately")
             self.update_state(phase=self.Phase.finalizing)
         else:
-            self.update_state(phase=self.Phase.applying_binlogs)
+            # The listing failed, so there may be binlogs. While the phase stays, run() lists again
+            self.binlog_refresh_failures += 1
+            if self.binlog_refresh_failures < self.MAX_BINLOG_REFRESH_FAILURES:
+                self.log.warning(
+                    "Listing binary logs failed %s times and none are pending, listing again", self.binlog_refresh_failures
+                )
+            else:
+                self.log.error(
+                    "Listing binary logs failed %s times and none are pending, completing restore without binary logs",
+                    self.binlog_refresh_failures,
+                )
+                self.update_state(phase=self.Phase.finalizing)
 
     def apply_binlogs(self) -> None:
         binlogs = self._get_binlogs_to_apply()
@@ -1391,18 +1409,20 @@ class RestoreCoordinator(threading.Thread):
         self.log.info("Found %s binlogs from bucket %s in %.2f seconds", len(new_binlogs), bucket, duration)
         return new_binlogs, highest_index, bool(target_time_reached_by_server)
 
-    def _fetch_more_binlog_infos(self, force: bool = False) -> None:
+    def _fetch_more_binlog_infos(self, force: bool = False) -> bool:
+        """Returns False when a listing made by this call failed, so there may be binlogs that are not pending"""
         if self.state["target_time_reached"]:
-            return
+            return True
         if not force and self.state["last_poll"] and time.time() - self.state["last_poll"] < self.binlog_poll_interval:
-            return
+            return True
 
         # A stream is left only once it has been listed to its end
         while self._fetch_more_binlogs_infos_for_current_stream():
             if self.state["target_time_reached"] or not self._switch_to_next_binlog_stream():
-                return
+                return True
         # The listing failed. Repeat it after the poll interval, not on every call
         self.update_state(last_poll=time.time())
+        return False
 
     def _fetch_more_binlogs_infos_for_current_stream(self) -> bool:
         """Returns False when the stream could not be listed to its end"""
